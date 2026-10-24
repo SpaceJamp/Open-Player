@@ -31,15 +31,20 @@ Vsr::~Vsr() {
     cudaFree(scratch_);
 }
 
-bool Vsr::open(const std::string& onnx, int w, int h, cudaStream_t s) {
+int Vsr::model_scale(const std::string& onnx) {
     // export.py writes the scale into the .ref header; the ONNX itself only has symbolic sizes
-    auto ref = read_file(fs::path(onnx).replace_extension(".ref"));
-    if (ref.size() < 12) {
+    int hdr[3] = {};
+    std::ifstream(fs::path(onnx).replace_extension(".ref"), std::ios::binary).read((char*)hdr, sizeof hdr);
+    return hdr[0];
+}
+
+bool Vsr::open(const std::string& onnx, int w, int h, cudaStream_t s) {
+    w_ = w, h_ = h, s_ = s, scale_ = model_scale(onnx);
+    if (scale_ <= 0) {
         fprintf(stderr, "vsr: missing %s (export.py writes it next to the .onnx)\n",
                 fs::path(onnx).replace_extension(".ref").c_str());
         return false;
     }
-    w_ = w, h_ = h, s_ = s, scale_ = ((int*)ref.data())[0];
     if (!load_or_build(onnx, true)) return false;
 
     size_t n = 3ull * w * h, N = n * scale_ * scale_;
@@ -174,10 +179,30 @@ int Vsr::selftest(const std::string& onnx) {
     bool up_ok = up_err < 2e-3;  // fp16 rounding of values in [0,1] is under 5e-4; a half-pixel shift is ~1e-1
     if (!up_ok) printf("selftest FAIL: reset upscale differs from PyTorch by up to %.4f\n", up_err);
 
+    // shrink kernel: bilinear sampling reproduces a linear gradient exactly, so shrinking f(x,y) = x + 2y from
+    // w x h to 3/4 size must give f at each output pixel's centre mapped back (borders clamp, so interior only)
+    int W = w * 3 / 4, H = h * 3 / 4;
+    std::vector<__half> grad(3ull * w * h), small(3ull * W * H);
+    for (int c = 0; c < 3; c++)
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) grad[(size_t)c * w * h + y * w + x] = __float2half((x + 2 * y) / 256.f);
+    cudaMemcpy(v.lr_[0], grad.data(), grad.size() * 2, cudaMemcpyHostToDevice);
+    shrink_rgb(v.lr_[0], w, h, v.lr_[1], W, H, st);
+    cudaMemcpyAsync(small.data(), v.lr_[1], small.size() * 2, cudaMemcpyDeviceToHost, st);
+    cudaStreamSynchronize(st);
+    double shrink_err = 0;
+    for (int y = 2; y < H - 2; y++)
+        for (int x = 2; x < W - 2; x++) {
+            double u = (x + 0.5) * w / W - 0.5, vv = (y + 0.5) * h / H - 0.5;
+            shrink_err = std::fmax(shrink_err, std::fabs(__half2float(small[y * W + x]) - (u + 2 * vv) / 256));
+        }
+    bool shrink_ok = shrink_err < 2e-3;  // fp16 rounding of values up to ~0.8
+    if (!shrink_ok) printf("selftest FAIL: shrink kernel off by up to %.4f\n", shrink_err);
+
     double psnr = -10 * std::log10(se / N + 1e-12);
     // fp16 vs an fp32 reference on random-noise input: rounding alone lands around 43-47 dB (TensorRT 11.4 on
     // an RTX 5080: 43.7; PyTorch fp16: 46.3), while the same engine in fp32 matches to 81 dB. Wiring bugs land far lower.
-    bool ok = psnr > 40 && cut_ok && up_ok;
+    bool ok = psnr > 40 && cut_ok && up_ok && shrink_ok;
     printf("selftest %s: %.1f dB vs PyTorch, max error %.4f\n", ok ? "PASS" : "FAIL", psnr, worst);
     return ok ? 0 : 1;
 }

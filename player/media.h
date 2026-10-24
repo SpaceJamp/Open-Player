@@ -53,6 +53,8 @@ private:
     void run();
     void decode(AVCodecContext* c, AVPacket* pkt);
     void clear_queue();
+    void clear_backlog();
+    bool software_fallback();  // swap a GPU-only video decoder for FFmpeg's default; decode thread only
 
     AVFormatContext* fmt_ = nullptr;
     AVCodecContext *vctx_ = nullptr, *actx_ = nullptr;
@@ -63,12 +65,14 @@ private:
     int vidx_ = -1, aidx_ = -1;
     double duration_ = 0, start_ = 0, fps_ = 0;
     std::atomic<int> dropped_{0};
+    long video_frames_ = 0;  // decoded so far; the software fallback is only allowed before the first one
     std::string decode_desc_;
 
     std::thread thread_;
     std::mutex m_;
     std::condition_variable cv_;
     std::deque<Queued> queue_;
+    std::deque<AVPacket*> backlog_;  // compressed video packets read ahead to reach audio; decode thread only
     bool quit_ = false, seek_req_ = false;
     std::atomic<bool> eof_{false};  // also read by finished() callers on the main thread
     double seek_to_ = 0, skip_until_ = -1, last_vpts_ = -0.04;  // last_vpts_: for frames without timestamps

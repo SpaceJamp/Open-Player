@@ -17,7 +17,8 @@
 #include "vsr.h"
 
 static const char* USAGE =
-    "usage: open-player <video> [--model vsr.onnx] [--no-vsr] [--stats]\n"
+    "usage: open-player <video> [--model vsr.onnx] [--no-vsr] [--stats] [--screen N]\n"
+    "--screen N: play on monitor N (1 = first; --check lists them); upscaling is planned for that monitor\n"
     "       open-player --selftest [vsr.onnx]   compare the TensorRT engine against PyTorch\n"
     "       open-player --check [vsr.onnx]      test each part of the setup on its own\n"
     "--stats: print a JSON line of timings every second (the control panel's Diagnostics reads these)\n"
@@ -68,6 +69,18 @@ static int check(const char* model) {
                                                                      : ", frames copied through the CPU (slower)"));
             } else line("FAIL", "Vulkan", "no Vulkan GPU for the window (on WSL install vulkan-dzn)");
         } else line("FAIL", "Window", SDL_GetError());
+        int nd = 0;
+        SDL_DisplayID* ids = SDL_GetDisplays(&nd);
+        for (int i = 0; i < nd; i++)
+            if (const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(ids[i])) {
+                const char* name = SDL_GetDisplayName(ids[i]);
+                char d[160];
+                snprintf(d, sizeof d, "%s, %ldx%ld @ %.0f Hz%s (--screen %d)", name ? name : "?",
+                         std::lround(m->w * m->pixel_density), std::lround(m->h * m->pixel_density), m->refresh_rate,
+                         ids[i] == SDL_GetPrimaryDisplay() ? ", primary" : "", i + 1);
+                line("INFO", ("Screen " + std::to_string(i + 1)).c_str(), d);
+            }
+        SDL_free(ids);
         SDL_AudioDeviceID dev = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, nullptr);
         line(dev ? "PASS" : "WARN", "Audio", dev ? SDL_GetAudioDeviceName(dev) : "no audio output: video plays silent");
         if (dev) SDL_CloseAudioDevice(dev);
@@ -84,8 +97,10 @@ static int check(const char* model) {
 int main(int argc, char** argv) {
     const char *path = nullptr, *model = "vsr.onnx";
     bool vsr_on = true, selftest = false, checking = false, stats = false;
+    int screen = 0;  // --screen N, counted from 1; 0 = the primary display
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
+        else if (!strcmp(argv[i], "--screen") && i + 1 < argc) screen = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-vsr")) vsr_on = false;
         else if (!strcmp(argv[i], "--stats")) stats = true;
         else if (!strcmp(argv[i], "--selftest")) selftest = true;
@@ -98,6 +113,11 @@ int main(int argc, char** argv) {
     if (!path) return fputs(USAGE, stderr), 2;
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) return fprintf(stderr, "SDL: %s\n", SDL_GetError()), 1;
+    int n_disp = 0;
+    SDL_DisplayID* ids = SDL_GetDisplays(&n_disp);
+    SDL_DisplayID screen_id = !screen ? SDL_GetPrimaryDisplay() : screen > 0 && screen <= n_disp ? ids[screen - 1] : 0;
+    SDL_free(ids);
+    if (!screen_id) return fprintf(stderr, "no screen %d: this machine has %d (see --check)\n", screen, n_disp), 2;
     // hidden until we know the video size; Vulkan needs the window first to choose the GPU
     SDL_Window* win = SDL_CreateWindow("Open Player", 1280, 720,
                                        SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY);
@@ -117,22 +137,43 @@ int main(int argc, char** argv) {
         // Like RTX VSR: only upscale video smaller than the screen in both directions. A 4K video on a 4K screen,
         // including 3840x1608 widescreen, would be blown up to 8K (7 fps on an RTX 5080) just to be shrunk back.
         int screen_w = 0, screen_h = 0;
-        if (const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(win)))
+        if (const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(screen_id))
             screen_w = (int)std::lround(m->w * m->pixel_density), screen_h = (int)std::lround(m->h * m->pixel_density);
         bool worth_it = !screen_h || (w < screen_w && h < screen_h);
 
         // show the window now: building a TensorRT engine for a new resolution takes up to a minute
         SDL_Rect area;
-        SDL_GetDisplayUsableBounds(SDL_GetDisplayForWindow(win), &area);
+        SDL_GetDisplayUsableBounds(screen_id, &area);
         float fit = std::fmin(1.f, std::fmin(0.9f * area.w / w, 0.9f * area.h / h));
         SDL_SetWindowSize(win, (int)(w * fit), (int)(h * fit));
-        SDL_SetWindowPosition(win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+        SDL_SetWindowPosition(win, SDL_WINDOWPOS_CENTERED_DISPLAY(screen_id), SDL_WINDOWPOS_CENTERED_DISPLAY(screen_id));
         SDL_SetWindowTitle(win, "Open Player: preparing the upscaler (a new resolution takes up to a minute)");
         SDL_ShowWindow(win);
+        SDL_SyncWindow(win);
+        // Wayland compositors (WSLg's too) ignore window positions; fullscreen is the one way to pick a monitor
+        if (screen && SDL_GetDisplayForWindow(win) != screen_id) {
+            SDL_SetWindowFullscreenMode(win, SDL_GetDesktopDisplayMode(screen_id));
+            SDL_SetWindowFullscreen(win, true);
+            SDL_SyncWindow(win);
+            fprintf(stderr, "screen %d: the window system won't place windows, so playing fullscreen there\n", screen);
+        }
         SDL_PumpEvents();
 
+        // when the network's fixed factor would overshoot the screen (1440p x2 = 5K on a 4K screen), shrink the
+        // video first so the output lands exactly on it: 2560x1440 -> 1920x1080 -> 3840x2160. Gives up a little
+        // source detail for 25 ms per frame instead of 46 (which dropped 1440p30 to 18 fps with the standard model).
+        int ms = worth_it ? Vsr::model_scale(model) : 0, nw = w, nh = h;
+        if (ms > 0 && screen_h && (w * ms > screen_w || h * ms > screen_h)) {
+            double k = std::fmin((double)screen_w / (w * ms), (double)screen_h / (h * ms));
+            nw = (int)std::lround(w * k) & ~1, nh = (int)std::lround(h * k) & ~1;
+            fprintf(stderr, "VSR: shrinking %dx%d to %dx%d first, so %dx lands on the %dx%d screen\n", w, h, nw, nh,
+                    ms, screen_w, screen_h);
+        }
         Vsr vsr;
-        bool have_vsr = worth_it && vsr.open(model, w, h, st);
+        bool have_vsr = worth_it && vsr.open(model, nw, nh, st);
+        bool shrink = have_vsr && (nw != w || nh != h);
+        __half* full = nullptr;  // full-size RGB frame, when it gets shrunk before the network
+        if (shrink) cudaMalloc(&full, 3ull * w * h * 2);
         if (!worth_it)
             fprintf(stderr, "VSR off: the video (%dx%d) already fills the screen (%dx%d)\n", w, h, screen_w, screen_h);
         else if (!have_vsr) fprintf(stderr, "VSR unavailable (no %s?), playing without upscaling\n", model);
@@ -140,7 +181,7 @@ int main(int argc, char** argv) {
         int s = have_vsr ? vsr.scale() : 1;
         __half* plain = nullptr;  // RGB frame when there is no VSR engine to borrow the input buffer from
         if (!have_vsr) cudaMalloc(&plain, 3ull * w * h * 2);
-        if (!disp.alloc(w * s, h * s)) return fprintf(stderr, "display: out of GPU memory\n"), 1;
+        if (!disp.alloc(std::max(w, nw * s), std::max(h, nh * s))) return fprintf(stderr, "display: out of GPU memory\n"), 1;
 
         const double dur = media.duration();
         bool running = true, paused = false, reset = true, step = false, size_warned = false;
@@ -224,14 +265,15 @@ int main(int argc, char** argv) {
             double pts;
             if ((!paused || step) && media.take_due(clock(), step, f, pts)) {
                 if (f->width == w && f->height == h) {
-                    __half* in = have_vsr ? vsr.input() : plain;
+                    __half* in = shrink ? full : have_vsr ? vsr.input() : plain;
                     Uint64 u0 = SDL_GetTicksNS();
                     cudaEventRecord(ev[0], st);
                     YuvFrame yuv = media.to_gpu(f, st);
                     diag.upload.add((SDL_GetTicksNS() - u0) / 1e6);
                     yuv_to_rgb(yuv, in, st);
+                    if (vsr_on && shrink) shrink_rgb(full, w, h, vsr.input(), nw, nh, st);
                     cudaEventRecord(ev[1], st);
-                    if (vsr_on) shown = vsr.run(reset), sw = w * s, sh = h * s, reset = false;
+                    if (vsr_on) shown = vsr.run(reset), sw = nw * s, sh = nh * s, reset = false;
                     else shown = in, sw = w, sh = h;
                     cudaEventRecord(ev[2], st);
                     cudaStreamSynchronize(st);  // done reading the decoder surface: hand it back to FFmpeg
@@ -276,10 +318,13 @@ int main(int argc, char** argv) {
                 last_report = now();
                 if (!info_done && !media.decode_desc().empty()) {
                     printf("info {\"gpu\":\"%s\",\"display\":\"%s\",\"decode\":\"%s\",\"video\":\"%dx%d@%.2f\","
-                           "\"screen\":\"%dx%d\",\"vsr\":\"%s\",\"tensorrt\":\"%s\"}\n",
+                           "\"screen\":\"%dx%d\",\"window_on_planned_screen\":%s,\"vsr\":\"%s\",\"tensorrt\":\"%s\"}\n",
                            disp.gpu_name(), disp.zero_copy() ? "zero-copy" : "CPU copy", media.decode_desc().c_str(),
                            w, h, media.fps(), screen_w, screen_h,
-                           have_vsr ? (std::to_string(s) + "x").c_str() : worth_it ? "none" : "off (fills screen)",
+                           SDL_GetDisplayForWindow(win) == screen_id ? "true" : "false",
+                           have_vsr ? (std::to_string(s) + "x" +
+                                       (shrink ? " from " + std::to_string(nw) + "x" + std::to_string(nh) : "")).c_str()
+                                    : worth_it ? "none" : "off (fills screen)",
                            trt_version().c_str());
                     info_done = true;
                 }
@@ -299,6 +344,7 @@ int main(int argc, char** argv) {
         }
         for (auto& e : ev) cudaEventDestroy(e);
         cudaFree(plain);
+        cudaFree(full);
         fprintf(stderr, "shown %d frames, stopped at %s\n", frames_shown, clock_text(pos).c_str());
         rc = 0;
     }

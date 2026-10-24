@@ -12,6 +12,7 @@ public:
     // Loads the engine for a w x h input, building and caching it as <onnx>.<w>x<h>.engine the first time.
     bool open(const std::string& onnx, int w, int h, cudaStream_t s);
     int scale() const { return scale_; }
+    static int model_scale(const std::string& onnx);  // the model's upscale factor, 0 if it isn't exported
     __half* input() { return lr_[i_]; }  // write the next frame here: planar fp16 RGB, 3 x h x w
     // Upscales input(); returns 3 x (h*scale) x (w*scale), valid until the next run(). reset = new shot / seek.
     const __half* run(bool reset);

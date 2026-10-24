@@ -65,8 +65,14 @@ cmake --build build -j
 The first time it plays a given resolution, it builds a TensorRT engine for it (up to a minute) and caches it
 next to the model.
 
-Like RTX Video Super Resolution, VSR only runs when the video is smaller than the screen. A 4K video on a 4K
-screen plays as is.
+The network always upscales 2×, and the window stretches the result to fit. It's planned for the screen given
+with `--screen N` (default: the primary; `--check` lists your screens). Wayland doesn't let apps place windows,
+so the player then goes fullscreen on that screen. On WSL the window can still open on the main monitor: drag
+it across, and the plan stays right.
+- Video at least as large as the screen in either direction: no VSR. A 4K video on a 4K screen plays as is.
+- Video whose 2× would overshoot the screen: shrunk first so the 2× lands exactly on it. On a 4K screen,
+  1440p becomes 1080p → 2160p; on a 1440p screen, 1080p becomes 720p → 1440p.
+- Smaller video: 2×, then stretched to fit (720p → 1440p → 4K on a 4K screen).
 
 Speed on an RTX 5080, 1080p → 4K, measured with `--stats`:
 
@@ -92,8 +98,9 @@ Speed on an RTX 5080, 1080p → 4K, measured with `--stats`:
 ./build/open-player movie.mkv --model vsr.onnx --stats   # one JSON line of timings per second
 ```
 
-After changing the player, run `bash tests/smoke.sh vsr.onnx`: it plays generated clips (needs a display)
-and runs the model self-test.
+After changing the player, run `bash tests/smoke.sh vsr.onnx` (plays generated clips and runs the model
+self-test) and `bash tests/codecs.sh` (encodes a clip in every format ffmpeg can write, from H.264 to ProRes
+and 7.1 audio, and checks each plays with sound). Both need a display.
 
 Each `--stats` line ends with a `verdict`: `ok`, or the stage that cost the most time in a second where frames
 were dropped (decode, upload, convert, vsr, display copy, present).
@@ -103,5 +110,7 @@ were dropped (decode, upload, convert, vsr, display copy, present).
 ## Limits
 
 - SDR only. HDR video plays with washed-out colors.
+- Interlaced video (DVDs, TV recordings) plays without deinterlacing, so motion shows comb lines.
+- Audio-only files don't open, and there's no switching between audio tracks yet.
 - On WSL, CUDA and Vulkan can't share memory, so each frame goes through the CPU. Native Linux is zero-copy.
 - Training uses a clean bicubic downscale, so compression artifacts in streamed video get sharpened as well.

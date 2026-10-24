@@ -9,8 +9,9 @@ extern "C" {
 #include <cmath>
 #include <cstdio>
 
-static constexpr size_t QUEUE_MAX = 8;    // decoded video frames buffered ahead
-static constexpr double AUDIO_AHEAD = 1;  // seconds of audio buffered ahead
+static constexpr size_t QUEUE_MAX = 8;      // decoded video frames buffered ahead
+static constexpr double AUDIO_AHEAD = 1;    // seconds of audio buffered ahead
+static constexpr size_t BACKLOG_MAX = 240;  // compressed video packets read ahead to reach audio (seconds' worth)
 
 static AVPixelFormat pick_cuda(AVCodecContext*, const AVPixelFormat* fmts) {
     for (const AVPixelFormat* p = fmts; *p != AV_PIX_FMT_NONE; p++)
@@ -18,8 +19,21 @@ static AVPixelFormat pick_cuda(AVCodecContext*, const AVPixelFormat* fmts) {
     return fmts[0];  // codec NVDEC can't do: decode in software
 }
 
+// With NVDEC available, prefer a decoder that can use it: FFmpeg's default isn't always one (for AV1 it is
+// dav1d, CPU only; 4K60 10-bit AV1 then dropped a third of its frames). *_cuvid wrappers are skipped.
+static const AVCodec* pick_decoder(AVCodecID id, bool hw) {
+    void* it = nullptr;
+    while (hw)
+        if (const AVCodec* c = av_codec_iterate(&it)) {
+            if (c->id != id || !av_codec_is_decoder(c) || (c->capabilities & AV_CODEC_CAP_HARDWARE)) continue;
+            for (int i = 0; const AVCodecHWConfig* h = avcodec_get_hw_config(c, i); i++)
+                if (h->device_type == AV_HWDEVICE_TYPE_CUDA) return c;
+        } else break;
+    return avcodec_find_decoder(id);
+}
+
 static AVCodecContext* open_decoder(AVStream* st, AVBufferRef* hw) {
-    const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
+    const AVCodec* dec = pick_decoder(st->codecpar->codec_id, hw);
     if (!dec) return nullptr;
     AVCodecContext* c = avcodec_alloc_context3(dec);
     avcodec_parameters_to_context(c, st->codecpar);
@@ -79,6 +93,7 @@ Media::~Media() {
     cv_.notify_all();
     if (thread_.joinable()) thread_.join();
     clear_queue();
+    clear_backlog();
     if (audio_) SDL_DestroyAudioStream(audio_);
     av_frame_free(&frame_);
     avcodec_free_context(&vctx_);
@@ -103,13 +118,18 @@ double Media::audio_clock() const {
 
 void Media::run() {
     AVPacket* pkt = av_packet_alloc();
-    auto audio_ahead = [&] { return audio_ ? SDL_GetAudioStreamQueued(audio_) / (8.0 * actx_->sample_rate) : 0; };
+    auto audio_low = [&] { return audio_ && SDL_GetAudioStreamQueued(audio_) / (8.0 * actx_->sample_rate) < AUDIO_AHEAD; };
+    bool read_all = false;  // every packet read; what's left is the backlog and the decoders' insides
     while (true) {
+        bool room = false;
         {
             std::unique_lock l(m_);
             bool go = cv_.wait_for(l, std::chrono::milliseconds(10), [&] {  // audio drains without notifying: poll
-                return quit_ || seek_req_ ||
-                       (!eof_ && queue_.size() < QUEUE_MAX && (audio_ahead() < AUDIO_AHEAD || queue_.size() < 2));
+                room = queue_.size() < QUEUE_MAX;
+                // Files store audio and video in alternating chunks, often further apart than QUEUE_MAX frames.
+                // So when audio runs low, keep reading past a full video queue and park the video packets.
+                bool read_for_audio = !read_all && audio_low() && backlog_.size() < BACKLOG_MAX;
+                return quit_ || seek_req_ || (!eof_ && (room || read_for_audio));
             });
             if (quit_) break;
             if (seek_req_) {
@@ -120,32 +140,64 @@ void Media::run() {
                 avcodec_flush_buffers(vctx_);
                 if (actx_) avcodec_flush_buffers(actx_);
                 clear_queue();
+                clear_backlog();
                 if (audio_) SDL_ClearAudioStream(audio_);
-                audio_end_ = t, skip_until_ = t, eof_ = false;  // decode from the keyframe, show from t
+                audio_end_ = t, skip_until_ = t, eof_ = false, read_all = false;  // decode from the keyframe, show from t
                 last_vpts_ = t - 1 / (fps_ > 0 ? fps_ : 25);
                 serial_++;
                 continue;
             }
             if (!go) continue;
         }
-        if (av_read_frame(fmt_, pkt) < 0) {
+        if (room && !backlog_.empty()) {  // video read ahead for the audio's sake, now there's room for it
+            AVPacket* p = backlog_.front();
+            backlog_.pop_front();
+            decode(vctx_, p);
+            av_packet_free(&p);
+            continue;
+        }
+        if (read_all) {
+            if (!room) continue;
             decode(vctx_, nullptr);  // drain frames still inside the decoders
             if (actx_) decode(actx_, nullptr);
             std::lock_guard l(m_);
             eof_ = true;
             continue;
         }
-        if (pkt->stream_index == vidx_) decode(vctx_, pkt);
+        if (av_read_frame(fmt_, pkt) < 0) {
+            read_all = true;
+            continue;
+        }
+        if (pkt->stream_index == vidx_ && (room && backlog_.empty())) decode(vctx_, pkt);
+        else if (pkt->stream_index == vidx_) backlog_.push_back(av_packet_clone(pkt));
         else if (pkt->stream_index == aidx_) decode(actx_, pkt);
         av_packet_unref(pkt);
     }
     av_packet_free(&pkt);
 }
 
+void Media::clear_backlog() {
+    for (AVPacket*& p : backlog_) av_packet_free(&p);
+    backlog_.clear();
+}
+
+bool Media::software_fallback() {
+    const AVCodec* sw = avcodec_find_decoder(vctx_->codec_id);
+    if (!sw || sw == vctx_->codec) return false;  // already the default decoder: nothing to fall back to
+    fprintf(stderr, "%s can't decode this stream on the GPU, using %s\n", vctx_->codec->name, sw->name);
+    avcodec_free_context(&vctx_);
+    vctx_ = open_decoder(fmt_->streams[vidx_], nullptr);
+    return vctx_ != nullptr;
+}
+
 void Media::decode(AVCodecContext* c, AVPacket* pkt) {
-    if (avcodec_send_packet(c, pkt) < 0) return;  // corrupt packet: skip it
+    int r = avcodec_send_packet(c, pkt);
+    // a GPU-only decoder (FFmpeg's AV1) fails on streams NVDEC can't do, e.g. AV1 4:4:4: switch before any frame
+    if (r < 0 && c == vctx_ && !video_frames_ && software_fallback()) return decode(vctx_, pkt);
+    if (r < 0) return;  // corrupt packet: skip it
     AVRational tb = fmt_->streams[c == vctx_ ? vidx_ : aidx_]->time_base;
-    while (avcodec_receive_frame(c, frame_) == 0) {
+    while ((r = avcodec_receive_frame(c, frame_)) == 0) {
+        if (c == vctx_) video_frames_++;
         bool has_pts = frame_->best_effort_timestamp != AV_NOPTS_VALUE;
         double pts = has_pts ? frame_->best_effort_timestamp * av_q2d(tb) - start_ : NAN;
         if (c == vctx_) {
@@ -174,6 +226,8 @@ void Media::decode(AVCodecContext* c, AVPacket* pkt) {
         }
         av_frame_unref(frame_);
     }
+    bool failed = r != AVERROR(EAGAIN) && r != AVERROR_EOF;
+    if (failed && c == vctx_ && !video_frames_ && pkt && software_fallback()) decode(vctx_, pkt);
 }
 
 bool Media::take_due(double clock, bool force, AVFrame*& frame, double& pts) {

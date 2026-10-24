@@ -18,6 +18,9 @@ void yuv_to_rgb(const YuvFrame& f, __half* rgb, cudaStream_t s);
 void reset_state(const __half* cur, __half* prev, __half* prev_hr, int w, int h, int scale, const float* diff_sum,
                  float max_sum, cudaStream_t s);
 
+// Planar RGB w x h -> W x H, smaller by up to 2x (2x2 bilinear samples per output pixel)
+void shrink_rgb(const __half* src, int w, int h, __half* dst, int W, int H, cudaStream_t s);
+
 // *sum = sum of |a-b| over n values (sum: one device float), without waiting
 void abs_diff_sum(const __half* a, const __half* b, int n, float* sum, cudaStream_t s);
 

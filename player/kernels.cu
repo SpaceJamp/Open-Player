@@ -27,21 +27,25 @@ void yuv_to_rgb(const YuvFrame& f, __half* rgb, cudaStream_t s) {
     else k_yuv_to_rgb<uint8_t><<<grid2d(f.w, f.h), dim3(16, 16), 0, s>>>(f, rgb);
 }
 
+// Sample planar channel p at (u, v) in pixel-centre coordinates, clamped at the edges like torch's bilinear
+__device__ float bilinear(const __half* p, int w, int h, float u, float v) {
+    u = fminf(fmaxf(u, 0.f), w - 1.f), v = fminf(fmaxf(v, 0.f), h - 1.f);
+    int x0 = (int)u, y0 = (int)v, x1 = min(x0 + 1, w - 1), y1 = min(y0 + 1, h - 1);
+    float fx = u - x0, fy = v - y0;
+    float top = __half2float(p[y0 * w + x0]) * (1 - fx) + __half2float(p[y0 * w + x1]) * fx;
+    float bot = __half2float(p[y1 * w + x0]) * (1 - fx) + __half2float(p[y1 * w + x1]) * fx;
+    return top * (1 - fy) + bot * fy;
+}
+
 __global__ void k_reset(const __half* cur, __half* prev, __half* prev_hr, int w, int h, int scale,
                         const float* diff_sum, float max_sum) {
     if (diff_sum && *diff_sum <= max_sum) return;  // no scene cut: keep the history
     int W = w * scale, H = h * scale;
     int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= W || y >= H) return;
-    // prev_hr = bilinear upscale of cur, same sampling as torch F.interpolate(align_corners=False)
-    float sx = fmaxf((x + 0.5f) / scale - 0.5f, 0.f), sy = fmaxf((y + 0.5f) / scale - 0.5f, 0.f);
-    int x0 = (int)sx, y0 = (int)sy, x1 = min(x0 + 1, w - 1), y1 = min(y0 + 1, h - 1);
-    float fx = sx - x0, fy = sy - y0;
-    for (int c = 0; c < 3; c++) {
+    for (int c = 0; c < 3; c++) {  // prev_hr = bilinear upscale of cur, as torch F.interpolate(align_corners=False)
         const __half* p = cur + c * w * h;
-        float top = __half2float(p[y0 * w + x0]) * (1 - fx) + __half2float(p[y0 * w + x1]) * fx;
-        float bot = __half2float(p[y1 * w + x0]) * (1 - fx) + __half2float(p[y1 * w + x1]) * fx;
-        prev_hr[c * W * H + y * W + x] = __float2half(top * (1 - fy) + bot * fy);
+        prev_hr[c * W * H + y * W + x] = __float2half(bilinear(p, w, h, (x + 0.5f) / scale - 0.5f, (y + 0.5f) / scale - 0.5f));
         if (x < w && y < h) prev[c * w * h + y * w + x] = p[y * w + x];  // prev = cur
     }
 }
@@ -49,6 +53,23 @@ __global__ void k_reset(const __half* cur, __half* prev, __half* prev_hr, int w,
 void reset_state(const __half* cur, __half* prev, __half* prev_hr, int w, int h, int scale, const float* diff_sum,
                  float max_sum, cudaStream_t s) {
     k_reset<<<grid2d(w * scale, h * scale), dim3(16, 16), 0, s>>>(cur, prev, prev_hr, w, h, scale, diff_sum, max_sum);
+}
+
+__global__ void k_shrink(const __half* src, int w, int h, __half* dst, int W, int H) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= W || y >= H) return;
+    float sx = (float)w / W, sy = (float)h / H;
+    for (int c = 0; c < 3; c++) {
+        float acc = 0;  // 2x2 samples inside the output pixel: enough to avoid aliasing for shrinks down to 1/2
+        for (float oy : {-0.25f, 0.25f})
+            for (float ox : {-0.25f, 0.25f})
+                acc += bilinear(src + c * w * h, w, h, (x + 0.5f + ox) * sx - 0.5f, (y + 0.5f + oy) * sy - 0.5f);
+        dst[c * W * H + y * W + x] = __float2half(acc / 4);
+    }
+}
+
+void shrink_rgb(const __half* src, int w, int h, __half* dst, int W, int H, cudaStream_t s) {
+    k_shrink<<<grid2d(W, H), dim3(16, 16), 0, s>>>(src, w, h, dst, W, H);
 }
 
 __global__ void k_absdiff(const __half* a, const __half* b, int n, float* sum) {
