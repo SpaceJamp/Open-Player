@@ -113,9 +113,16 @@ int main(int argc, char** argv) {
         Media media;
         if (!media.open(path, disp.cuda_device())) return 1;
         int w = media.width(), h = media.height();
+        // Like RTX VSR: only upscale video smaller than the screen. A 4K video on a 4K screen would be blown up
+        // to 8K (7 fps on an RTX 5080) just to be shrunk back down.
+        int screen_w = 0, screen_h = 0;
+        if (const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(win)))
+            screen_w = (int)std::lround(m->w * m->pixel_density), screen_h = (int)std::lround(m->h * m->pixel_density);
+        bool worth_it = !screen_h || h < screen_h;
         Vsr vsr;
-        bool have_vsr = vsr.open(model, w, h, st);
-        if (!have_vsr) fprintf(stderr, "VSR unavailable (no %s?), playing without upscaling\n", model);
+        bool have_vsr = worth_it && vsr.open(model, w, h, st);
+        if (!worth_it) fprintf(stderr, "VSR off: the video (%dp) already fills the screen (%dp)\n", h, screen_h);
+        else if (!have_vsr) fprintf(stderr, "VSR unavailable (no %s?), playing without upscaling\n", model);
         vsr_on &= have_vsr;
         int s = have_vsr ? vsr.scale() : 1;
         __half* plain = nullptr;  // RGB frame when there is no VSR engine to borrow the input buffer from
@@ -258,9 +265,10 @@ int main(int argc, char** argv) {
                 last_report = now();
                 if (!info_done && !media.decode_desc().empty()) {
                     printf("info {\"gpu\":\"%s\",\"display\":\"%s\",\"decode\":\"%s\",\"video\":\"%dx%d@%.2f\","
-                           "\"vsr\":\"%s\",\"tensorrt\":\"%s\"}\n",
+                           "\"screen\":\"%dx%d\",\"vsr\":\"%s\",\"tensorrt\":\"%s\"}\n",
                            disp.gpu_name(), disp.zero_copy() ? "zero-copy" : "CPU copy", media.decode_desc().c_str(),
-                           w, h, media.fps(), have_vsr ? (std::to_string(s) + "x").c_str() : "none",
+                           w, h, media.fps(), screen_w, screen_h,
+                           have_vsr ? (std::to_string(s) + "x").c_str() : worth_it ? "none" : "off (fills screen)",
                            trt_version().c_str());
                     info_done = true;
                 }

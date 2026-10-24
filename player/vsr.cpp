@@ -2,8 +2,10 @@
 
 #include <NvOnnxParser.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <vector>
@@ -104,12 +106,11 @@ void Vsr::infer(const __half* cur, const __half* prev, const __half* prev_hr, __
 
 const __half* Vsr::run(bool reset) {
     __half *cur = lr_[i_], *prev = lr_[i_ ^ 1], *prev_hr = hr_[i_ ^ 1], *out = hr_[i_];
-    size_t n = 3ull * w_ * h_;
-    if (!reset && mean_abs_diff(cur, prev, n, scratch_, s_) > SCENE_CUT) reset = true;
-    if (reset) {  // no usable history: start from this frame alone
-        cudaMemcpyAsync(prev, cur, n * 2, cudaMemcpyDeviceToDevice, s_);
-        upscale_bilinear(cur, w_, h_, scale_, prev_hr, s_);
-    }
+    int n = 3 * w_ * h_;
+    // no usable history (seek / VSR toggled / scene cut): start from this frame alone. The cut check runs on the
+    // GPU; a CPU round trip here cost ~1.7 ms per frame, enough to miss 60 fps at 1080p -> 4K.
+    if (!reset) abs_diff_sum(cur, prev, n, scratch_, s_);
+    reset_state(cur, prev, prev_hr, w_, h_, scale_, reset ? nullptr : scratch_, SCENE_CUT * n, s_);
     infer(cur, prev, prev_hr, out);
     i_ ^= 1;
     return out;
@@ -145,10 +146,28 @@ int Vsr::selftest(const std::string& onnx) {
         double d = __half2float(got[i]) - want[i];
         se += d * d, worst = std::fmax(worst, std::fabs(d));
     }
+    // scene-cut check: the random cur/prev pair differs by ~0.33 per value, a cut, so prev must become cur;
+    // then the pair is identical, no cut, so prev_hr (zeroed) must stay untouched
+    int ni = (int)n;
+    abs_diff_sum(v.lr_[0], v.lr_[1], ni, v.scratch_, st);
+    reset_state(v.lr_[0], v.lr_[1], v.hr_[1], w, h, s, v.scratch_, SCENE_CUT * ni, st);
+    std::vector<__half> a(n), b(n);
+    cudaMemcpyAsync(a.data(), v.lr_[0], n * 2, cudaMemcpyDeviceToHost, st);
+    cudaMemcpyAsync(b.data(), v.lr_[1], n * 2, cudaMemcpyDeviceToHost, st);
+    cudaMemsetAsync(v.hr_[1], 0, N * 2, st);
+    abs_diff_sum(v.lr_[0], v.lr_[1], ni, v.scratch_, st);
+    reset_state(v.lr_[0], v.lr_[1], v.hr_[1], w, h, s, v.scratch_, SCENE_CUT * ni, st);
+    std::vector<__half> kept(N);
+    cudaMemcpyAsync(kept.data(), v.hr_[1], N * 2, cudaMemcpyDeviceToHost, st);
+    cudaStreamSynchronize(st);
+    bool cut_ok = !memcmp(a.data(), b.data(), n * 2) &&
+                  std::all_of(kept.begin(), kept.end(), [](__half x) { return __half2float(x) == 0; });
+    if (!cut_ok) printf("selftest FAIL: scene-cut reset misbehaves\n");
+
     double psnr = -10 * std::log10(se / N + 1e-12);
     // fp16 vs an fp32 reference on random-noise input: rounding alone lands around 43-47 dB (TensorRT 11.4 on
     // an RTX 5080: 43.7; PyTorch fp16: 46.3), while the same engine in fp32 matches to 81 dB. Wiring bugs land far lower.
-    bool ok = psnr > 40;
+    bool ok = psnr > 40 && cut_ok;
     printf("selftest %s: %.1f dB vs PyTorch, max error %.4f\n", ok ? "PASS" : "FAIL", psnr, worst);
     return ok ? 0 : 1;
 }

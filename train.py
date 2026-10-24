@@ -14,6 +14,8 @@ from torch.utils.data import DataLoader, Dataset
 from model import VSR, load, save, warp
 
 VIDEO_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts"}
+# (channels, blocks). 1080p -> 4K on an RTX 5080: standard 23 ms per frame (up to 30 fps), fast 9.4 ms (60 fps)
+SIZES = {"standard": (48, 6), "fast": (32, 4)}
 
 
 def probe(path):
@@ -72,6 +74,8 @@ def main():
     ap.add_argument("--out", default="vsr.pt")
     ap.add_argument("--resume", help="checkpoint to continue from")
     ap.add_argument("--scale", type=int, default=2)
+    ap.add_argument("--size", choices=SIZES, help="standard (best quality, up to 1080p30 -> 4K) or fast "
+                    "(1080p60 -> 4K); default standard. A resumed model keeps its size.")
     ap.add_argument("--frames", type=int, default=8, help="frames per clip the recurrence is trained over")
     ap.add_argument("--crop", type=int, default=256, help="high-res crop size")
     ap.add_argument("--batch", type=int, default=8)
@@ -83,7 +87,13 @@ def main():
         raise SystemExit(f"--crop must be a multiple of {a.scale * 4}")
 
     dev = "cuda"
-    model = load(a.resume, dev).train() if a.resume else VSR(a.scale).to(dev)
+    if a.resume:
+        model = load(a.resume, dev).train()
+        have = next((k for k, v in SIZES.items() if v == (model.ch, model.blocks)), f"{model.ch}x{model.blocks}")
+        if a.size and a.size != have:
+            raise SystemExit(f"{a.resume} is a {have} model; rename or delete it to train a {a.size} one")
+    else:
+        model = VSR(a.scale, *SIZES[a.size or "standard"]).to(dev)
     s = model.scale
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=0)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, a.steps, eta_min=a.lr / 20)

@@ -256,7 +256,7 @@ bool Display::present(int w, int h, cudaStream_t s) {
     // shortcut: a CPU wait instead of exported semaphores; costs a little latency, not throughput
     cudaStreamSynchronize(s);
     Uint64 tm = SDL_GetTicksNS();
-    if (pinned_) memcpy(host_, pinned_, bytes);
+    if (pinned_) memcpy(host_, pinned_, bytes);  // ~2 ms per 4K frame on WSL; more threads don't help
     Uint64 t1 = SDL_GetTicksNS();
     last_copy_ms = (tm - t0) / 1e6, last_map_ms = (t1 - tm) / 1e6;
     last_present_ms = 0;

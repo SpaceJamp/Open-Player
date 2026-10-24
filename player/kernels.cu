@@ -27,23 +27,28 @@ void yuv_to_rgb(const YuvFrame& f, __half* rgb, cudaStream_t s) {
     else k_yuv_to_rgb<uint8_t><<<grid2d(f.w, f.h), dim3(16, 16), 0, s>>>(f, rgb);
 }
 
-__global__ void k_upscale(const __half* src, int w, int h, int scale, __half* dst) {
+__global__ void k_reset(const __half* cur, __half* prev, __half* prev_hr, int w, int h, int scale,
+                        const float* diff_sum, float max_sum) {
+    if (diff_sum && *diff_sum <= max_sum) return;  // no scene cut: keep the history
     int W = w * scale, H = h * scale;
     int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= W || y >= H) return;
+    // prev_hr = bilinear upscale of cur, same sampling as torch F.interpolate(align_corners=False)
     float sx = fmaxf((x + 0.5f) / scale - 0.5f, 0.f), sy = fmaxf((y + 0.5f) / scale - 0.5f, 0.f);
     int x0 = (int)sx, y0 = (int)sy, x1 = min(x0 + 1, w - 1), y1 = min(y0 + 1, h - 1);
     float fx = sx - x0, fy = sy - y0;
     for (int c = 0; c < 3; c++) {
-        const __half* p = src + c * w * h;
+        const __half* p = cur + c * w * h;
         float top = __half2float(p[y0 * w + x0]) * (1 - fx) + __half2float(p[y0 * w + x1]) * fx;
         float bot = __half2float(p[y1 * w + x0]) * (1 - fx) + __half2float(p[y1 * w + x1]) * fx;
-        dst[c * W * H + y * W + x] = __float2half(top * (1 - fy) + bot * fy);
+        prev_hr[c * W * H + y * W + x] = __float2half(top * (1 - fy) + bot * fy);
+        if (x < w && y < h) prev[c * w * h + y * w + x] = p[y * w + x];  // prev = cur
     }
 }
 
-void upscale_bilinear(const __half* src, int w, int h, int scale, __half* dst, cudaStream_t s) {
-    k_upscale<<<grid2d(w * scale, h * scale), dim3(16, 16), 0, s>>>(src, w, h, scale, dst);
+void reset_state(const __half* cur, __half* prev, __half* prev_hr, int w, int h, int scale, const float* diff_sum,
+                 float max_sum, cudaStream_t s) {
+    k_reset<<<grid2d(w * scale, h * scale), dim3(16, 16), 0, s>>>(cur, prev, prev_hr, w, h, scale, diff_sum, max_sum);
 }
 
 __global__ void k_absdiff(const __half* a, const __half* b, int n, float* sum) {
@@ -54,13 +59,9 @@ __global__ void k_absdiff(const __half* a, const __half* b, int n, float* sum) {
     if ((threadIdx.x & 31) == 0) atomicAdd(sum, acc);
 }
 
-float mean_abs_diff(const __half* a, const __half* b, int n, float* scratch, cudaStream_t s) {
-    float sum = 0;
-    cudaMemsetAsync(scratch, 0, sizeof(float), s);
-    k_absdiff<<<256, 256, 0, s>>>(a, b, n, scratch);
-    cudaMemcpyAsync(&sum, scratch, sizeof(float), cudaMemcpyDeviceToHost, s);
-    cudaStreamSynchronize(s);
-    return sum / n;
+void abs_diff_sum(const __half* a, const __half* b, int n, float* sum, cudaStream_t s) {
+    cudaMemsetAsync(sum, 0, sizeof(float), s);
+    k_absdiff<<<256, 256, 0, s>>>(a, b, n, sum);
 }
 
 __global__ void k_rgba(const __half* rgb, int w, int h, uint8_t* out, float progress) {

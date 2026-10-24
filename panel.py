@@ -22,6 +22,7 @@ class Panel:
             s = {}
         self.videos = tk.StringVar(value=s.get("videos", str(ROOT / "videos")))
         self.steps = tk.StringVar(value=s.get("steps", "100000"))
+        self.size = tk.StringVar(value=s.get("size", "standard"))
         self.video = tk.StringVar(value=s.get("video", ""))
         self.status = tk.StringVar(value="idle")
 
@@ -38,7 +39,12 @@ class Panel:
         ttk.Entry(tr, textvariable=self.videos).grid(row=0, column=1, sticky="ew", **pad)
         ttk.Button(tr, text="Browse…", command=self.pick_folder).grid(row=0, column=2, **pad)
         ttk.Label(tr, text="Steps").grid(row=1, column=0, sticky="w", **pad)
-        ttk.Entry(tr, textvariable=self.steps, width=10).grid(row=1, column=1, sticky="w", **pad)
+        opts = ttk.Frame(tr)
+        opts.grid(row=1, column=1, sticky="w", **pad)
+        ttk.Entry(opts, textvariable=self.steps, width=10).pack(side="left")
+        ttk.Label(opts, text="Model size").pack(side="left", padx=(16, 4))
+        ttk.Combobox(opts, textvariable=self.size, values=["standard", "fast"], state="readonly", width=9).pack(side="left")
+        ttk.Label(opts, text="standard: best for up to 30 fps · fast: 60 fps at 1080p → 4K").pack(side="left", padx=8)
         btns = ttk.Frame(tr)
         btns.grid(row=1, column=2, **pad)
         self.train_btn = ttk.Button(btns, text="Train", command=self.train)
@@ -92,7 +98,8 @@ class Panel:
         root.after(100, self.poll)
 
     def save_settings(self):
-        SETTINGS.write_text(json.dumps({"videos": self.videos.get(), "steps": self.steps.get(), "video": self.video.get()}))
+        SETTINGS.write_text(json.dumps({"videos": self.videos.get(), "steps": self.steps.get(), "size": self.size.get(),
+                                        "video": self.video.get()}))
 
     def pick_folder(self):
         if d := filedialog.askdirectory(initialdir=self.videos.get() or ROOT):
@@ -165,7 +172,8 @@ class Panel:
         if not self.steps.get().isdigit() or int(self.steps.get()) < 1:
             return self.status.set("steps must be a whole number")
         self.progress["maximum"], self.progress["value"] = int(self.steps.get()), 0
-        args = [sys.executable, "-u", "train.py", self.videos.get(), "--out", "vsr.pt", "--steps", self.steps.get()]
+        args = [sys.executable, "-u", "train.py", self.videos.get(), "--out", "vsr.pt", "--steps", self.steps.get(),
+                "--size", self.size.get()]
         if (ROOT / "vsr.pt").exists():
             args += ["--resume", "vsr.pt"]  # keep improving the same model
         self.start(args, "training")
@@ -198,7 +206,7 @@ class Panel:
         if tag == "info":
             self.player_info = d
             self.info.set(f"{d['gpu']}  |  decode: {d['decode']}  |  display: {d['display']}  |  "
-                          f"{d['video']}  |  VSR {d['vsr']}  |  TensorRT {d['tensorrt']}")
+                          f"{d['video']} on a {d.get('screen', '?')} screen  |  VSR {d['vsr']}  |  TensorRT {d['tensorrt']}")
             return
         self.stats = (self.stats + [d])[-60:]
         self.live.set(f"{d['fps']:>3}/{d['src_fps']:.0f} fps   dropped {d['dropped']:<3}  "

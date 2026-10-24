@@ -31,7 +31,7 @@ python3 -m venv ~/vsr-venv && ~/vsr-venv/bin/pip install torch numpy onnx onnxsc
 ```
 
 One window for the whole workflow:
-- **Training:** pick your video folder, Train / Stop, with live progress and the dB gain over bilinear.
+- **Training:** pick your video folder and model size, Train / Stop, with live progress and the dB gain over bilinear.
   Stop saves the model, and Train continues the same `vsr.pt`.
 - **Model:** export for the player, with the self-test run automatically.
 - **Play:** pick a video and open it in the player.
@@ -64,6 +64,16 @@ cmake --build build -j
 
 The first time it plays a given resolution, it builds a TensorRT engine for it (up to a minute) and caches it
 next to the model.
+
+Like RTX Video Super Resolution, VSR only runs when the video is smaller than the screen. A 4K video on a 4K
+screen plays as is.
+
+Speed on an RTX 5080, 1080p → 4K, measured with `--stats`:
+
+| Model (`train.py --size`) | Network time per frame | Plays smoothly |
+|---|---|---|
+| `standard` (default) | 23–25 ms | up to 30 fps |
+| `fast` | 9–11 ms | 57–58 fps on WSL, which copies each frame through the CPU (~3 ms); native Linux skips that copy, so 60 is expected there (not yet measured) |
 
 | Key | Action |
 |---|---|
