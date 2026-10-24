@@ -24,12 +24,28 @@ bash setup.sh
 python3 -m venv ~/vsr-venv && ~/vsr-venv/bin/pip install torch numpy onnx onnxscript --index-url https://download.pytorch.org/whl/cu130 --extra-index-url https://pypi.org/simple
 ```
 
+## Control panel
+
+```bash
+~/vsr-venv/bin/python panel.py
+```
+
+One window for the whole workflow:
+- **Training:** pick your video folder, Train / Stop, with live progress and the dB gain over bilinear.
+  Stop saves the model, and Train continues the same `vsr.pt`.
+- **Model:** export for the player, with the self-test run automatically.
+- **Play:** pick a video and open it in the player.
+
+The panel remembers your choices in `panel.json`. The steps below do the same things from the command line.
+
 ## 2. Train on your own videos
 
 Use high-quality videos (1080p or 4K, little compression). They are downscaled to make the training input.
+Put them in `videos/` next to `train.py` (subfolders are fine), or make `videos` a link to where you keep them:
 
 ```bash
-~/vsr-venv/bin/python train.py ~/Videos --out vsr.pt     # prints the dB gain over bilinear; Ctrl+C any time,
+ln -s /mnt/c/Users/you/Videos/training videos             # e.g. a Windows folder, seen from WSL
+~/vsr-venv/bin/python train.py --out vsr.pt               # prints the dB gain over bilinear; Ctrl+C any time,
                                                           # a checkpoint is saved every 2000 steps
 ~/vsr-venv/bin/python export.py vsr.pt                    # -> vsr.onnx + vsr.ref
 ```

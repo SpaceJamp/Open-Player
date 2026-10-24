@@ -19,8 +19,9 @@ tensorrt_tarball() {
 case " $ID $ID_LIKE " in
 *" arch "*)
   extra=()
-  grep -qi microsoft /proc/version && extra+=(vulkan-dzn)  # WSL: Vulkan goes through Mesa's D3D12 driver
-  sudo pacman -S --needed base-devel cmake cuda sdl3 ffmpeg vulkan-headers vulkan-icd-loader python mpv "${extra[@]}"
+  # WSL: Vulkan goes through Mesa's D3D12 driver, and a bare install has no fonts for the control panel
+  grep -qi microsoft /proc/version && extra+=(vulkan-dzn ttf-dejavu)
+  sudo pacman -S --needed base-devel cmake cuda sdl3 ffmpeg vulkan-headers vulkan-icd-loader python tk mpv "${extra[@]}"
   tensorrt_tarball
   ;;
 *" fedora "*)
@@ -30,7 +31,7 @@ case " $ID $ID_LIKE " in
   sudo dnf install -y "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$VERSION_ID.noarch.rpm"
   sudo dnf swap -y ffmpeg-free ffmpeg --allowerasing
   sudo dnf install -y cuda-toolkit-13-4 gcc-c++ cmake pkgconf SDL3-devel vulkan-loader-devel vulkan-headers \
-    ffmpeg-devel python3 mpv zstd
+    ffmpeg-devel python3 python3-tkinter mpv zstd
   tensorrt_tarball  # NVIDIA packages TensorRT for RHEL, not Fedora
   ;;
 *" ubuntu "*)
@@ -39,7 +40,7 @@ case " $ID $ID_LIKE " in
   sudo dpkg -i cuda-keyring_1.1-1_all.deb
   sudo apt-get update
   sudo apt-get install -y cuda-toolkit-13-4 tensorrt-dev build-essential cmake pkg-config libsdl3-dev libvulkan-dev \
-    mesa-vulkan-drivers libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libswscale-dev ffmpeg mpv python3-venv
+    mesa-vulkan-drivers libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libswscale-dev ffmpeg mpv python3-venv python3-tk
   ;;
 *)
   echo "unsupported distro: $ID. Needed: CUDA 13.4+, TensorRT 10+, SDL3, FFmpeg dev libs, Vulkan headers, CMake"

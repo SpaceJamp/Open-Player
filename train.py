@@ -1,8 +1,9 @@
 """Train VSR on your own videos: high-res clips are downscaled on the fly to make low-res inputs.
 
-    python train.py ~/Videos --out vsr.pt
+    python train.py                 # videos from ./videos (subfolders included)
+    python train.py ~/Movies        # or any other folder
 """
-import argparse, json, math, random, subprocess, time
+import argparse, json, math, random, signal, subprocess, time
 from pathlib import Path
 
 import numpy as np
@@ -66,7 +67,8 @@ def psnr(a, b):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("videos", help="folder of high-quality videos (searched recursively)")
+    ap.add_argument("videos", nargs="?", default=str(Path(__file__).parent / "videos"),
+                    help="folder of high-quality videos, searched recursively (default: videos/ next to this script)")
     ap.add_argument("--out", default="vsr.pt")
     ap.add_argument("--resume", help="checkpoint to continue from")
     ap.add_argument("--scale", type=int, default=2)
@@ -88,6 +90,8 @@ def main():
     data = DataLoader(Clips(a.videos, a.frames, a.crop), batch_size=a.batch, num_workers=a.workers,
                       persistent_workers=a.workers > 0, pin_memory=True)
 
+    stop = []  # Ctrl+C / the panel's Stop: finish this step, save, exit
+    signal.signal(signal.SIGINT, lambda *_: stop.append(1))
     t0, it = time.time(), iter(data)
     for step in range(1, a.steps + 1):
         hr = next(it).to(dev, non_blocking=True).permute(0, 1, 4, 2, 3).float().div_(255)  # (B,T,3,H,W)
@@ -119,9 +123,11 @@ def main():
             gain = psnr(out.clamp(0, 1), hr[:, -1]) - psnr(bil, hr[:, -1])
             print(f"step {step}  loss {loss.item():.4f}  +{gain:.2f} dB vs bilinear  {(time.time() - t0) / 100:.2f}s/step", flush=True)
             t0 = time.time()
-        if step % 2000 == 0 or step == a.steps:
+        if step % 2000 == 0 or step == a.steps or stop:
             save(model, a.out, step=step)
-    print("saved", a.out)
+        if stop:
+            break
+    print(f"saved {a.out} at step {step}")
 
 
 if __name__ == "__main__":

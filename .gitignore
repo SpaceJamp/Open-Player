@@ -1,4 +1,6 @@
 build/
+videos
+panel.json
 __pycache__/
 *.pt
 *.onnx
