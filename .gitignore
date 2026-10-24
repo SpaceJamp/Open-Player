@@ -1,0 +1,6 @@
+build/
+__pycache__/
+*.pt
+*.onnx
+*.ref
+*.engine
