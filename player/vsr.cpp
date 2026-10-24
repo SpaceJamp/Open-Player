@@ -57,6 +57,7 @@ bool Vsr::load_or_build(const std::string& onnx, bool allow_cache) {
     } else {
         fprintf(stderr, "vsr: building TensorRT engine for %dx%d (first time only, can take a minute)\n", w_, h_);
         std::unique_ptr<IBuilder> b(createInferBuilder(logger));
+        if (!b) return false;  // TensorRT logged why (usually a missing library)
         // strongly typed: the fp16 ONNX decides precision, no builder precision flags needed
 #if NV_TENSORRT_MAJOR >= 11
         uint32_t flags = 0;  // strongly typed is the only mode in 11
@@ -81,6 +82,7 @@ bool Vsr::load_or_build(const std::string& onnx, bool allow_cache) {
     }
 
     runtime_.reset(createInferRuntime(logger));
+    if (!runtime_) return false;
     engine_.reset(runtime_->deserializeCudaEngine(plan.data(), plan.size()));
     if (!engine_) {
         if (!cached) return false;
@@ -144,7 +146,9 @@ int Vsr::selftest(const std::string& onnx) {
         se += d * d, worst = std::fmax(worst, std::fabs(d));
     }
     double psnr = -10 * std::log10(se / N + 1e-12);
-    bool ok = psnr > 45;  // fp16 vs fp32 reference; a wiring bug lands far below this
+    // fp16 vs an fp32 reference on random-noise input: rounding alone lands around 43-47 dB (TensorRT 11.4 on
+    // an RTX 5080: 43.7; PyTorch fp16: 46.3), while the same engine in fp32 matches to 81 dB. Wiring bugs land far lower.
+    bool ok = psnr > 40;
     printf("selftest %s: %.1f dB vs PyTorch, max error %.4f\n", ok ? "PASS" : "FAIL", psnr, worst);
     return ok ? 0 : 1;
 }

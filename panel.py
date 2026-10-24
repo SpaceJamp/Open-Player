@@ -25,9 +25,10 @@ class Panel:
         self.video = tk.StringVar(value=s.get("video", ""))
         self.status = tk.StringVar(value="idle")
 
+        self.stats, self.check_out, self.player_info = [], [], None
         root.title("VSR control panel")
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(3, weight=1)
+        root.rowconfigure(4, weight=1)
         pad = dict(padx=8, pady=4)
 
         tr = ttk.LabelFrame(root, text="Training")
@@ -60,8 +61,24 @@ class Panel:
         ttk.Button(pl, text="Browse…", command=self.pick_video).grid(row=0, column=1, **pad)
         ttk.Button(pl, text="Play", command=self.play).grid(row=0, column=2, **pad)
 
+        dg = ttk.LabelFrame(root, text="Diagnostics")
+        dg.grid(row=3, column=0, sticky="ew", **pad)
+        dg.columnconfigure(0, weight=1)
+        self.info = tk.StringVar(value="Play a video to see live numbers here.")
+        self.live, self.verdict = tk.StringVar(), tk.StringVar()
+        ttk.Label(dg, textvariable=self.info).grid(row=0, column=0, sticky="w", **pad)
+        ttk.Label(dg, textvariable=self.live, font="TkFixedFont").grid(row=1, column=0, sticky="w", **pad)
+        self.verdict_label = ttk.Label(dg, textvariable=self.verdict)
+        self.verdict_label.grid(row=2, column=0, sticky="w", **pad)
+        side = ttk.Frame(dg)
+        side.grid(row=0, column=1, rowspan=3, sticky="ne", **pad)
+        ttk.Button(side, text="System check", command=self.system_check).pack(fill="x")
+        ttk.Button(side, text="Copy report", command=self.copy_report).pack(fill="x", pady=(4, 0))
+        self.graph = tk.Canvas(dg, height=56, background="#151515", highlightthickness=0)
+        self.graph.grid(row=3, column=0, columnspan=2, sticky="ew", **pad)
+
         logf = ttk.Frame(root)
-        logf.grid(row=3, column=0, sticky="nsew", **pad)
+        logf.grid(row=4, column=0, sticky="nsew", **pad)
         logf.rowconfigure(0, weight=1)
         logf.columnconfigure(0, weight=1)
         self.log = tk.Text(logf, height=14, wrap="none", state="disabled")
@@ -69,7 +86,7 @@ class Panel:
         sb = ttk.Scrollbar(logf, command=self.log.yview)
         sb.grid(row=0, column=1, sticky="ns")
         self.log["yscrollcommand"] = sb.set
-        ttk.Label(root, textvariable=self.status).grid(row=4, column=0, sticky="w", **pad)
+        ttk.Label(root, textvariable=self.status).grid(row=5, column=0, sticky="w", **pad)
 
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(100, self.poll)
@@ -116,6 +133,15 @@ class Panel:
         while not self.q.empty():
             kind, val = self.q.get()
             if kind == "line":
+                tag, _, payload = val.partition(" ")
+                if tag in ("info", "stats") and payload.startswith("{"):  # the player's --stats lines
+                    try:
+                        self.diagnostics(tag, json.loads(payload))
+                        continue
+                    except ValueError:
+                        pass
+                if val[:6] in ("PASS  ", "WARN  ", "FAIL  "):  # --check results, kept for the report
+                    self.check_out.append(val.rstrip())
                 self.write(val)
                 if m := STEP_LINE.search(val):
                     self.progress["value"] = int(m[1])
@@ -161,10 +187,51 @@ class Panel:
         if not Path(self.video.get()).is_file():
             return self.status.set("pick a video to play")
         self.save_settings()
-        args = [PLAYER, self.video.get()] + (["--model", "vsr.onnx"] if (ROOT / "vsr.onnx").exists() else ["--no-vsr"])
+        args = [PLAYER, self.video.get(), "--stats"]
+        args += ["--model", "vsr.onnx"] if (ROOT / "vsr.onnx").exists() else ["--no-vsr"]
+        self.stats = []
         self.write(f"\n$ {' '.join(map(str, args))}\n")
         p = subprocess.Popen(args, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         threading.Thread(target=self.pump, args=(p, "player", None), daemon=True).start()
+
+    def diagnostics(self, tag, d):
+        if tag == "info":
+            self.player_info = d
+            self.info.set(f"{d['gpu']}  |  decode: {d['decode']}  |  display: {d['display']}  |  "
+                          f"{d['video']}  |  VSR {d['vsr']}  |  TensorRT {d['tensorrt']}")
+            return
+        self.stats = (self.stats + [d])[-60:]
+        self.live.set(f"{d['fps']:>3}/{d['src_fps']:.0f} fps   dropped {d['dropped']:<3}  "
+                      f"VSR {d['vsr_ms']:5.1f} ms (max {d['vsr_max_ms']:.1f})   "
+                      f"display {d['copy_ms'] + d['map_ms'] + d['present_ms']:5.1f} ms   late {d['late_ms']:4.0f} ms   "
+                      f"queue {d['queue']:2.0f}   audio {d['audio_s']:.1f} s   GPU {d['gpu_mem_mb']:.0f} MB")
+        ok = d["verdict"] == "ok"
+        self.verdict.set("Keeping up." if ok else f"Dropping frames. Bottleneck: {d['verdict']}")
+        self.verdict_label["foreground"] = "#2a8a2a" if ok else "#cc3333"
+        self.draw_graph()
+
+    def draw_graph(self):
+        """Last minute: bar height = fps reached / source fps, red where frames were dropped."""
+        c = self.graph
+        c.delete("all")
+        W, H, n = max(c.winfo_width(), 1), int(c["height"]), 60
+        for i, d in enumerate(self.stats):
+            h = min(d["fps"] / max(d["src_fps"], 1), 1) * (H - 14)
+            x = i * W / n
+            c.create_rectangle(x, H - h, x + W / n - 1, H, width=0, fill="#cc3333" if d["dropped"] else "#2a8a2a")
+        c.create_text(4, 2, anchor="nw", fill="#999", text="fps vs source, last minute (red: frames dropped)")
+
+    def system_check(self):
+        if not PLAYER.exists():
+            return self.status.set(f"player not built yet: {PLAYER}")
+        self.check_out = []
+        self.start([PLAYER, "--check", "vsr.onnx"], "system check")
+
+    def copy_report(self):
+        report = {"info": self.player_info, "check": self.check_out, "stats": self.stats[-10:]}
+        self.root.clipboard_clear()
+        self.root.clipboard_append(json.dumps(report, indent=1))
+        self.status.set("diagnostics report copied to the clipboard")
 
     def close(self):
         if self.job:  # let training save instead of dying mid-step

@@ -88,16 +88,20 @@ bool Display::init(SDL_Window* win) {
 
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(gpu_, &props);
+    snprintf(gpu_name_, sizeof gpu_name_, "%s", props.deviceName);
     fprintf(stderr, "display: %s, %s\n", props.deviceName,
             interop_ ? "CUDA writes into Vulkan memory directly" : "frames copied through the CPU (no CUDA/Vulkan sharing)");
     return true;
 }
 
-uint32_t Display::memory_type(uint32_t bits, VkMemoryPropertyFlags want) {
+uint32_t Display::memory_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid) {
     VkPhysicalDeviceMemoryProperties mp;
     vkGetPhysicalDeviceMemoryProperties(gpu_, &mp);
-    for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
-        if ((bits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & want) == want) return i;
+    for (int pass = 0; pass < 2; pass++)  // first try without the flags to avoid, then take any match
+        for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+            auto f = mp.memoryTypes[i].propertyFlags;
+            if ((bits & (1u << i)) && (f & want) == want && (pass || !(f & avoid))) return i;
+        }
     return UINT32_MAX;
 }
 
@@ -127,15 +131,34 @@ bool Display::alloc(int max_w, int max_h) {
         emi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
         VkMemoryAllocateInfo bai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, exported ? &emi : nullptr};
         bai.allocationSize = req.size;
-        bai.memoryTypeIndex = memory_type(req.memoryTypeBits, exported ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-                                                                       : VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                                                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        // fallback: system memory, cached if offered. On WSL the uncached type took 43 ms per 1440p frame to fill
+        // from the CPU (340 MB/s); the cached one takes 0.8 ms.
+        const auto host = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        bai.memoryTypeIndex = memory_type(req.memoryTypeBits, host | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+                                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (bai.memoryTypeIndex == UINT32_MAX)
+            bai.memoryTypeIndex = memory_type(req.memoryTypeBits, host, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (exported) bai.memoryTypeIndex = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         if (bai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(dev_, &bai, nullptr, &buf_mem_) != VK_SUCCESS)
             return false;
         vkBindBufferMemory(dev_, buf_, buf_mem_, 0);
         if (!exported) {
             if (vkMapMemory(dev_, buf_mem_, 0, size, 0, &host_) != VK_SUCCESS) return false;
-            return cudaMalloc(&dev_ptr_, size) == cudaSuccess;
+            VkPhysicalDeviceMemoryProperties mp;
+            vkGetPhysicalDeviceMemoryProperties(gpu_, &mp);
+            auto fl = mp.memoryTypes[bai.memoryTypeIndex].propertyFlags;
+            fprintf(stderr, "display: frame buffer in memory type %u (%s%s%s)", bai.memoryTypeIndex,
+                    fl & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ? "device-local " : "system ",
+                    fl & VK_MEMORY_PROPERTY_HOST_CACHED_BIT ? "cached" : "uncached",
+                    fl & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT ? " coherent" : "");
+            if (cudaMalloc(&dev_ptr_, size) != cudaSuccess) return false;
+            // best: let the GPU write straight into Vulkan's mapped memory (no CPU copy at all)
+            registered_ = cudaHostRegister(host_, size, cudaHostRegisterDefault) == cudaSuccess;
+            fprintf(stderr, registered_ ? ", GPU writes into it directly\n" : ", copied in by the CPU\n");
+            if (registered_) return true;
+            cudaGetLastError();
+            // else GPU -> CUDA-pinned memory (fast), then a plain memcpy into Vulkan's
+            return cudaMallocHost(&pinned_, size) == cudaSuccess;
         }
         auto get_fd = (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(dev_, "vkGetMemoryFdKHR");
         VkMemoryGetFdInfoKHR gi{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};
@@ -227,9 +250,16 @@ void Display::barrier(VkImage img, VkImageLayout from, VkImageLayout to, VkAcces
 }
 
 bool Display::present(int w, int h, cudaStream_t s) {
-    if (host_) cudaMemcpyAsync(host_, dev_ptr_, (size_t)w * h * 4, cudaMemcpyDeviceToHost, s);
+    Uint64 t0 = SDL_GetTicksNS();
+    size_t bytes = (size_t)w * h * 4;
+    if (host_) cudaMemcpyAsync(registered_ ? host_ : pinned_, dev_ptr_, bytes, cudaMemcpyDeviceToHost, s);
     // shortcut: a CPU wait instead of exported semaphores; costs a little latency, not throughput
     cudaStreamSynchronize(s);
+    Uint64 tm = SDL_GetTicksNS();
+    if (pinned_) memcpy(host_, pinned_, bytes);
+    Uint64 t1 = SDL_GetTicksNS();
+    last_copy_ms = (tm - t0) / 1e6, last_map_ms = (t1 - tm) / 1e6;
+    last_present_ms = 0;
     if (stale_ && !make_swapchain()) return false;
     uint32_t idx;
     VkResult r = vkAcquireNextImageKHR(dev_, swap_, UINT64_MAX, acquired_, VK_NULL_HANDLE, &idx);
@@ -281,6 +311,7 @@ bool Display::present(int w, int h, cudaStream_t s) {
     pi.swapchainCount = 1, pi.pSwapchains = &swap_, pi.pImageIndices = &idx;
     r = vkQueuePresentKHR(queue_, &pi);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) stale_ = true;
+    last_present_ms = (SDL_GetTicksNS() - t1) / 1e6;
     return true;
 }
 
@@ -288,6 +319,8 @@ Display::~Display() {
     if (dev_) {
         vkDeviceWaitIdle(dev_);
         cudaFree(dev_ptr_);  // mapped external buffers are freed with cudaFree too
+        cudaFreeHost(pinned_);
+        if (registered_) cudaHostUnregister(host_);
         if (ext_) cudaDestroyExternalMemory(ext_);
         vkDestroyBuffer(dev_, buf_, nullptr), vkFreeMemory(dev_, buf_mem_, nullptr);
         vkDestroyImage(dev_, img_, nullptr), vkFreeMemory(dev_, img_mem_, nullptr);

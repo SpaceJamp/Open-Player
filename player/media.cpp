@@ -3,6 +3,7 @@
 extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_cuda.h>
+#include <libavutil/pixdesc.h>
 }
 #include <chrono>
 #include <cmath>
@@ -43,10 +44,12 @@ bool Media::open(const char* path, int cuda_device) {
 
     vidx_ = av_find_best_stream(fmt_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     if (vidx_ < 0) return fprintf(stderr, "no video stream\n"), false;
-    // share the CUDA primary context so our kernels can read NVDEC's surfaces directly
+    if (fmt_->streams[vidx_]->avg_frame_rate.den) fps_ = av_q2d(fmt_->streams[vidx_]->avg_frame_rate);
+    // adopt our already-active CUDA context so our kernels can read NVDEC's surfaces directly
+    // (USE_PRIMARY_CONTEXT refuses a primary context someone else already started with other flags)
     char dev[16];
     snprintf(dev, sizeof dev, "%d", cuda_device);
-    if (av_hwdevice_ctx_create(&hw_, AV_HWDEVICE_TYPE_CUDA, dev, nullptr, AV_CUDA_USE_PRIMARY_CONTEXT) < 0)
+    if (av_hwdevice_ctx_create(&hw_, AV_HWDEVICE_TYPE_CUDA, dev, nullptr, AV_CUDA_USE_CURRENT_CONTEXT) < 0)
         fprintf(stderr, "NVDEC unavailable, decoding on the CPU\n");
     if (!(vctx_ = open_decoder(fmt_->streams[vidx_], hw_))) return fprintf(stderr, "cannot decode video\n"), false;
 
@@ -93,9 +96,9 @@ void Media::clear_queue() {
 }
 
 double Media::audio_clock() const {
-    double queued = SDL_GetAudioStreamQueued(audio_) / (8.0 * actx_->sample_rate);  // 2 ch x 4 bytes
-    if (eof_ && queued == 0) return INFINITY;  // audio ran out: let any remaining video frames through
-    return audio_end_ - queued;
+    int queued = SDL_GetAudioStreamQueued(audio_);
+    if (queued <= 0) return NAN;  // nothing playing (audio ended, has a gap, or not started): no audio clock
+    return audio_end_ - queued / (8.0 * actx_->sample_rate);  // 2 ch x 4 bytes per sample frame
 }
 
 void Media::run() {
@@ -176,12 +179,22 @@ bool Media::take_due(double clock, bool force, AVFrame*& frame, double& pts) {
     queue_.pop_front();
     while (!force && !queue_.empty() && queue_.front().pts <= clock) {  // we're behind: skip to the newest due frame
         av_frame_free(&q.f);
+        dropped_++;
         q = queue_.front();
         queue_.pop_front();
     }
     cv_.notify_all();
     frame = q.f, pts = q.pts;
     return true;
+}
+
+int Media::queued_frames() {
+    std::lock_guard l(m_);
+    return (int)queue_.size();
+}
+
+double Media::audio_buffered() const {
+    return audio_ ? SDL_GetAudioStreamQueued(audio_) / (8.0 * actx_->sample_rate) : 0;
 }
 
 bool Media::finished() {
@@ -210,6 +223,11 @@ YuvFrame Media::to_gpu(AVFrame* f, cudaStream_t s) {
     bool bt709 = f->colorspace == AVCOL_SPC_BT709 || (f->colorspace == AVCOL_SPC_UNSPECIFIED && f->height >= 720);
     bool full = f->color_range == AVCOL_RANGE_JPEG;
     AVFrame* sw = nullptr;
+    if (decode_desc_.empty()) {
+        bool hw = f->format == AV_PIX_FMT_CUDA;
+        auto fmt = hw ? ((AVHWFramesContext*)f->hw_frames_ctx->data)->sw_format : (AVPixelFormat)f->format;
+        decode_desc_ = std::string(hw ? "NVDEC " : "CPU ") + vctx_->codec->name + " " + av_get_pix_fmt_name(fmt);
+    }
     if (f->format == AV_PIX_FMT_CUDA) {
         auto sw_fmt = ((AVHWFramesContext*)f->hw_frames_ctx->data)->sw_format;
         if (sw_fmt == AV_PIX_FMT_NV12 || sw_fmt == AV_PIX_FMT_P010 || sw_fmt == AV_PIX_FMT_P016)

@@ -35,6 +35,9 @@ One window for the whole workflow:
   Stop saves the model, and Train continues the same `vsr.pt`.
 - **Model:** export for the player, with the self-test run automatically.
 - **Play:** pick a video and open it in the player.
+- **Diagnostics:** while a video plays, shows live fps, dropped frames, per-stage timings, a graph of the last
+  minute, and which stage is the bottleneck. **System check** tests each part of the setup on its own, and
+  **Copy report** puts it all on the clipboard for bug reports.
 
 The panel remembers your choices in `panel.json`. The steps below do the same things from the command line.
 
@@ -71,6 +74,16 @@ next to the model.
 | F, double-click | fullscreen |
 | click bottom edge | seek |
 | Q | quit |
+
+### Diagnostics
+
+```bash
+./build/vsrplayer --check vsr.onnx                     # PASS/WARN/FAIL for CUDA, NVDEC, Vulkan, audio, TensorRT, model
+./build/vsrplayer movie.mkv --model vsr.onnx --stats   # one JSON line of timings per second
+```
+
+Each `--stats` line ends with a `verdict`: `ok`, or the stage that cost the most time in a second where frames
+were dropped (decode, upload, convert, vsr, display copy, present).
 
 [upscale.py](upscale.py) does the same upscaling without the player (`python upscale.py in.mp4 -o out.mp4`).
 

@@ -1,20 +1,25 @@
 // vsrplayer: video player that upscales with our VSR network on the GPU.
 // decode (NVDEC) -> YUV->RGB (CUDA) -> VSR (TensorRT) -> RGBA (CUDA) -> Vulkan blit to the window
 #include <SDL3/SDL.h>
+#include <dlfcn.h>
 
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 
+#include "diag.h"
 #include "display.h"
 #include "kernels.h"
 #include "media.h"
 #include "vsr.h"
 
 static const char* USAGE =
-    "usage: vsrplayer <video> [--model vsr.onnx] [--no-vsr]\n"
-    "       vsrplayer --selftest [vsr.onnx]\n"
+    "usage: vsrplayer <video> [--model vsr.onnx] [--no-vsr] [--stats]\n"
+    "       vsrplayer --selftest [vsr.onnx]   compare the TensorRT engine against PyTorch\n"
+    "       vsrplayer --check [vsr.onnx]      test each part of the setup on its own\n"
+    "--stats: print a JSON line of timings every second (the control panel's Diagnostics reads these)\n"
     "keys:  space pause | left/right seek 5s | up/down volume | v VSR on/off | f or double-click fullscreen\n"
     "       click the bar at the bottom to seek | q quit\n";
 
@@ -26,17 +31,69 @@ static std::string clock_text(double t) {
     return buf;
 }
 
+static std::string trt_version() {
+    int v = getInferLibVersion();  // major*10000 + minor*100 + patch
+    return std::to_string(v / 10000) + "." + std::to_string(v / 100 % 100) + "." + std::to_string(v % 100);
+}
+
+// --check: tries each part of the pipeline on its own and says which one is broken.
+static int check(const char* model) {
+    int fails = 0;
+    auto line = [&](const char* verdict, const char* what, const std::string& detail) {
+        printf("%-4s  %-16s %s\n", verdict, what, detail.c_str());
+        fails += !strcmp(verdict, "FAIL");
+    };
+    int n = 0, drv = 0;
+    cudaGetDeviceCount(&n);
+    cudaDriverGetVersion(&drv);
+    cudaDeviceProp p{};
+    if (n > 0 && cudaGetDeviceProperties(&p, 0) == cudaSuccess)
+        line("PASS", "CUDA", std::string(p.name) + ", sm_" + std::to_string(p.major) + std::to_string(p.minor) +
+                                 ", driver CUDA " + std::to_string(drv / 1000) + "." + std::to_string(drv % 1000 / 10));
+    else line("FAIL", "CUDA", "no CUDA GPU visible (driver missing, or on WSL: Windows driver too old)");
+
+    void* nvcuvid = dlopen("libnvcuvid.so.1", RTLD_NOW);  // what FFmpeg's NVDEC loads
+    line(nvcuvid ? "PASS" : "WARN", "NVDEC", nvcuvid ? "libnvcuvid found" : "libnvcuvid missing: videos decode on the CPU");
+    if (nvcuvid) dlclose(nvcuvid);
+
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+        if (SDL_Window* win = SDL_CreateWindow("vsrplayer check", 64, 64, SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN)) {
+            Display d;
+            if (d.init(win)) {
+                cudaSetDevice(d.cuda_device());
+                bool ok = d.alloc(64, 64);
+                line(ok ? "PASS" : "FAIL", "Vulkan", std::string(d.gpu_name()) + (!ok ? ", cannot allocate frames"
+                                                     : d.zero_copy() ? ", zero-copy from CUDA"
+                                                                     : ", frames copied through the CPU (slower)"));
+            } else line("FAIL", "Vulkan", "no Vulkan GPU for the window (on WSL install vulkan-dzn)");
+        } else line("FAIL", "Window", SDL_GetError());
+        SDL_AudioDeviceID dev = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, nullptr);
+        line(dev ? "PASS" : "WARN", "Audio", dev ? SDL_GetAudioDeviceName(dev) : "no audio output: video plays silent");
+        if (dev) SDL_CloseAudioDevice(dev);
+        SDL_Quit();
+    } else line("FAIL", "SDL", SDL_GetError());
+
+    line("PASS", "TensorRT", trt_version());
+    if (!std::filesystem::exists(model)) line("FAIL", "Model", std::string(model) + " not found: train, then export");
+    else line(Vsr::selftest(model) == 0 ? "PASS" : "FAIL", "Model", model);
+    printf(fails ? "%d problem(s) found\n" : "all good\n", fails);
+    return fails ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
     const char *path = nullptr, *model = "vsr.onnx";
-    bool vsr_on = true, selftest = false;
+    bool vsr_on = true, selftest = false, checking = false, stats = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
         else if (!strcmp(argv[i], "--no-vsr")) vsr_on = false;
+        else if (!strcmp(argv[i], "--stats")) stats = true;
         else if (!strcmp(argv[i], "--selftest")) selftest = true;
-        else if (argv[i][0] != '-') (selftest ? model : path) = argv[i];
+        else if (!strcmp(argv[i], "--check")) checking = true;
+        else if (argv[i][0] != '-') (selftest || checking ? model : path) = argv[i];
         else return fputs(USAGE, stderr), 2;
     }
     if (selftest) return Vsr::selftest(model);
+    if (checking) return check(model);
     if (!path) return fputs(USAGE, stderr), 2;
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) return fprintf(stderr, "SDL: %s\n", SDL_GetError()), 1;
@@ -73,16 +130,31 @@ int main(int argc, char** argv) {
         SDL_ShowWindow(win);
 
         const double dur = media.duration();
-        bool running = true, paused = false, reset = true, step = false;
-        int serial = media.serial(), sw = 0, sh = 0;
+        bool running = true, paused = false, reset = true, step = false, size_warned = false;
+        bool dirty = true, last_bar = false;  // redraw only when the picture changed: each redraw costs a full copy
+        int serial = media.serial(), sw = 0, sh = 0, frames_shown = 0;
         float volume = 1;
         const __half* shown = nullptr;
-        double pos = 0, wall_base = 0, last_mouse = -10, last_title = -10;
+        double pos = 0, wall_base = 0, last_mouse = -10, last_title = -10, last_report = 0;
+        Diag diag;
+        bool info_done = false;
+        cudaEvent_t ev[5];  // GPU timestamps: before convert, after convert, after VSR, before/after rgba
+        for (auto& e : ev) cudaEventCreate(&e);
+        auto gpu_ms = [&](int a, int b) {
+            float ms = 0;
+            cudaEventElapsedTime(&ms, ev[a], ev[b]);
+            return ms;
+        };
         Uint64 wall_t0 = SDL_GetTicksNS();
         auto now = [] { return SDL_GetTicksNS() / 1e9; };
-        // audio is the clock when there is audio; otherwise wall time
+        // Follow the audio while it plays; when it runs dry (ended early, gap, not started) carry on in wall time
+        // from where it was, so video never waits on audio that isn't coming.
         auto clock = [&] {
-            if (media.has_audio()) return media.audio_clock();
+            double a = media.has_audio() && !paused ? media.audio_clock() : NAN;
+            if (!std::isnan(a)) {
+                wall_base = a, wall_t0 = SDL_GetTicksNS();
+                return a;
+            }
             return paused ? wall_base : wall_base + (SDL_GetTicksNS() - wall_t0) / 1e9;
         };
         auto seek = [&](double t) {
@@ -101,7 +173,8 @@ int main(int argc, char** argv) {
             SDL_Event e;
             while (SDL_PollEvent(&e)) {
                 if (e.type == SDL_EVENT_QUIT) running = false;
-                else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) disp.resized();
+                else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) disp.resized(), dirty = true;
+                else if (e.type == SDL_EVENT_WINDOW_EXPOSED) dirty = true;
                 else if (e.type == SDL_EVENT_MOUSE_MOTION) last_mouse = now();
                 else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int ww, wh;
@@ -132,11 +205,29 @@ int main(int argc, char** argv) {
             AVFrame* f;
             double pts;
             if ((!paused || step) && media.take_due(clock(), step, f, pts)) {
-                __half* in = have_vsr ? vsr.input() : plain;
-                yuv_to_rgb(media.to_gpu(f, st), in, st);
-                if (vsr_on) shown = vsr.run(reset), sw = w * s, sh = h * s, reset = false;
-                else shown = in, sw = w, sh = h;
-                cudaStreamSynchronize(st);  // done reading the decoder surface: hand it back to FFmpeg
+                if (f->width == w && f->height == h) {
+                    __half* in = have_vsr ? vsr.input() : plain;
+                    Uint64 u0 = SDL_GetTicksNS();
+                    cudaEventRecord(ev[0], st);
+                    YuvFrame yuv = media.to_gpu(f, st);
+                    diag.upload.add((SDL_GetTicksNS() - u0) / 1e6);
+                    yuv_to_rgb(yuv, in, st);
+                    cudaEventRecord(ev[1], st);
+                    if (vsr_on) shown = vsr.run(reset), sw = w * s, sh = h * s, reset = false;
+                    else shown = in, sw = w, sh = h;
+                    cudaEventRecord(ev[2], st);
+                    cudaStreamSynchronize(st);  // done reading the decoder surface: hand it back to FFmpeg
+                    frames_shown++;
+                    diag.shown++;
+                    dirty = true;
+                    diag.convert.add(gpu_ms(0, 1));
+                    if (vsr_on) diag.vsr.add(gpu_ms(1, 2));
+                    diag.late.add((clock() - pts) * 1000);
+                } else if (!size_warned) {  // buffers and engine are sized for the first frame: skip, don't overrun
+                    fprintf(stderr, "video changes size mid-file (%dx%d -> %dx%d): skipping those frames\n", w, h,
+                            f->width, f->height);
+                    size_warned = true;
+                }
                 av_frame_free(&f);
                 pos = pts, step = false;
             } else if (!paused && media.finished()) {
@@ -144,11 +235,40 @@ int main(int argc, char** argv) {
             }
 
             bool bar = dur > 0 && (paused || now() - last_mouse < 2), drawn = false;
-            if (shown) {  // redrawn every vsync so the seek bar and resizes update while paused
-                rgb_to_rgba8(shown, sw, sh, disp.begin_frame(), bar ? pos / dur : -1, st);
+            if (bar != last_bar) last_bar = bar, dirty = true;
+            if (shown && dirty) {
+                uint8_t* target = disp.begin_frame();
+                cudaEventRecord(ev[3], st);
+                rgb_to_rgba8(shown, sw, sh, target, bar ? pos / dur : -1, st);
+                cudaEventRecord(ev[4], st);
                 drawn = disp.present(sw, sh, st);
+                if (drawn) {
+                    dirty = false;
+                    diag.redraws++;
+                    diag.rgba.add(gpu_ms(3, 4));
+                    diag.copy.add(disp.last_copy_ms);
+                    diag.map.add(disp.last_map_ms);
+                    diag.present.add(disp.last_present_ms);
+                }
             }
-            if (!drawn) SDL_Delay(5);  // nothing to show yet, or minimized; otherwise vsync paces the loop
+            if (!drawn) SDL_Delay(2);  // nothing new to show (or minimized); a redraw is paced by vsync instead
+            if (!paused) diag.queue.add(media.queued_frames());
+
+            if (stats && now() - last_report >= 1) {
+                last_report = now();
+                if (!info_done && !media.decode_desc().empty()) {
+                    printf("info {\"gpu\":\"%s\",\"display\":\"%s\",\"decode\":\"%s\",\"video\":\"%dx%d@%.2f\","
+                           "\"vsr\":\"%s\",\"tensorrt\":\"%s\"}\n",
+                           disp.gpu_name(), disp.zero_copy() ? "zero-copy" : "CPU copy", media.decode_desc().c_str(),
+                           w, h, media.fps(), have_vsr ? (std::to_string(s) + "x").c_str() : "none",
+                           trt_version().c_str());
+                    info_done = true;
+                }
+                size_t free_b = 0, total_b = 0;
+                cudaMemGetInfo(&free_b, &total_b);
+                diag.report(pos, media.fps(), media.take_dropped(), media.audio_buffered(),
+                            (total_b - free_b) / 1048576.0, vsr_on, paused);
+            }
 
             if (now() - last_title > 0.5) {
                 last_title = now();
@@ -158,7 +278,9 @@ int main(int argc, char** argv) {
                 SDL_SetWindowTitle(win, t.c_str());
             }
         }
+        for (auto& e : ev) cudaEventDestroy(e);
         cudaFree(plain);
+        fprintf(stderr, "shown %d frames, stopped at %s\n", frames_shown, clock_text(pos).c_str());
         rc = 0;
     }
     SDL_DestroyWindow(win);

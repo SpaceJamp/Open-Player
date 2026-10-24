@@ -28,5 +28,8 @@ find_library(NVINFER nvinfer HINTS ${TENSORRT_ROOT}/lib REQUIRED)  # rpath to it
 find_library(NVONNXPARSER nvonnxparser HINTS ${TENSORRT_ROOT}/lib REQUIRED)
 
 add_executable(vsrplayer main.cpp media.cpp vsr.cpp display.cpp kernels.cu)
-target_include_directories(vsrplayer PRIVATE ${TENSORRT_INCLUDE})
-target_link_libraries(vsrplayer PRIVATE CUDA::cudart Vulkan::Vulkan SDL3::SDL3 PkgConfig::FFMPEG ${NVINFER} ${NVONNXPARSER})
+target_include_directories(vsrplayer SYSTEM PRIVATE ${TENSORRT_INCLUDE})  # SYSTEM: hide NVIDIA's own deprecation warnings
+# DT_RPATH instead of RUNPATH: glibc also searches the program's RPATH when libnvinfer dlopen()s its builder
+# resources, which a tarball install in /opt/tensorrt needs (their odd sonames keep ldconfig from finding them)
+target_link_options(vsrplayer PRIVATE -Wl,--disable-new-dtags)
+target_link_libraries(vsrplayer PRIVATE ${CMAKE_DL_LIBS} CUDA::cudart Vulkan::Vulkan SDL3::SDL3 PkgConfig::FFMPEG ${NVINFER} ${NVONNXPARSER})

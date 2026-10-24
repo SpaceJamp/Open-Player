@@ -14,7 +14,10 @@ public:
     ~Display();
     bool init(SDL_Window* win);  // picks the GPU; cuda_device() is then the same GPU on the CUDA side
     int cuda_device() const { return cuda_device_; }
-    bool shared() const { return host_ == nullptr; }
+    bool zero_copy() const { return host_ == nullptr; }  // CUDA writes straight into Vulkan memory
+    const char* gpu_name() const { return gpu_name_; }
+    // diagnostics from the latest present(): GPU -> CPU copy, CPU -> Vulkan memory copy (fallback only), present
+    double last_copy_ms = 0, last_map_ms = 0, last_present_ms = 0;
     bool alloc(int max_w, int max_h);  // frame buffer for images up to max_w x max_h
     uint8_t* begin_frame();            // waits until the GPU is done with the previous frame; write RGBA8 here
     // Shows the w x h image written since begin_frame(). False if nothing could be shown (e.g. minimized).
@@ -23,7 +26,7 @@ public:
 
 private:
     bool make_swapchain();
-    uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want);
+    uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid = 0);
     void barrier(VkImage img, VkImageLayout from, VkImageLayout to, VkAccessFlags src, VkAccessFlags dst);
 
     SDL_Window* win_ = nullptr;
@@ -50,5 +53,8 @@ private:
     cudaExternalMemory_t ext_ = nullptr;
     uint8_t* dev_ptr_ = nullptr;  // where CUDA writes
     void* host_ = nullptr;        // fallback only: mapped Vulkan memory the frame is copied into
+    void* pinned_ = nullptr;      // fallback only: CUDA-pinned staging copy on the way there
+    bool registered_ = false;     // fallback only: host_ registered with CUDA, so the GPU writes it directly
     int cuda_device_ = 0;
+    char gpu_name_[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE] = "";
 };
