@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Codec matrix: encodes a 3 s clip in each format this machine's ffmpeg can write, plays it, and reports
-# how it was decoded and whether playback reached the end. Needs a built player and a display.
-#   bash tests/codecs.sh
+# how it was decoded and whether playback reached the end with sound. Runs offscreen and silent; to watch:
+#   SDL_VIDEO_DRIVER=wayland SDL_AUDIO_DRIVER=pipewire bash tests/codecs.sh
 set -u
 cd "$(dirname "$0")/.."
+export SDL_VIDEO_DRIVER=${SDL_VIDEO_DRIVER:-offscreen} SDL_AUDIO_DRIVER=${SDL_AUDIO_DRIVER:-dummy}
 P=./build/open-player
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
@@ -52,7 +53,7 @@ for c in "${cases[@]}"; do
     printf "%-22s %-34s %s\n" "$name" "-" "SKIP (ffmpeg can't encode it: $(head -c 60 "$T/err" | tr '\n' ' '))"
     continue
   fi
-  out=$(timeout -s INT 9 "$P" "$f" --no-vsr --stats 2>&1)
+  out=$(timeout -s INT 9 "$P" "$f" --no-vsr --stats 2>&1 | awk '{ print } /"paused":true/ { exit }')  # stop at the end
   decoded=$(grep -o '"decode":"[^"]*"' <<< "$out" | head -1 | cut -d'"' -f4)
   t=$(grep -o '"t":[0-9.]*' <<< "$out" | cut -d: -f2 | sort -n | tail -1)
   a=$(grep -o '"audio_s":[0-9.]*' <<< "$out" | cut -d: -f2 | sort -n | tail -1)  # audio buffered for the device

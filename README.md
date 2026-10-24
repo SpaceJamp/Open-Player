@@ -79,7 +79,10 @@ Speed on an RTX 5080, 1080p → 4K, measured with `--stats`:
 | Model (`train.py --size`) | Network time per frame | Plays smoothly |
 |---|---|---|
 | `standard` (default) | 23–25 ms | up to 30 fps |
-| `fast` | 9–11 ms | 57–58 fps on WSL, which copies each frame through the CPU (~3 ms); native Linux skips that copy, so 60 is expected there (not yet measured) |
+| `fast` | 9–13 ms | 58–59 fps on WSL (1–3 frames dropped a second), where the GPU is shared with Windows' display path; native Linux has neither that nor the CPU frame copy, so 60 is expected there (not yet measured) |
+
+The player prepares each frame's network work up to a frame early, so it runs on the GPU while the previous
+frame is being shown.
 
 | Key | Action |
 |---|---|
@@ -100,7 +103,8 @@ Speed on an RTX 5080, 1080p → 4K, measured with `--stats`:
 
 After changing the player, run `bash tests/smoke.sh vsr.onnx` (plays generated clips and runs the model
 self-test) and `bash tests/codecs.sh` (encodes a clip in every format ffmpeg can write, from H.264 to ProRes
-and 7.1 audio, and checks each plays with sound). Both need a display.
+and 7.1 audio, and checks each plays with sound). Both run offscreen and silent, so nothing pops up on your
+screen; prefix `SDL_VIDEO_DRIVER=wayland SDL_AUDIO_DRIVER=pipewire` to watch them.
 
 Each `--stats` line ends with a `verdict`: `ok`, or the stage that cost the most time in a second where frames
 were dropped (decode, upload, convert, vsr, display copy, present).

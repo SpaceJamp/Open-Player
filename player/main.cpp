@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <string>
 
@@ -192,12 +193,32 @@ int main(int argc, char** argv) {
         double pos = 0, wall_base = 0, last_mouse = -10, last_title = -10, last_report = 0;
         Diag diag;
         bool info_done = false;
-        cudaEvent_t ev[5];  // GPU timestamps: before convert, after convert, after VSR, before/after rgba
-        for (auto& e : ev) cudaEventCreate(&e);
-        auto gpu_ms = [&](int a, int b) {
+        auto gpu_ms = [](cudaEvent_t a, cudaEvent_t b) {
             float ms = 0;
-            cudaEventElapsedTime(&ms, ev[a], ev[b]);
+            cudaEventElapsedTime(&ms, a, b);
             return ms;
+        };
+        cudaEvent_t rgba_ev[2];  // GPU timestamps around the display conversion
+        for (auto& e : rgba_ev) cudaEventCreate(&e);
+        // display stream: rgba + copy never wait behind the next frame's network on `st`. High priority, or its
+        // small kernel queues behind the network's and the copy took 5-8 ms instead of 1 at 1080p60 -> 4K.
+        cudaStream_t ds;
+        int prio_low, prio_high;
+        cudaDeviceGetStreamPriorityRange(&prio_low, &prio_high);
+        cudaStreamCreateWithPriority(&ds, cudaStreamNonBlocking, prio_high);
+        // Render-ahead: frames whose convert + network are queued on the GPU, shown once due. With VSR on, the
+        // next frame's network runs while the current one is copied and presented (done one after the other,
+        // 1080p60 -> 4K reached only 57 fps on WSL). ev: start, after convert, after VSR (= ready).
+        struct Prepared { AVFrame* f; double pts; const __half* out; int w, h; bool vsr; cudaEvent_t ev[3]; };
+        std::deque<Prepared> ahead;
+        auto release = [](Prepared& p) {
+            cudaEventSynchronize(p.ev[2]);  // the GPU is done with the decoder surface: hand it back to FFmpeg
+            av_frame_free(&p.f);
+            for (auto& e : p.ev) cudaEventDestroy(e);
+        };
+        auto drop_ahead = [&] {  // after a seek or a VSR toggle the prepared frames are stale
+            for (auto& p : ahead) release(p);
+            ahead.clear();
         };
         Uint64 wall_t0 = SDL_GetTicksNS();
         auto now = [] { return SDL_GetTicksNS() / 1e9; };
@@ -248,7 +269,9 @@ int main(int argc, char** argv) {
                     case SDLK_RIGHT: seek(pos + 5); break;
                     case SDLK_UP: media.set_volume(volume = std::fmin(volume + 0.1f, 2.f)); break;
                     case SDLK_DOWN: media.set_volume(volume = std::fmax(volume - 0.1f, 0.f)); break;
-                    case SDLK_V: if (have_vsr) vsr_on = !vsr_on, reset = true, step |= paused; break;  // paused: show it now
+                    case SDLK_V:  // paused: show the change now
+                        if (have_vsr) vsr_on = !vsr_on, reset = true, step |= paused, drop_ahead();
+                        break;
                     case SDLK_F: SDL_SetWindowFullscreen(win, !full); break;
                     case SDLK_ESCAPE: if (full) { SDL_SetWindowFullscreen(win, false); break; } [[fallthrough]];
                     case SDLK_Q: running = false; break;
@@ -259,38 +282,52 @@ int main(int argc, char** argv) {
             if (media.serial() != serial) {  // a seek finished: VSR history is stale; show the new spot even if paused
                 serial = media.serial();
                 reset = step = true;
+                drop_ahead();
             }
 
+            // Prepare a frame up to one frame early (VSR on). A second one only once the first is due, so it's
+            // shown in this same pass: the network's two output buffers then never overwrite the picture on screen.
+            double lead = vsr_on && !paused && media.fps() > 0 ? 1 / media.fps() : 0;
+            bool slot = ahead.empty() || (vsr_on && ahead.size() == 1 && ahead.front().pts <= clock());
             AVFrame* f;
             double pts;
-            if ((!paused || step) && media.take_due(clock(), step, f, pts)) {
+            if (slot && (!paused || step) && media.take_due(clock() + lead, step && ahead.empty(), f, pts)) {
                 if (f->width == w && f->height == h) {
+                    Prepared p{f, pts, nullptr, w, h, vsr_on, {}};
+                    for (auto& e : p.ev) cudaEventCreate(&e);
                     __half* in = shrink ? full : have_vsr ? vsr.input() : plain;
                     Uint64 u0 = SDL_GetTicksNS();
-                    cudaEventRecord(ev[0], st);
+                    cudaEventRecord(p.ev[0], st);
                     YuvFrame yuv = media.to_gpu(f, st);
                     diag.upload.add((SDL_GetTicksNS() - u0) / 1e6);
                     yuv_to_rgb(yuv, in, st);
                     if (vsr_on && shrink) shrink_rgb(full, w, h, vsr.input(), nw, nh, st);
-                    cudaEventRecord(ev[1], st);
-                    if (vsr_on) shown = vsr.run(reset), sw = nw * s, sh = nh * s, reset = false;
-                    else shown = in, sw = w, sh = h;
-                    cudaEventRecord(ev[2], st);
-                    cudaStreamSynchronize(st);  // done reading the decoder surface: hand it back to FFmpeg
-                    frames_shown++;
-                    diag.shown++;
-                    dirty = true;
-                    diag.convert.add(gpu_ms(0, 1));
-                    if (vsr_on) diag.vsr.add(gpu_ms(1, 2));
-                    diag.late.add((clock() - pts) * 1000);
-                } else if (!size_warned) {  // buffers and engine are sized for the first frame: skip, don't overrun
-                    fprintf(stderr, "video changes size mid-file (%dx%d -> %dx%d): skipping those frames\n", w, h,
-                            f->width, f->height);
-                    size_warned = true;
+                    cudaEventRecord(p.ev[1], st);
+                    if (vsr_on) p.out = vsr.run(reset), p.w = nw * s, p.h = nh * s, reset = false;
+                    else p.out = in;
+                    cudaEventRecord(p.ev[2], st);
+                    ahead.push_back(p);
+                } else {
+                    if (!size_warned) {  // buffers and engine are sized for the first frame: skip, don't overrun
+                        fprintf(stderr, "video changes size mid-file (%dx%d -> %dx%d): skipping those frames\n", w, h,
+                                f->width, f->height);
+                        size_warned = true;
+                    }
+                    av_frame_free(&f);
+                    pos = pts, step = false;
                 }
-                av_frame_free(&f);
-                pos = pts, step = false;
-            } else if (!paused && media.finished()) {
+            }
+            if (!ahead.empty() && (ahead.front().pts <= clock() || step)) {  // the oldest prepared frame is due
+                Prepared& p = ahead.front();
+                cudaEventSynchronize(p.ev[2]);  // usually long done: the GPU had up to a frame's time
+                shown = p.out, sw = p.w, sh = p.h, pos = p.pts, step = false, dirty = true;
+                frames_shown++, diag.shown++;
+                diag.convert.add(gpu_ms(p.ev[0], p.ev[1]));
+                if (p.vsr) diag.vsr.add(gpu_ms(p.ev[1], p.ev[2]));
+                diag.late.add((clock() - p.pts) * 1000);
+                release(p);
+                ahead.pop_front();
+            } else if (!paused && ahead.empty() && media.finished()) {
                 set_paused(true);  // stay on the last frame, like a normal player
             }
 
@@ -298,14 +335,14 @@ int main(int argc, char** argv) {
             if (bar != last_bar) last_bar = bar, dirty = true;
             if (shown && dirty) {
                 uint8_t* target = disp.begin_frame();
-                cudaEventRecord(ev[3], st);
-                rgb_to_rgba8(shown, sw, sh, target, bar ? pos / dur : -1, st);
-                cudaEventRecord(ev[4], st);
-                drawn = disp.present(sw, sh, st);
+                cudaEventRecord(rgba_ev[0], ds);
+                rgb_to_rgba8(shown, sw, sh, target, bar ? pos / dur : -1, ds);
+                cudaEventRecord(rgba_ev[1], ds);
+                drawn = disp.present(sw, sh, ds);
                 if (drawn) {
                     dirty = false;
                     diag.redraws++;
-                    diag.rgba.add(gpu_ms(3, 4));
+                    diag.rgba.add(gpu_ms(rgba_ev[0], rgba_ev[1]));
                     diag.copy.add(disp.last_copy_ms);
                     diag.map.add(disp.last_map_ms);
                     diag.present.add(disp.last_present_ms);
@@ -342,7 +379,9 @@ int main(int argc, char** argv) {
                 SDL_SetWindowTitle(win, t.c_str());
             }
         }
-        for (auto& e : ev) cudaEventDestroy(e);
+        drop_ahead();
+        for (auto& e : rgba_ev) cudaEventDestroy(e);
+        cudaStreamDestroy(ds);
         cudaFree(plain);
         cudaFree(full);
         fprintf(stderr, "shown %d frames, stopped at %s\n", frames_shown, clock_text(pos).c_str());
