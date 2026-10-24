@@ -1,4 +1,4 @@
-// vsrplayer: video player that upscales with our VSR network on the GPU.
+// Open Player: video player that upscales with our VSR network on the GPU.
 // decode (NVDEC) -> YUV->RGB (CUDA) -> VSR (TensorRT) -> RGBA (CUDA) -> Vulkan blit to the window
 #include <SDL3/SDL.h>
 #include <dlfcn.h>
@@ -16,9 +16,9 @@
 #include "vsr.h"
 
 static const char* USAGE =
-    "usage: vsrplayer <video> [--model vsr.onnx] [--no-vsr] [--stats]\n"
-    "       vsrplayer --selftest [vsr.onnx]   compare the TensorRT engine against PyTorch\n"
-    "       vsrplayer --check [vsr.onnx]      test each part of the setup on its own\n"
+    "usage: open-player <video> [--model vsr.onnx] [--no-vsr] [--stats]\n"
+    "       open-player --selftest [vsr.onnx]   compare the TensorRT engine against PyTorch\n"
+    "       open-player --check [vsr.onnx]      test each part of the setup on its own\n"
     "--stats: print a JSON line of timings every second (the control panel's Diagnostics reads these)\n"
     "keys:  space pause | left/right seek 5s | up/down volume | v VSR on/off | f or double-click fullscreen\n"
     "       click the bar at the bottom to seek | q quit\n";
@@ -57,7 +57,7 @@ static int check(const char* model) {
     if (nvcuvid) dlclose(nvcuvid);
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
-        if (SDL_Window* win = SDL_CreateWindow("vsrplayer check", 64, 64, SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN)) {
+        if (SDL_Window* win = SDL_CreateWindow("Open Player check", 64, 64, SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN)) {
             Display d;
             if (d.init(win)) {
                 cudaSetDevice(d.cuda_device());
@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) return fprintf(stderr, "SDL: %s\n", SDL_GetError()), 1;
     // hidden until we know the video size; Vulkan needs the window first to choose the GPU
-    SDL_Window* win = SDL_CreateWindow("vsrplayer", 1280, 720,
+    SDL_Window* win = SDL_CreateWindow("Open Player", 1280, 720,
                                        SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!win) return fprintf(stderr, "SDL: %s\n", SDL_GetError()), 1;
 

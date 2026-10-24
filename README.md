@@ -1,4 +1,4 @@
-# VSR player
+# Open Player
 
 A video player for Linux that upscales video 2x on an NVIDIA GPU with our own network, in the spirit of
 RTX Video Super Resolution. The network, training, and player are all in this repo.
@@ -58,8 +58,8 @@ ln -s /mnt/c/Users/you/Videos/training videos             # e.g. a Windows folde
 ```bash
 cmake -B build -S player
 cmake --build build -j
-./build/vsrplayer --selftest vsr.onnx      # TensorRT output vs PyTorch; should say PASS
-./build/vsrplayer movie.mkv --model vsr.onnx
+./build/open-player --selftest vsr.onnx      # TensorRT output vs PyTorch; should say PASS
+./build/open-player movie.mkv --model vsr.onnx
 ```
 
 The first time it plays a given resolution, it builds a TensorRT engine for it (up to a minute) and caches it
@@ -78,8 +78,8 @@ next to the model.
 ### Diagnostics
 
 ```bash
-./build/vsrplayer --check vsr.onnx                     # PASS/WARN/FAIL for CUDA, NVDEC, Vulkan, audio, TensorRT, model
-./build/vsrplayer movie.mkv --model vsr.onnx --stats   # one JSON line of timings per second
+./build/open-player --check vsr.onnx                     # PASS/WARN/FAIL for CUDA, NVDEC, Vulkan, audio, TensorRT, model
+./build/open-player movie.mkv --model vsr.onnx --stats   # one JSON line of timings per second
 ```
 
 Each `--stats` line ends with a `verdict`: `ok`, or the stage that cost the most time in a second where frames

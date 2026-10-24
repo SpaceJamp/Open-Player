@@ -9,7 +9,7 @@ from tkinter import filedialog, ttk
 
 ROOT = Path(__file__).resolve().parent
 SETTINGS = ROOT / "panel.json"
-PLAYER = ROOT / "build" / "vsrplayer"
+PLAYER = ROOT / "build" / "open-player"
 STEP_LINE = re.compile(r"step (\d+) .*?\+?(-?[\d.]+) dB")  # train.py's progress lines
 
 
@@ -26,7 +26,7 @@ class Panel:
         self.status = tk.StringVar(value="idle")
 
         self.stats, self.check_out, self.player_info = [], [], None
-        root.title("VSR control panel")
+        root.title("Open Player")
         root.columnconfigure(0, weight=1)
         root.rowconfigure(4, weight=1)
         pad = dict(padx=8, pady=4)

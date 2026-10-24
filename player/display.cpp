@@ -12,7 +12,7 @@ bool Display::init(SDL_Window* win) {
     Uint32 n_ext = 0;
     const char* const* exts = SDL_Vulkan_GetInstanceExtensions(&n_ext);
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    app.pApplicationName = "vsrplayer";
+    app.pApplicationName = "Open Player";
     app.apiVersion = VK_API_VERSION_1_1;  // 1.1: device UUIDs and external memory are core
     VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ici.pApplicationInfo = &app;
