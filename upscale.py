@@ -1,8 +1,6 @@
-"""Upscale a video with a trained VSR checkpoint: ffmpeg decodes, the net runs on the GPU,
-then ffmpeg encodes (-o) or mpv plays it live.
+"""Upscale a video file with a trained VSR checkpoint (to watch live, use the player instead).
 
-    python upscale.py in.mp4 -o out.mp4      # encode
-    python upscale.py in.mp4                 # play in mpv
+    python upscale.py in.mp4 -o out.mp4
 """
 import argparse, json, subprocess
 from fractions import Fraction
@@ -20,13 +18,14 @@ def probe(path):
          "-of", "json", path], capture_output=True, text=True, check=True).stdout
     st = json.loads(out)["streams"][0]
     fps = st["avg_frame_rate"]
-    return st["width"], st["height"], fps if Fraction(fps) else "30"
+    known = not fps.startswith("0/") and Fraction(fps)  # ffprobe says "0/0" when it doesn't know
+    return st["width"], st["height"], fps if known else "30"
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("input")
-    ap.add_argument("-o", "--output", help="output file; omit to play in mpv")
+    ap.add_argument("-o", "--output", required=True, help="output file")
     ap.add_argument("-w", "--weights", default="vsr.pt")
     ap.add_argument("--crf", type=int, default=18, help="x264 quality for -o (lower = better)")
     a = ap.parse_args()
@@ -38,17 +37,13 @@ def main():
 
     dec = subprocess.Popen(["ffmpeg", "-v", "error", "-i", a.input, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
                            stdout=subprocess.PIPE)
-    raw_in = ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", fps, "-i", "-"]
-    if a.output:
-        sink = ["ffmpeg", "-v", "error", "-y", *raw_in, "-i", a.input, "-map", "0:v", "-map", "1:a?", "-c:a", "copy",
-                # tag and convert as BT.709 so colors match HD sources instead of ffmpeg's BT.601 default
-                "-vf", "scale=out_color_matrix=bt709", "-colorspace", "bt709", "-color_primaries", "bt709",
-                "-color_trc", "bt709", "-c:v", "libx264", "-crf", str(a.crf), "-pix_fmt", "yuv420p", a.output]
-    else:
-        sink = ["mpv", "--demuxer=rawvideo", f"--demuxer-rawvideo-w={W}", f"--demuxer-rawvideo-h={H}",
-                "--demuxer-rawvideo-mp-format=rgb24", f"--demuxer-rawvideo-fps={float(Fraction(fps))}",
-                f"--audio-file={a.input}", "-"]
-    enc = subprocess.Popen(sink, stdin=subprocess.PIPE)
+    enc = subprocess.Popen(
+        ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", fps, "-i", "-",
+         "-i", a.input, "-map", "0:v", "-map", "1:a?", "-c:a", "copy",
+         # tag and convert as BT.709 so colors match HD sources instead of ffmpeg's BT.601 default
+         "-vf", "scale=out_color_matrix=bt709", "-colorspace", "bt709", "-color_primaries", "bt709",
+         "-color_trc", "bt709", "-c:v", "libx264", "-crf", str(a.crf), "-pix_fmt", "yuv420p", a.output],
+        stdin=subprocess.PIPE)
 
     n, frame_bytes, prev = 0, w * h * 3, None
     try:
@@ -62,7 +57,7 @@ def main():
                 prev, prev_hr = cur, out
                 enc.stdin.write(out.clamp_(0, 1).mul_(255).round_()[0].permute(1, 2, 0).byte().cpu().numpy().tobytes())
                 n += 1
-    except BrokenPipeError:  # mpv closed by the user
+    except BrokenPipeError:  # the encoder quit; its own error message says why
         pass
     finally:
         dec.kill()

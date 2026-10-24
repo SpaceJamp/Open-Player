@@ -122,6 +122,7 @@ void Media::run() {
                 clear_queue();
                 if (audio_) SDL_ClearAudioStream(audio_);
                 audio_end_ = t, skip_until_ = t, eof_ = false;  // decode from the keyframe, show from t
+                last_vpts_ = t - 1 / (fps_ > 0 ? fps_ : 25);
                 serial_++;
                 continue;
             }
@@ -148,7 +149,10 @@ void Media::decode(AVCodecContext* c, AVPacket* pkt) {
         bool has_pts = frame_->best_effort_timestamp != AV_NOPTS_VALUE;
         double pts = has_pts ? frame_->best_effort_timestamp * av_q2d(tb) - start_ : NAN;
         if (c == vctx_) {
-            if (!has_pts || pts < skip_until_ - 0.001) {  // before the seek target
+            // raw .h264/.hevc and some AVIs carry no timestamps: assume one frame after the previous
+            if (!has_pts) pts = last_vpts_ + 1 / (fps_ > 0 ? fps_ : 25);
+            last_vpts_ = pts;
+            if (pts < skip_until_ - 0.001) {  // before the seek target
                 av_frame_unref(frame_);
                 continue;
             }

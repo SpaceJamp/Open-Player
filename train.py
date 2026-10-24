@@ -67,6 +67,17 @@ def psnr(a, b):
     return -10 * math.log10(F.mse_loss(a.float(), b.float()).item() + 1e-10)
 
 
+def lr_at(step, steps, peak):
+    """Cosine from peak down to peak/20 over the whole run; from the step alone, so resuming continues exactly."""
+    return peak / 20 + (peak - peak / 20) * (1 + math.cos(math.pi * step / steps)) / 2
+
+
+def ignore_sigint(_):
+    """DataLoader workers: let only the main process see Ctrl+C. Otherwise PyTorch's workers quit on it and
+    the main process crashes ("worker exited unexpectedly") before it can save."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("videos", nargs="?", default=str(Path(__file__).parent / "videos"),
@@ -79,7 +90,7 @@ def main():
     ap.add_argument("--frames", type=int, default=8, help="frames per clip the recurrence is trained over")
     ap.add_argument("--crop", type=int, default=256, help="high-res crop size")
     ap.add_argument("--batch", type=int, default=8)
-    ap.add_argument("--steps", type=int, default=100_000)
+    ap.add_argument("--steps", type=int, default=100_000, help="total steps; a resumed run continues up to this")
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--workers", type=int, default=8)
     a = ap.parse_args()
@@ -96,14 +107,22 @@ def main():
         model = VSR(a.scale, *SIZES[a.size or "standard"]).to(dev)
     s = model.scale
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=0)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, a.steps, eta_min=a.lr / 20)
+    start = 0
+    if a.resume:
+        ck = torch.load(a.resume, map_location=dev)
+        start = ck.get("step", 0)
+        if "opt" in ck:  # checkpoints from before this was saved restart the optimizer
+            opt.load_state_dict(ck["opt"])
+        if start >= a.steps:
+            raise SystemExit(f"{a.resume} already has {start} steps; raise --steps to train further")
+        print(f"resuming at step {start}")
     data = DataLoader(Clips(a.videos, a.frames, a.crop), batch_size=a.batch, num_workers=a.workers,
-                      persistent_workers=a.workers > 0, pin_memory=True)
+                      persistent_workers=a.workers > 0, pin_memory=True, worker_init_fn=ignore_sigint)
 
     stop = []  # Ctrl+C / the panel's Stop: finish this step, save, exit
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
     t0, it = time.time(), iter(data)
-    for step in range(1, a.steps + 1):
+    for step in range(start + 1, a.steps + 1):
         hr = next(it).to(dev, non_blocking=True).permute(0, 1, 4, 2, 3).float().div_(255)  # (B,T,3,H,W)
         B, T = hr.shape[:2]
         # shortcut: clean bicubic downscale only, so compression artifacts in real input get sharpened too;
@@ -125,8 +144,9 @@ def main():
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        for g in opt.param_groups:
+            g["lr"] = lr_at(step, a.steps, a.lr)
         opt.step()
-        sched.step()
 
         if step % 100 == 0:
             bil = F.interpolate(lr[:, -1], scale_factor=s, mode="bilinear", align_corners=False)
@@ -134,7 +154,7 @@ def main():
             print(f"step {step}  loss {loss.item():.4f}  +{gain:.2f} dB vs bilinear  {(time.time() - t0) / 100:.2f}s/step", flush=True)
             t0 = time.time()
         if step % 2000 == 0 or step == a.steps or stop:
-            save(model, a.out, step=step)
+            save(model, a.out, step=step, opt=opt.state_dict())
         if stop:
             break
     print(f"saved {a.out} at step {step}")

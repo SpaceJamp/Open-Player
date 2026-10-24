@@ -71,7 +71,7 @@ private:
     std::deque<Queued> queue_;
     bool quit_ = false, seek_req_ = false;
     std::atomic<bool> eof_{false};  // also read by finished() callers on the main thread
-    double seek_to_ = 0, skip_until_ = -1;
+    double seek_to_ = 0, skip_until_ = -1, last_vpts_ = -0.04;  // last_vpts_: for frames without timestamps
     std::atomic<int> serial_{0};
     std::atomic<double> audio_end_{0};  // timestamp just past the last audio sample handed to SDL
 

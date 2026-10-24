@@ -122,9 +122,10 @@ int Vsr::selftest(const std::string& onnx) {
     const int* hdr = (const int*)ref.data();
     int s = hdr[0], h = hdr[1], w = hdr[2];
     size_t n = 3ull * w * h, N = n * s * s;
-    if (ref.size() != 12 + 4 * (2 * n + 2 * N)) return fprintf(stderr, "selftest: .ref has the wrong size\n"), 1;
+    if (ref.size() != 12 + 4 * (2 * n + 3 * N))
+        return fprintf(stderr, "selftest: .ref has the wrong size (made by an older export.py? export again)\n"), 1;
     const float* cur = (const float*)(ref.data() + 12);
-    const float *prev = cur + n, *prev_hr = prev + n, *want = prev_hr + N;
+    const float *prev = cur + n, *prev_hr = prev + n, *want = prev_hr + N, *up = want + N;
 
     cudaStream_t st;
     cudaStreamCreate(&st);
@@ -164,10 +165,19 @@ int Vsr::selftest(const std::string& onnx) {
                   std::all_of(kept.begin(), kept.end(), [](__half x) { return __half2float(x) == 0; });
     if (!cut_ok) printf("selftest FAIL: scene-cut reset misbehaves\n");
 
+    // a forced reset must start the shot exactly like training does: PyTorch's bilinear upscale of cur
+    reset_state(v.lr_[0], v.lr_[1], v.hr_[1], w, h, s, nullptr, 0, st);
+    cudaMemcpyAsync(kept.data(), v.hr_[1], N * 2, cudaMemcpyDeviceToHost, st);
+    cudaStreamSynchronize(st);
+    double up_err = 0;
+    for (size_t i = 0; i < N; i++) up_err = std::fmax(up_err, std::fabs(__half2float(kept[i]) - up[i]));
+    bool up_ok = up_err < 2e-3;  // fp16 rounding of values in [0,1] is under 5e-4; a half-pixel shift is ~1e-1
+    if (!up_ok) printf("selftest FAIL: reset upscale differs from PyTorch by up to %.4f\n", up_err);
+
     double psnr = -10 * std::log10(se / N + 1e-12);
     // fp16 vs an fp32 reference on random-noise input: rounding alone lands around 43-47 dB (TensorRT 11.4 on
     // an RTX 5080: 43.7; PyTorch fp16: 46.3), while the same engine in fp32 matches to 81 dB. Wiring bugs land far lower.
-    bool ok = psnr > 40 && cut_ok;
+    bool ok = psnr > 40 && cut_ok && up_ok;
     printf("selftest %s: %.1f dB vs PyTorch, max error %.4f\n", ok ? "PASS" : "FAIL", psnr, worst);
     return ok ? 0 : 1;
 }

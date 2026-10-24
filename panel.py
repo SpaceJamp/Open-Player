@@ -38,7 +38,7 @@ class Panel:
         ttk.Label(tr, text="Video folder").grid(row=0, column=0, sticky="w", **pad)
         ttk.Entry(tr, textvariable=self.videos).grid(row=0, column=1, sticky="ew", **pad)
         ttk.Button(tr, text="Browse…", command=self.pick_folder).grid(row=0, column=2, **pad)
-        ttk.Label(tr, text="Steps").grid(row=1, column=0, sticky="w", **pad)
+        ttk.Label(tr, text="Total steps").grid(row=1, column=0, sticky="w", **pad)
         opts = ttk.Frame(tr)
         opts.grid(row=1, column=1, sticky="w", **pad)
         ttk.Entry(opts, textvariable=self.steps, width=10).pack(side="left")

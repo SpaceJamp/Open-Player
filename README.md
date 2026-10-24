@@ -92,6 +92,9 @@ Speed on an RTX 5080, 1080p → 4K, measured with `--stats`:
 ./build/open-player movie.mkv --model vsr.onnx --stats   # one JSON line of timings per second
 ```
 
+After changing the player, run `bash tests/smoke.sh vsr.onnx`: it plays generated clips (needs a display)
+and runs the model self-test.
+
 Each `--stats` line ends with a `verdict`: `ok`, or the stage that cost the most time in a second where frames
 were dropped (decode, upload, convert, vsr, display copy, present).
 
