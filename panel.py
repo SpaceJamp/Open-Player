@@ -10,7 +10,8 @@ from tkinter import filedialog, ttk
 ROOT = Path(__file__).resolve().parent
 SETTINGS = ROOT / "panel.json"
 PLAYER = ROOT / "build" / "open-player"
-STEP_LINE = re.compile(r"step (\d+) .*?\+?(-?[\d.]+) dB")  # train.py's progress lines
+STEP_LINE = re.compile(r"^step (\d+) ")  # train.py's progress lines
+VAL_LINE = re.compile(r"validation ([-+][\d.]+) dB")  # and its validation score, every 1000 steps
 
 
 class Panel:
@@ -26,7 +27,7 @@ class Panel:
         self.video = tk.StringVar(value=s.get("video", ""))
         self.status = tk.StringVar(value="idle")
 
-        self.stats, self.check_out, self.player_info = [], [], None
+        self.stats, self.check_out, self.player_info, self.val_db = [], [], None, None
         root.title("Open Player")
         root.columnconfigure(0, weight=1)
         root.rowconfigure(4, weight=1)
@@ -150,9 +151,12 @@ class Panel:
                 if val[:6] in ("PASS  ", "WARN  ", "FAIL  "):  # --check results, kept for the report
                     self.check_out.append(val.rstrip())
                 self.write(val)
-                if m := STEP_LINE.search(val):
+                if m := STEP_LINE.match(val):
                     self.progress["value"] = int(m[1])
-                    self.status.set(f"training: step {m[1]}, {float(m[2]):+.2f} dB vs bilinear")
+                    if v := VAL_LINE.search(val):
+                        self.val_db = v[1]
+                    score = f", validation {self.val_db} dB vs bilinear" if self.val_db else ""
+                    self.status.set(f"training: step {m[1]}{score}")
             else:
                 p, what, code, then = val
                 if p is self.job:  # the player runs on its own and doesn't hold the job slot

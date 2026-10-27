@@ -48,10 +48,20 @@ Put them in `videos/` next to `train.py` (subfolders are fine), or make `videos`
 
 ```bash
 ln -s /mnt/c/Users/you/Videos/training videos             # e.g. a Windows folder, seen from WSL
-~/vsr-venv/bin/python train.py --out vsr.pt               # prints the dB gain over bilinear; Ctrl+C any time,
-                                                          # a checkpoint is saved every 2000 steps
+~/vsr-venv/bin/python train.py --out vsr.pt               # Ctrl+C any time; a checkpoint is saved every 2000 steps
 ~/vsr-venv/bin/python export.py vsr.pt                    # -> vsr.onnx + vsr.ref
 ```
+
+How training works, and what helps:
+- The input is made by shrinking frames and then adding random blur, grain and JPEG-style block
+  compression, so the network learns to clean up real compressed video instead of sharpening its artifacts.
+  A model trained on clean input alone scored +0.07 dB over bilinear on such input.
+- Every 1000 steps it prints `validation +X dB vs bilinear`, scored on 32 fixed clips from your videos.
+  When that number stops rising, export and stop; the remaining steps only polish.
+- The source videos set the ceiling: the network can't get sharper than its targets. High-bitrate sources
+  (Blu-ray quality) beat 2–3 Mbit/s web rips, and 4K material shrunk to 1080p makes especially clean targets.
+
+`python tests/train_check.py` checks the degradations and the validation math on the CPU, no GPU or videos needed.
 
 ## 3. Build and play
 
