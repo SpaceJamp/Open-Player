@@ -27,11 +27,17 @@ def probe(path):
     return j["streams"][0]["width"], j["streams"][0]["height"], float(j["format"]["duration"])
 
 
+# Decoding 1080p limits training speed, so each decoded run of frames gives several crops. Each worker keeps two
+# runs and alternates between them, so a batch still mixes scenes. 8 crops: 11.1 batches/s, 4: 5.8 (RTX 5080 box).
+CROPS_PER_DECODE, RUNS = 8, 2
+
+
 class Clips(Dataset):
     """Random runs of `frames` consecutive frames, randomly cropped to crop x crop, as uint8 (T,H,W,3)."""
 
     def __init__(self, root, frames, crop):
         self.frames, self.crop, self.videos = frames, crop, []
+        self.runs, self.turn = [[None, 0] for _ in range(RUNS)], 0  # per worker: [decoded frames, crops left]
         for p in sorted(Path(root).expanduser().rglob("*")):
             if p.suffix.lower() not in VIDEO_EXT:
                 continue
@@ -50,16 +56,28 @@ class Clips(Dataset):
         return 1 << 30  # infinite random sampling; training length is set by --steps
 
     def __getitem__(self, _):
-        T, c = self.frames, self.crop
+        slot = self.runs[self.turn]
+        self.turn = (self.turn + 1) % RUNS
+        if not slot[1]:
+            slot[0], slot[1] = self.decode(), CROPS_PER_DECODE
+        slot[1] -= 1
+        run, c = slot[0], self.crop
+        y, x = random.randrange(run.shape[1] - c + 1), random.randrange(run.shape[2] - c + 1)
+        return run[:, y:y + c, x:x + c].copy()
+
+    def decode(self):
+        """`frames` consecutive full-size frames from a random spot in a random video, as uint8 (T,H,W,3)."""
+        T = self.frames
         for _ in range(10):  # retry on reads that come up short (end of file, broken streams)
             p, w, h, dur = random.choice(self.videos)
-            t, x, y = random.uniform(0, dur - 1.5), random.randrange(w - c + 1), random.randrange(h - c + 1)
+            # start at the keyframe before t instead of decoding up to t exactly, then skip a few frames so runs
+            # don't all open on a keyframe, which is sharper than the frames that follow it
+            t, skip = random.uniform(0, dur - 1.5), random.randrange(12)
             raw = subprocess.run(
-                ["ffmpeg", "-v", "error", "-ss", f"{t:.3f}", "-i", str(p), "-frames:v", str(T),
-                 "-vf", f"crop={c}:{c}:{x}:{y}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-                capture_output=True).stdout
-            if len(raw) == T * c * c * 3:
-                return np.frombuffer(raw, np.uint8).reshape(T, c, c, 3)
+                ["ffmpeg", "-v", "error", "-noaccurate_seek", "-ss", f"{t:.3f}", "-i", str(p), "-frames:v",
+                 str(skip + T), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True).stdout
+            if len(raw) == (skip + T) * w * h * 3:
+                return np.frombuffer(raw, np.uint8).reshape(skip + T, h, w, 3)[skip:]
         raise RuntimeError("could not read a full clip in 10 tries")
 
 
@@ -106,6 +124,7 @@ def main():
     else:
         model = VSR(a.scale, *SIZES[a.size or "standard"]).to(dev)
     s = model.scale
+    model = model.to(memory_format=torch.channels_last)  # fp16 convs run 1.8x faster in this layout (0.132 -> 0.074 s/step)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=0)
     start = 0
     if a.resume:
@@ -134,11 +153,12 @@ def main():
             prev, prev_hr = model.init_state(lr[:, 0])
             loss = 0
             for t in range(T):
-                out, flow = model(lr[:, t], prev, prev_hr)
+                cur = lr[:, t].contiguous(memory_format=torch.channels_last)
+                out, flow = model(cur, prev, prev_hr)
                 loss = loss + F.l1_loss(out.float(), hr[:, t])
                 if t:  # teach the flow net real motion: warped previous frame should match the current one
                     loss = loss + 0.1 * F.l1_loss(warp(prev.float(), flow.float()), lr[:, t])
-                prev, prev_hr = lr[:, t], out
+                prev, prev_hr = cur, out
             loss = loss / T
 
         opt.zero_grad(set_to_none=True)
@@ -151,7 +171,7 @@ def main():
         if step % 100 == 0:
             bil = F.interpolate(lr[:, -1], scale_factor=s, mode="bilinear", align_corners=False)
             gain = psnr(out.clamp(0, 1), hr[:, -1]) - psnr(bil, hr[:, -1])
-            print(f"step {step}  loss {loss.item():.4f}  +{gain:.2f} dB vs bilinear  {(time.time() - t0) / 100:.2f}s/step", flush=True)
+            print(f"step {step}  loss {loss.item():.4f}  {gain:+.2f} dB vs bilinear  {(time.time() - t0) / 100:.2f}s/step", flush=True)
             t0 = time.time()
         if step % 2000 == 0 or step == a.steps or stop:
             save(model, a.out, step=step, opt=opt.state_dict())
