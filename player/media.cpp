@@ -187,13 +187,17 @@ bool Media::software_fallback() {
     fprintf(stderr, "%s can't decode this stream on the GPU, using %s\n", vctx_->codec->name, sw->name);
     avcodec_free_context(&vctx_);
     vctx_ = open_decoder(fmt_->streams[vidx_], nullptr);
+    // packets the GPU decoder already took are gone: re-read from the current spot like a seek, so the new
+    // decoder starts on a keyframe instead of mid-GOP (the run loop also clears queued audio and frames)
+    std::lock_guard l(m_);
+    seek_to_ = std::fmax(skip_until_, 0), seek_req_ = true;
     return vctx_ != nullptr;
 }
 
 void Media::decode(AVCodecContext* c, AVPacket* pkt) {
     int r = avcodec_send_packet(c, pkt);
     // a GPU-only decoder (FFmpeg's AV1) fails on streams NVDEC can't do, e.g. AV1 4:4:4: switch before any frame
-    if (r < 0 && c == vctx_ && !video_frames_ && software_fallback()) return decode(vctx_, pkt);
+    if (r < 0 && c == vctx_ && !video_frames_ && software_fallback()) return;
     if (r < 0) return;  // corrupt packet: skip it
     AVRational tb = fmt_->streams[c == vctx_ ? vidx_ : aidx_]->time_base;
     while ((r = avcodec_receive_frame(c, frame_)) == 0) {
@@ -227,15 +231,16 @@ void Media::decode(AVCodecContext* c, AVPacket* pkt) {
         av_frame_unref(frame_);
     }
     bool failed = r != AVERROR(EAGAIN) && r != AVERROR_EOF;
-    if (failed && c == vctx_ && !video_frames_ && pkt && software_fallback()) decode(vctx_, pkt);
+    if (failed && c == vctx_ && !video_frames_ && pkt) software_fallback();
 }
 
-bool Media::take_due(double clock, bool force, AVFrame*& frame, double& pts) {
+bool Media::take_due(double clock, double lead, bool force, AVFrame*& frame, double& pts) {
     std::lock_guard l(m_);
-    if (queue_.empty() || (!force && queue_.front().pts > clock)) return false;
+    if (queue_.empty() || (!force && queue_.front().pts > clock + lead)) return false;
     Queued q = queue_.front();
     queue_.pop_front();
-    while (!force && !queue_.empty() && queue_.front().pts <= clock) {  // we're behind: skip to the newest due frame
+    // behind: skip to the newest frame due now. Only against `clock`: frames inside the lead window aren't late.
+    while (!force && !queue_.empty() && queue_.front().pts <= clock) {
         av_frame_free(&q.f);
         dropped_++;
         q = queue_.front();

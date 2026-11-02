@@ -33,6 +33,10 @@ a = train.make_lr(hr, 2, torch.Generator().manual_seed(7))
 b = train.make_lr(hr, 2, torch.Generator().manual_seed(7))
 assert a.shape == (2, 4, 3, 32, 32) and a.min() >= 0 and a.max() <= 1
 assert torch.equal(a, b)
+# each clip in a batch gets its own damage, shared by its frames: same clip twice -> different inputs
+same_clip = hr[:1].repeat(2, 1, 1, 1, 1)
+two = train.make_lr(same_clip, 2, torch.Generator().manual_seed(3))
+assert not torch.equal(two[0], two[1])
 
 # validation score: a stand-in that outputs exactly the bilinear upscale must score exactly 0 dB
 class Bilinear:

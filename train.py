@@ -112,18 +112,22 @@ def blur(x, sigma):
 
 def make_lr(hr, s, g=None):
     """Clean high-res clips (B,T,3,H,W) -> the low-res input the net learns from. Real input is a compressed
-    stream, not a clean downscale, so it gets random blur, grain and block compression (one setting per call,
-    from generator g). The targets stay clean, so the net learns to remove these instead of sharpening them."""
+    stream, not a clean downscale, so it gets random blur, grain and block compression (one setting per clip,
+    shared by its frames like a video's; from generator g). The targets stay clean, so the net learns to remove
+    these instead of sharpening them."""
     B, T = hr.shape[:2]
     x = F.interpolate(hr.flatten(0, 1), scale_factor=1 / s, mode="bicubic", antialias=True).clamp(0, 1)
     u = lambda: torch.rand((), generator=g).item()
-    if u() < 0.5:
-        x = blur(x, 0.3 + 1.2 * u())
-    if u() < 0.5:
-        x = x + torch.randn(x.shape, generator=g, device=x.device, dtype=x.dtype) * (0.02 * u())
-    if u() < 0.5:
-        x = blocky(x.clamp(0, 1), 30 + 60 * u())
-    return x.clamp(0, 1).unflatten(0, (B, T))
+    clips = []
+    for c in x.unflatten(0, (B, T)):
+        if u() < 0.5:
+            c = blur(c, 0.3 + 1.2 * u())
+        if u() < 0.5:
+            c = c + torch.randn(c.shape, generator=g, device=c.device, dtype=c.dtype) * (0.02 * u())
+        if u() < 0.5:
+            c = blocky(c.clamp(0, 1), 30 + 60 * u())
+        clips.append(c.clamp(0, 1))
+    return torch.stack(clips)
 
 
 def unroll(model, lr):

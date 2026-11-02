@@ -156,7 +156,11 @@ int main(int argc, char** argv) {
             SDL_SetWindowFullscreenMode(win, SDL_GetDesktopDisplayMode(screen_id));
             SDL_SetWindowFullscreen(win, true);
             SDL_SyncWindow(win);
-            fprintf(stderr, "screen %d: the window system won't place windows, so playing fullscreen there\n", screen);
+            // shortcut: WSLg reports the requested screen even when the window stays on the first, so this can't
+            // catch that case; native compositors report the truth
+            if (SDL_GetDisplayForWindow(win) == screen_id)
+                fprintf(stderr, "screen %d: the window system won't place windows, so playing fullscreen there\n", screen);
+            else fprintf(stderr, "screen %d: the window system kept the window elsewhere; drag it across\n", screen);
         }
         SDL_PumpEvents();
 
@@ -291,7 +295,7 @@ int main(int argc, char** argv) {
             bool slot = ahead.empty() || (vsr_on && ahead.size() == 1 && ahead.front().pts <= clock());
             AVFrame* f;
             double pts;
-            if (slot && (!paused || step) && media.take_due(clock() + lead, step && ahead.empty(), f, pts)) {
+            if (slot && (!paused || step) && media.take_due(clock(), lead, step && ahead.empty(), f, pts)) {
                 if (f->width == w && f->height == h) {
                     Prepared p{f, pts, nullptr, w, h, vsr_on, {}};
                     for (auto& e : p.ev) cudaEventCreate(&e);

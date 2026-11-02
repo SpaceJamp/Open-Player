@@ -38,7 +38,8 @@ public:
 
     // Takes the newest frame that is due at `clock`, freeing older due ones (they are late).
     // force: take the next frame even if it is not due (showing a frame after seeking while paused).
-    bool take_due(double clock, bool force, AVFrame*& frame, double& pts);
+    // lead: also take a frame due within the next `lead` seconds (render-ahead); skipping uses `clock` alone.
+    bool take_due(double clock, double lead, bool force, AVFrame*& frame, double& pts);
     bool finished();             // end of file reached and every frame taken
     double audio_clock() const;  // position of the audio being heard now; NaN while no audio is queued
     void seek(double seconds);   // asynchronous; serial() increments once it has happened
