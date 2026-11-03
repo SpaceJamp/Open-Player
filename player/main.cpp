@@ -24,7 +24,7 @@
 #include "vsr.h"
 
 static const char* USAGE =
-    "usage: open-player <video> [--model vsr.onnx] [--no-vsr] [--stats] [--screen N]\n"
+    "usage: open-player <video> [--model vsr.onnx] [--no-vsr] [--stats] [--screen N] [--fullscreen]\n"
     "--screen N: play on monitor N (1 = first; --check lists them); upscaling is planned for that monitor\n"
     "       open-player --selftest [vsr.onnx]   compare the TensorRT engine against PyTorch\n"
     "       open-player --check [vsr.onnx]      test each part of the setup on its own\n"
@@ -95,12 +95,13 @@ static int check(const char* model) {
 
 int main(int argc, char** argv) {
     const char *path = nullptr, *model = "vsr.onnx";
-    bool vsr_on = true, selftest = false, checking = false, stats = false;
+    bool vsr_on = true, selftest = false, checking = false, stats = false, fullscreen = false;
     int screen = 0;  // --screen N, counted from 1; 0 = the primary display
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
         else if (!strcmp(argv[i], "--screen") && i + 1 < argc) screen = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-vsr")) vsr_on = false;
+        else if (!strcmp(argv[i], "--fullscreen")) fullscreen = true;
         else if (!strcmp(argv[i], "--stats")) stats = true;
         else if (!strcmp(argv[i], "--selftest")) selftest = true;
         else if (!strcmp(argv[i], "--check")) checking = true;
@@ -168,6 +169,8 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "screen %d: the window system won't place windows, so playing fullscreen there\n", screen);
             else fprintf(stderr, "screen %d: the window system kept the window elsewhere; drag it across\n", screen);
         }
+        if (fullscreen && !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN))
+            SDL_SetWindowFullscreen(win, true), SDL_SyncWindow(win);
         SDL_PumpEvents();
 
         // when the network's fixed factor would overshoot the screen (1440p x2 = 5K on a 4K screen), shrink the
@@ -388,12 +391,15 @@ int main(int argc, char** argv) {
             }
 
             if (ui) {
+                Uint64 ui0 = SDL_GetTicksNS();
                 ImGui_ImplVulkan_NewFrame();
                 ImGui_ImplSDL3_NewFrame();
                 ImGui::NewFrame();
                 bool full = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN;
                 auto acts = draw_ui({pos, dur, now(), last_mouse, paused, have_vsr, vsr_on, full, show_info, volume, info, recent});
                 ImGui::Render();
+                diag.ui.add((SDL_GetTicksNS() - ui0) / 1e6);
+                diag.ui_vtx.add(ImGui::GetDrawData()->TotalVtxCount);
                 for (const UiAction& a : acts) switch (a.kind) {
                     case UiAction::TogglePause: toggle_pause(); break;
                     case UiAction::Seek: seek(a.value); break;
@@ -442,10 +448,10 @@ int main(int argc, char** argv) {
                 char buf[512];
                 snprintf(buf, sizeof buf,
                          "GPU      %s (%s)\nDecode   %s\nVideo    %dx%d @ %.2f fps\nScreen   %dx%d\n"
-                         "VSR      %s%s\nShown    %d fps, %d dropped\nNetwork  %.1f ms per frame",
+                         "VSR      %s%s\nShown    %d fps, %d dropped\nNetwork  %.1f ms per frame\nUI       %.2f ms per pass (max %.2f)",
                          disp.gpu_name(), disp.zero_copy() ? "zero-copy" : "CPU copy", media.decode_desc().c_str(), w, h,
                          media.fps(), screen_w, screen_h, vsr_desc.c_str(), have_vsr && !vsr_on ? " (switched off)" : "",
-                         diag.shown, dropped, diag.vsr.mean());
+                         diag.shown, dropped, diag.vsr.mean(), diag.ui.mean(), diag.ui.max);
                 if (info != buf) info = buf, dirty |= show_info && paused;
                 if (stats && !info_done && !media.decode_desc().empty()) {
                     printf("info {\"gpu\":\"%s\",\"display\":\"%s\",\"decode\":\"%s\",\"video\":\"%dx%d@%.2f\","

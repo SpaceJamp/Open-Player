@@ -26,6 +26,10 @@ ffmpeg -v error -f lavfi -i testsrc2=size=640x360:rate=30 -f lavfi -t 3 -i sine=
 t=$(reached "$T/short_audio.mp4" 12 --no-vsr)
 check "plays past where the audio ends (reached ${t:-nothing} of 6 s)" "$(at_least "$t" 5.5)"
 
+# --stats reports what the on-screen controls cost
+timeout -s INT 4 "$P" "$T/short_audio.mp4" --no-vsr --stats 2>/dev/null | grep -q '"ui_ms":[0-9.]*,"ui_max_ms":[0-9.]*,"ui_vtx"' && ok=yes || ok=no
+check "stats include UI timings" "$ok"
+
 # raw H.264 stream: frames carry no timestamps and used to be dropped, leaving a black window
 ffmpeg -v error -f lavfi -i testsrc2=size=640x360:rate=25 -t 4 -c:v libx264 -pix_fmt yuv420p -f h264 "$T/raw.h264"
 t=$(reached "$T/raw.h264" 10 --no-vsr)
