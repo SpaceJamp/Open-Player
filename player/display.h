@@ -7,7 +7,8 @@
 #include <vector>
 
 // Vulkan presenter. CUDA writes RGBA8 straight into a Vulkan buffer (external memory), which is copied to an
-// image and blitted, letterboxed and filtered, onto the swapchain. No shaders or render passes needed.
+// image and blitted, letterboxed and filtered, onto the swapchain. Dear ImGui then draws the UI on top in one
+// render pass (ImGui's own shaders).
 // Where CUDA and Vulkan can't share memory (e.g. WSL), frames go through a host-visible buffer instead.
 class Display {
 public:
@@ -20,12 +21,15 @@ public:
     double last_copy_ms = 0, last_map_ms = 0, last_present_ms = 0;
     bool alloc(int max_w, int max_h);  // frame buffer for images up to max_w x max_h
     uint8_t* begin_frame();            // waits until the GPU is done with the previous frame; write RGBA8 here
-    // Shows the w x h image written since begin_frame(). False if nothing could be shown (e.g. minimized).
-    bool present(int w, int h, cudaStream_t s);
+    bool init_imgui();  // after init(); false if the UI can't be drawn (the player then runs without it)
+    // Shows the w x h image written since begin_frame() (new_frame), or the previous image again with a fresh UI
+    // on top (!new_frame). False if nothing could be shown (e.g. minimized).
+    bool present(int w, int h, cudaStream_t s, bool new_frame);
     void resized() { stale_ = true; }
 
 private:
     bool make_swapchain();
+    void make_framebuffers();  // UI only: views and framebuffers for the current swapchain images
     uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid = 0);
     void barrier(VkImage img, VkImageLayout from, VkImageLayout to, VkAccessFlags src, VkAccessFlags dst);
 
@@ -39,12 +43,16 @@ private:
     VkSwapchainKHR swap_ = VK_NULL_HANDLE;
     VkExtent2D extent_{};
     std::vector<VkImage> images_;
+    std::vector<VkImageView> views_;          // UI only: one per swapchain image
+    std::vector<VkFramebuffer> framebuffers_;  // UI only
+    VkFormat format_ = VK_FORMAT_UNDEFINED;
+    VkRenderPass ui_pass_ = VK_NULL_HANDLE;    // set once ImGui is ready
     std::vector<VkSemaphore> done_;  // one per swapchain image: rendering finished, safe to present
     VkSemaphore acquired_ = VK_NULL_HANDLE;
     VkFence fence_ = VK_NULL_HANDLE;
     VkCommandPool pool_ = VK_NULL_HANDLE;
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;
-    bool stale_ = true, interop_ = false;
+    bool stale_ = true, interop_ = false, has_image_ = false;
 
     VkImage img_ = VK_NULL_HANDLE;
     VkDeviceMemory img_mem_ = VK_NULL_HANDLE;

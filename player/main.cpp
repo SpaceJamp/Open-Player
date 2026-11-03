@@ -12,6 +12,9 @@
 #include <string>
 
 #include "diag.h"
+#include "imgui.h"
+#include "imgui_impl_sdl3.h"
+#include "imgui_impl_vulkan.h"
 #include "display.h"
 #include "kernels.h"
 #include "media.h"
@@ -127,9 +130,13 @@ int main(int argc, char** argv) {
     if (!win) return fprintf(stderr, "SDL: %s\n", SDL_GetError()), 1;
 
     int rc = 1;
+    ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr;  // no imgui.ini next to the video
     {  // scope: tear everything down before SDL_Quit
         Display disp;
         if (!disp.init(win)) return 1;
+        bool ui = ImGui_ImplSDL3_InitForVulkan(win) && disp.init_imgui();
+        if (!ui) fprintf(stderr, "display: on-screen controls unavailable\n");
         cudaSetDevice(disp.cuda_device());
         cudaStream_t st;
         cudaStreamCreate(&st);
@@ -253,6 +260,7 @@ int main(int argc, char** argv) {
         while (running) {
             SDL_Event e;
             while (SDL_PollEvent(&e)) {
+                if (ui) ImGui_ImplSDL3_ProcessEvent(&e);
                 if (e.type == SDL_EVENT_QUIT) running = false;
                 else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) disp.resized(), dirty = true;
                 else if (e.type == SDL_EVENT_WINDOW_EXPOSED) dirty = true;
@@ -339,12 +347,19 @@ int main(int argc, char** argv) {
 
             bool bar = dur > 0 && (paused || now() - last_mouse < 2), drawn = false;
             if (bar != last_bar) last_bar = bar, dirty = true;
+            if (ui) {
+                ImGui_ImplVulkan_NewFrame();
+                ImGui_ImplSDL3_NewFrame();
+                ImGui::NewFrame();
+                ImGui::Text("Open Player");
+                ImGui::Render();
+            }
             if (shown && dirty) {
                 uint8_t* target = disp.begin_frame();
                 cudaEventRecord(rgba_ev[0], ds);
                 rgb_to_rgba8(shown, sw, sh, target, bar ? pos / dur : -1, ds);
                 cudaEventRecord(rgba_ev[1], ds);
-                drawn = disp.present(sw, sh, ds);
+                drawn = disp.present(sw, sh, ds, true);
                 if (drawn) {
                     dirty = false;
                     diag.redraws++;
@@ -393,6 +408,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "shown %d frames, stopped at %s\n", frames_shown, clock_text(pos).c_str());
         rc = 0;
     }
+    if (ImGui::GetIO().BackendPlatformUserData) ImGui_ImplSDL3_Shutdown();
+    ImGui::DestroyContext();
     SDL_DestroyWindow(win);
     SDL_Quit();
     return rc;

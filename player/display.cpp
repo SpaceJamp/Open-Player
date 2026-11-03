@@ -2,6 +2,9 @@
 
 #include <SDL3/SDL_vulkan.h>
 
+#include "imgui.h"
+#include "imgui_impl_vulkan.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -211,7 +214,7 @@ bool Display::make_swapchain() {
     sci.surface = surf_;
     sci.minImageCount = caps.maxImageCount ? std::min(caps.minImageCount + 1, caps.maxImageCount) : caps.minImageCount + 1;
     sci.imageFormat = fmt.format, sci.imageColorSpace = fmt.colorSpace, sci.imageExtent = extent_;
-    sci.imageArrayLayers = 1, sci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    sci.imageArrayLayers = 1, sci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, sci.preTransform = caps.currentTransform;
     sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     for (auto a : {VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR, VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR})
@@ -220,6 +223,7 @@ bool Display::make_swapchain() {
     sci.clipped = VK_TRUE, sci.oldSwapchain = swap_;
     VkSwapchainKHR fresh;
     if (vkCreateSwapchainKHR(dev_, &sci, nullptr, &fresh) != VK_SUCCESS) return false;
+    format_ = fmt.format;
     vkDestroySwapchainKHR(dev_, swap_, nullptr);
     swap_ = fresh;
 
@@ -230,7 +234,56 @@ bool Display::make_swapchain() {
     done_.resize(n);
     VkSemaphoreCreateInfo semi{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     for (auto& s : done_) vkCreateSemaphore(dev_, &semi, nullptr, &s);
+    if (ui_pass_) make_framebuffers();
     stale_ = false;
+    return true;
+}
+
+void Display::make_framebuffers() {
+    for (VkFramebuffer f : framebuffers_) vkDestroyFramebuffer(dev_, f, nullptr);
+    for (VkImageView v : views_) vkDestroyImageView(dev_, v, nullptr);
+    views_.resize(images_.size());
+    framebuffers_.resize(images_.size());
+    for (size_t i = 0; i < images_.size(); i++) {
+        VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vi.image = images_[i], vi.viewType = VK_IMAGE_VIEW_TYPE_2D, vi.format = format_;
+        vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCreateImageView(dev_, &vi, nullptr, &views_[i]);
+        VkFramebufferCreateInfo fi{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        fi.renderPass = ui_pass_, fi.attachmentCount = 1, fi.pAttachments = &views_[i];
+        fi.width = extent_.width, fi.height = extent_.height, fi.layers = 1;
+        vkCreateFramebuffer(dev_, &fi, nullptr, &framebuffers_[i]);
+    }
+}
+
+bool Display::init_imgui() {
+    if (stale_ && !make_swapchain()) return false;  // the render pass needs the swapchain's format
+    // classic render pass, not dynamic rendering: WSL's Vulkan driver (dzn) lacks it. It draws over the blitted
+    // video (LOAD) and leaves the image ready to present.
+    VkAttachmentDescription att{};
+    att.format = format_, att.samples = VK_SAMPLE_COUNT_1_BIT;
+    att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    att.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, att.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription sub{};
+    sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, sub.colorAttachmentCount = 1, sub.pColorAttachments = &ref;
+    VkRenderPassCreateInfo rpi{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rpi.attachmentCount = 1, rpi.pAttachments = &att, rpi.subpassCount = 1, rpi.pSubpasses = &sub;
+    if (vkCreateRenderPass(dev_, &rpi, nullptr, &ui_pass_) != VK_SUCCESS) return ui_pass_ = VK_NULL_HANDLE, false;
+    make_framebuffers();
+
+    ImGui_ImplVulkan_InitInfo ii{};
+    ii.ApiVersion = VK_API_VERSION_1_1, ii.Instance = inst_, ii.PhysicalDevice = gpu_, ii.Device = dev_;
+    ii.QueueFamily = qfam_, ii.Queue = queue_;
+    ii.DescriptorPoolSize = 8;  // the backend makes its own pool; the font atlas is the only texture
+    ii.MinImageCount = 2, ii.ImageCount = std::max<uint32_t>(2, (uint32_t)images_.size());
+    ii.PipelineInfoMain.RenderPass = ui_pass_;
+    if (!ImGui_ImplVulkan_Init(&ii)) {
+        vkDestroyRenderPass(dev_, ui_pass_, nullptr);
+        ui_pass_ = VK_NULL_HANDLE;
+        return false;
+    }
     return true;
 }
 
@@ -249,14 +302,16 @@ void Display::barrier(VkImage img, VkImageLayout from, VkImageLayout to, VkAcces
                          nullptr, 1, &b);
 }
 
-bool Display::present(int w, int h, cudaStream_t s) {
+bool Display::present(int w, int h, cudaStream_t s, bool new_frame) {
     Uint64 t0 = SDL_GetTicksNS();
     size_t bytes = (size_t)w * h * 4;
-    if (host_) cudaMemcpyAsync(registered_ ? host_ : pinned_, dev_ptr_, bytes, cudaMemcpyDeviceToHost, s);
-    // shortcut: a CPU wait instead of exported semaphores; costs a little latency, not throughput
-    cudaStreamSynchronize(s);
+    if (new_frame) {
+        if (host_) cudaMemcpyAsync(registered_ ? host_ : pinned_, dev_ptr_, bytes, cudaMemcpyDeviceToHost, s);
+        // shortcut: a CPU wait instead of exported semaphores; costs a little latency, not throughput
+        cudaStreamSynchronize(s);
+    }
     Uint64 tm = SDL_GetTicksNS();
-    if (pinned_) memcpy(host_, pinned_, bytes);  // ~2 ms per 4K frame on WSL; more threads don't help
+    if (new_frame && pinned_) memcpy(host_, pinned_, bytes);  // ~2 ms per 4K frame on WSL; more threads don't help
     Uint64 t1 = SDL_GetTicksNS();
     last_copy_ms = (tm - t0) / 1e6, last_map_ms = (t1 - tm) / 1e6;
     last_present_ms = 0;
@@ -265,6 +320,7 @@ bool Display::present(int w, int h, cudaStream_t s) {
     VkResult r = vkAcquireNextImageKHR(dev_, swap_, UINT64_MAX, acquired_, VK_NULL_HANDLE, &idx);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) return stale_ = true, false;
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return false;
+    vkWaitForFences(dev_, 1, &fence_, VK_TRUE, UINT64_MAX);  // cmd_ is free again (redraws skip begin_frame)
     vkResetFences(dev_, 1, &fence_);
 
     VkImage target = images_[idx];
@@ -272,14 +328,17 @@ bool Display::present(int w, int h, cudaStream_t s) {
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkResetCommandBuffer(cmd_, 0);
     vkBeginCommandBuffer(cmd_, &bi);
-    barrier(img_, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
-    VkBufferImageCopy copy{};
-    copy.bufferRowLength = w;
-    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    copy.imageExtent = {(uint32_t)w, (uint32_t)h, 1};
-    vkCmdCopyBufferToImage(cmd_, buf_, img_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-    barrier(img_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    if (new_frame) {  // otherwise img_ still holds the last frame, in TRANSFER_SRC layout
+        barrier(img_, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
+        VkBufferImageCopy copy{};
+        copy.bufferRowLength = w;
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {(uint32_t)w, (uint32_t)h, 1};
+        vkCmdCopyBufferToImage(cmd_, buf_, img_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        barrier(img_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        has_image_ = true;
+    }
 
     barrier(target, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
     VkClearColorValue black{};
@@ -295,9 +354,21 @@ bool Display::present(int w, int h, cudaStream_t s) {
     blit.srcOffsets[1] = {w, h, 1};
     blit.dstOffsets[0] = {x0, y0, 0};
     blit.dstOffsets[1] = {x0 + dw, y0 + dh, 1};
-    vkCmdBlitImage(cmd_, img_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                   &blit, VK_FILTER_LINEAR);
-    barrier(target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0);
+    if (has_image_)
+        vkCmdBlitImage(cmd_, img_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                       &blit, VK_FILTER_LINEAR);
+    ImDrawData* ui = ui_pass_ ? ImGui::GetDrawData() : nullptr;
+    if (ui) {  // the pass ends in PRESENT_SRC layout
+        barrier(target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+        VkRenderPassBeginInfo rbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        rbi.renderPass = ui_pass_, rbi.framebuffer = framebuffers_[idx], rbi.renderArea.extent = extent_;
+        vkCmdBeginRenderPass(cmd_, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+        ImGui_ImplVulkan_RenderDrawData(ui, cmd_);
+        vkCmdEndRenderPass(cmd_);
+    } else {
+        barrier(target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0);
+    }
     vkEndCommandBuffer(cmd_);
 
     VkPipelineStageFlags wait = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -318,6 +389,9 @@ bool Display::present(int w, int h, cudaStream_t s) {
 Display::~Display() {
     if (dev_) {
         vkDeviceWaitIdle(dev_);
+        if (ui_pass_) ImGui_ImplVulkan_Shutdown(), vkDestroyRenderPass(dev_, ui_pass_, nullptr);
+        for (VkFramebuffer f : framebuffers_) vkDestroyFramebuffer(dev_, f, nullptr);
+        for (VkImageView v : views_) vkDestroyImageView(dev_, v, nullptr);
         cudaFree(dev_ptr_);  // mapped external buffers are freed with cudaFree too
         cudaFreeHost(pinned_);
         if (registered_) cudaHostUnregister(host_);
