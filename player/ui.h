@@ -11,6 +11,8 @@ void save_recent(const std::string& file, const std::vector<std::string>& list);
 std::string recent_file();  // $XDG_CONFIG_HOME/open-player/recent.txt, default ~/.config/open-player/recent.txt
 
 std::string clock_text(double t);
+bool can_open(const std::string& path);  // an existing regular file: worth restarting the player on
+bool ui_has_keyboard();  // a menu or text field has the keys, so the player's shortcuts must not act on them
 // The player's own arguments with the video replaced, to restart it on another file. The video is the first
 // argument that isn't a flag or the value of --model/--screen; none: the video is added at the end.
 std::vector<std::string> restart_args(const std::vector<std::string>& argv, const std::string& video);  // 01:05 or 1:02:03

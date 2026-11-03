@@ -205,6 +205,7 @@ int main(int argc, char** argv) {
         std::string abs_path = std::filesystem::absolute(path, ec).string();
         std::vector<std::string> recent = add_recent(load_recent(recent_file()), ec ? path : abs_path);
         save_recent(recent_file(), recent);
+        recent = existing_only(recent);  // once: on WSL each check of a /mnt/c path is slow
         int serial = media.serial(), sw = 0, sh = 0, frames_shown = 0;
         float volume = 1;
         const __half* shown = nullptr;
@@ -271,7 +272,9 @@ int main(int argc, char** argv) {
         // Opening another file restarts the player on it with the same arguments: every buffer, the engine and
         // the window size depend on the video, so a fresh start is the simple, safe way to switch.
         auto open_video = [&](const std::string& p) {
-            save_recent(recent_file(), add_recent(load_recent(recent_file()), p));
+            // the new process records it in recent files once it opened; a folder or a missing file would
+            // otherwise end playback for nothing
+            if (!can_open(p)) return (void)fprintf(stderr, "can't open %s: not a file\n", p.c_str());
             std::vector<std::string> args = restart_args(std::vector<std::string>(argv, argv + argc), p);
             std::vector<char*> cargs;
             for (auto& a : args) cargs.push_back(a.data());
@@ -292,9 +295,10 @@ int main(int argc, char** argv) {
                 },
                 nullptr, win, filters, 2, nullptr, false);
         };
-        const std::string vsr_desc =
-            have_vsr ? std::to_string(s) + "x" + (shrink ? " from " + std::to_string(nw) + "x" + std::to_string(nh) : "")
-            : worth_it ? "none" : "off (fills screen)";
+        auto dims = [](int a, int b) { return std::to_string(a) + "x" + std::to_string(b); };
+        const std::string vsr_desc = have_vsr ? std::to_string(s) + "x, " + dims(nw, nh) + " -> " + dims(nw * s, nh * s) +
+                                                    (shrink ? " (shrunk from " + dims(w, h) + ")" : "")
+                                     : worth_it ? "none" : "off (fills screen)";
         SDL_SetWindowTitle(win, std::filesystem::path(path).filename().string().c_str());
 
         while (running) {
@@ -314,7 +318,7 @@ int main(int argc, char** argv) {
                 else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT &&
                          e.button.clicks == 2 && !(ui && ImGui::GetIO().WantCaptureMouse))
                     toggle_fullscreen();
-                else if (e.type == SDL_EVENT_KEY_DOWN) {
+                else if (e.type == SDL_EVENT_KEY_DOWN && !(ui && ui_has_keyboard())) {
                     switch (e.key.key) {
                     case SDLK_SPACE: toggle_pause(); break;
                     case SDLK_LEFT: seek(pos - 5); break;

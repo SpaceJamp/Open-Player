@@ -68,6 +68,15 @@ std::vector<std::string> restart_args(const std::vector<std::string>& argv, cons
     return out;
 }
 
+bool can_open(const std::string& path) {
+    std::error_code ec;
+    return fs::is_regular_file(path, ec);
+}
+
+bool ui_has_keyboard() {
+    return ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) || ImGui::GetIO().WantTextInput;
+}
+
 bool controls_visible(double now, double last_mouse, bool paused, bool hovered) {
     return paused || hovered || now - last_mouse < 2;
 }
@@ -87,25 +96,26 @@ std::vector<UiAction> draw_ui(const UiState& s) {
         if (ImGui::Button(s.paused ? "Play" : "Pause", {ImGui::GetFontSize() * 4, 0}))
             out.push_back({UiAction::TogglePause});
         ImGui::SameLine();
-        ImGui::TextUnformatted((clock_text(s.pos) + " / " + (s.dur > 0 ? clock_text(s.dur) : "--:--")).c_str());
-        ImGui::SameLine();
-        // the right side: volume, VSR, fullscreen; the seek bar takes what's left
-        const float right = ImGui::GetFontSize() * 22;
         static double drag = 0;  // the seek slider's value while dragged; follows playback otherwise
         static bool dragging = false;
+        // while dragging, the time shows where the seek will land
+        ImGui::TextUnformatted((clock_text(dragging ? drag : s.pos) + " / " + (s.dur > 0 ? clock_text(s.dur) : "--:--")).c_str());
+        ImGui::SameLine();
+        // the right side: volume, VSR, open, fullscreen; the seek bar takes what's left
+        const float right = ImGui::GetFontSize() * 26;
         ImGui::SetNextItemWidth(std::fmax(ImGui::GetContentRegionAvail().x - right, 50));
         ImGui::BeginDisabled(s.dur <= 0);
         double lo = 0, hi = std::fmax(s.dur, 1);
         if (!dragging) drag = std::clamp(s.pos, lo, hi);
-        ImGui::SliderScalar("##seek", ImGuiDataType_Double, &drag, &lo, &hi, "");
+        ImGui::SliderScalar("##seek", ImGuiDataType_Double, &drag, &lo, &hi, "", ImGuiSliderFlags_NoInput);
         dragging = ImGui::IsItemActive();
         if (ImGui::IsItemDeactivatedAfterEdit()) out.push_back({UiAction::Seek, drag});  // on release only
         ImGui::EndDisabled();
         ImGui::SameLine();
-        float vol = s.volume;
+        float pct = s.volume * 100;
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7);
-        if (ImGui::SliderFloat("##volume", &vol, 0, 2, "vol %.0f%%", ImGuiSliderFlags_AlwaysClamp))
-            out.push_back({UiAction::SetVolume, vol});
+        if (ImGui::SliderFloat("##volume", &pct, 0, 200, "vol %.0f%%", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_NoInput))
+            out.push_back({UiAction::SetVolume, pct / 100});
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Volume (Up/Down)");
         ImGui::SameLine();
         ImGui::BeginDisabled(!s.vsr_available);
@@ -113,6 +123,8 @@ std::vector<UiAction> draw_ui(const UiState& s) {
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip(s.vsr_available ? "Upscaling (V)" : "No upscaling for this video or screen");
+        ImGui::SameLine();
+        if (ImGui::Button("Open")) out.push_back({UiAction::Open});
         ImGui::SameLine();
         if (ImGui::Button(s.fullscreen ? "Window" : "Fullscreen")) out.push_back({UiAction::ToggleFullscreen});
         ImGui::End();
@@ -133,9 +145,8 @@ std::vector<UiAction> draw_ui(const UiState& s) {
         if (ImGui::MenuItem(s.paused ? "Play" : "Pause", "Space")) out.push_back({UiAction::TogglePause});
         if (ImGui::MenuItem("Open file...")) out.push_back({UiAction::Open});
         if (ImGui::BeginMenu("Recent files")) {
-            auto recent = existing_only(s.recent);
-            if (recent.empty()) ImGui::TextDisabled("none");
-            for (const auto& p : recent)
+            if (s.recent.empty()) ImGui::TextDisabled("none");
+            for (const auto& p : s.recent)  // missing files were dropped at startup
                 if (ImGui::MenuItem(fs::path(p).filename().string().c_str())) out.push_back({UiAction::OpenPath, 0, p});
             ImGui::EndMenu();
         }
@@ -168,6 +179,7 @@ int ui_selftest() {
     save_recent(tmp, {odd, "/b.mp4"});
     check(load_recent(tmp) == (std::vector<std::string>{odd, "/b.mp4"}));
     check(existing_only({tmp, "/definitely/missing.mkv"}) == std::vector<std::string>{tmp});
+    check(can_open(tmp) && !can_open("/tmp") && !can_open("/definitely/missing.mkv"));  // files only
     std::filesystem::remove(tmp);
 
     check(controls_visible(10, 9, false, false) && !controls_visible(10, 7, false, false));  // 2 s rule
@@ -189,6 +201,12 @@ int ui_selftest() {
             draw_ui({/*pos*/ 12, dur, /*now*/ 5, /*last_mouse*/ 4.5, /*paused*/ false, true, true, false, true, 0.8f, "info", {}});
             ImGui::Render();
         }
+    // shortcut keys stay with the menu while it's open (Esc closes it instead of quitting)
+    ImGui::NewFrame();
+    check(!ui_has_keyboard());
+    ImGui::OpenPopup("menu");
+    check(ui_has_keyboard());
+    ImGui::Render();
     ImGui::DestroyContext();
 
 #undef check

@@ -316,11 +316,12 @@ bool Display::present(int w, int h, cudaStream_t s, bool new_frame) {
     last_copy_ms = (tm - t0) / 1e6, last_map_ms = (t1 - tm) / 1e6;
     last_present_ms = 0;
     if (stale_ && !make_swapchain()) return false;
+    // the previous submit is done: cmd_ is free and its wait on acquired_ is over (redraws skip begin_frame)
+    vkWaitForFences(dev_, 1, &fence_, VK_TRUE, UINT64_MAX);
     uint32_t idx;
     VkResult r = vkAcquireNextImageKHR(dev_, swap_, UINT64_MAX, acquired_, VK_NULL_HANDLE, &idx);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) return stale_ = true, false;
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return false;
-    vkWaitForFences(dev_, 1, &fence_, VK_TRUE, UINT64_MAX);  // cmd_ is free again (redraws skip begin_frame)
     vkResetFences(dev_, 1, &fence_);
 
     VkImage target = images_[idx];
