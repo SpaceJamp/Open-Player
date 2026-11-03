@@ -269,7 +269,7 @@ int main(int argc, char** argv) {
         UiNotice notice;
         auto post = [&](const char* icon, std::string text, float level = -1, double hold = 1) {
             notice = UiNotice{icon, std::move(text), level, now(), hold};
-            dirty = true;
+            if (paused) dirty = true;  // playing: the next video frame draws it
         };
         // shared by the keys and the on-screen controls
         auto toggle_pause = [&] {
