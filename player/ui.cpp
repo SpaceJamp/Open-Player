@@ -8,6 +8,7 @@
 #include <fstream>
 
 #include "imgui.h"
+#include "theme.h"
 
 namespace fs = std::filesystem;
 
@@ -207,6 +208,31 @@ int ui_selftest() {
     ImGui::OpenPopup("menu");
     check(ui_has_keyboard());
     ImGui::Render();
+    ImGui::DestroyContext();
+
+    // icon strings encode their codepoints
+    for (auto [s, cp] : {std::pair{ICON_PLAY, CP_PLAY}, {ICON_PAUSE, CP_PAUSE}, {ICON_VOLUME, CP_VOLUME},
+                         {ICON_VOLUME_OFF, CP_VOLUME_OFF}, {ICON_FOLDER, CP_FOLDER}, {ICON_MAXIMIZE, CP_MAXIMIZE},
+                         {ICON_MINIMIZE, CP_MINIMIZE}, {ICON_SPARKLES, CP_SPARKLES}, {ICON_FORWARD_5, CP_FORWARD_5},
+                         {ICON_BACKWARD_5, CP_BACKWARD_5}, {ICON_INFO, CP_INFO}, {ICON_X, CP_X}, {ICON_CLOCK, CP_CLOCK}}) {
+        const unsigned char* u = (const unsigned char*)s;  // 3-byte sequence
+        check(((u[0] & 0x0f) << 12 | (u[1] & 0x3f) << 6 | (u[2] & 0x3f)) == cp);
+    }
+    // fonts and theme: missing files fall back, bundled files load with every icon present
+    ImGui::CreateContext();
+    check(!load_theme("/definitely/missing") && !theme_loaded());  // fallback: default font stays usable
+    ImGui::DestroyContext();
+    ImGui::CreateContext();
+    if (std::filesystem::exists(assets_dir() + "/fonts/Inter-Medium.ttf")) {
+        check(load_theme(assets_dir() + "/fonts") && theme_loaded());
+        ImGuiIO& io = ImGui::GetIO();
+        io.DisplaySize = {1920, 1080};
+        unsigned char* px;
+        int fw, fh;
+        io.Fonts->GetTexDataAsRGBA32(&px, &fw, &fh);
+        for (ImWchar c : {CP_PLAY, CP_PAUSE, CP_VOLUME, CP_FOLDER, CP_MAXIMIZE, CP_SPARKLES, (ImWchar)'A', (ImWchar)0xE9})
+            check(io.Fonts->Fonts[0]->IsGlyphInFont(c));
+    } else printf("note: assets not found next to the binary, font checks skipped\n");
     ImGui::DestroyContext();
 
 #undef check
