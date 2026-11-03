@@ -20,6 +20,7 @@
 #include "display.h"
 #include "kernels.h"
 #include "media.h"
+#include "theme.h"
 #include "ui.h"
 #include "vsr.h"
 
@@ -123,13 +124,13 @@ int main(int argc, char** argv) {
     SDL_Window* win = SDL_CreateWindow("Open Player", 1280, 720,
                                        SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!win) return fprintf(stderr, "SDL: %s\n", SDL_GetError()), 1;
-    if (const char* base = SDL_GetBasePath())  // build/open-player -> assets/; missing icon: the default one
-        if (SDL_Surface* icon = SDL_LoadPNG((std::string(base) + "../assets/icon-64.png").c_str()))
-            SDL_SetWindowIcon(win, icon), SDL_DestroySurface(icon);
+    if (SDL_Surface* icon = SDL_LoadPNG((assets_dir() + "/icon-64.png").c_str()))  // missing: the default icon
+        SDL_SetWindowIcon(win, icon), SDL_DestroySurface(icon);
 
     int rc = 1;
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;  // no imgui.ini next to the video
+    load_theme(assets_dir() + "/fonts");   // missing fonts: one line on stderr, default font
     {  // scope: tear everything down before SDL_Quit
         Display disp;
         if (!disp.init(win)) return 1;
@@ -201,7 +202,7 @@ int main(int argc, char** argv) {
         bool running = true, paused = false, reset = true, step = false, size_warned = false;
         bool dirty = true;   // redraw only when the picture or the UI changed
         bool fresh = false;  // a new frame is waiting to be converted and copied (redraws of the UI alone skip that)
-        bool show_info = false, last_vis = false;
+        bool show_info = false, last_vis = false, named = false, cursor_hidden = false;
         int ui_redraw = 0;  // a few redraws after input, so ImGui's hover and click states catch up
         std::string info;   // info overlay, refreshed once a second
         std::error_code ec;
@@ -265,11 +266,30 @@ int main(int argc, char** argv) {
             paused = p;
             media.set_paused(p);
         };
+        UiNotice notice;
+        auto post = [&](const char* icon, std::string text, float level = -1, double hold = 1) {
+            notice = UiNotice{icon, std::move(text), level, now(), hold};
+            dirty = true;
+        };
         // shared by the keys and the on-screen controls
-        auto toggle_pause = [&] { set_paused(!paused); };
-        auto set_volume = [&](float v) { media.set_volume(volume = std::clamp(v, 0.f, 2.f)); };
+        auto toggle_pause = [&] {
+            set_paused(!paused);
+            post(paused ? ICON_PAUSE : ICON_PLAY, "");
+        };
+        auto set_volume = [&](float v) {
+            media.set_volume(volume = std::clamp(v, 0.f, 2.f));
+            post(volume > 0 ? ICON_VOLUME : ICON_VOLUME_OFF, "Volume " + std::to_string((int)std::lround(volume * 100)) + "%",
+                 notice_level(volume));
+        };
         auto toggle_vsr = [&] {  // paused: show the change now
-            if (have_vsr) vsr_on = !vsr_on, reset = true, step |= paused, drop_ahead();
+            if (!have_vsr) return;
+            vsr_on = !vsr_on, reset = true, step |= paused, drop_ahead();
+            post(ICON_SPARKLES, vsr_on ? "VSR on, " + std::to_string(s) + "x" : "VSR off");
+        };
+        auto key_seek = [&](double dt) {  // the seek bar shows its own position, so only keys post a notice
+            double t = std::fmax(0, pos + dt);
+            seek(t);
+            post(dt > 0 ? ICON_FORWARD_5 : ICON_BACKWARD_5, std::string(dt > 0 ? "+5 s" : "−5 s") + " · " + clock_text(t));
         };
         auto toggle_fullscreen = [&] { SDL_SetWindowFullscreen(win, !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN)); };
         // Opening another file restarts the player on it with the same arguments: every buffer, the engine and
@@ -317,15 +337,15 @@ int main(int argc, char** argv) {
                 }
                 else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) disp.resized(), dirty = true;
                 else if (e.type == SDL_EVENT_WINDOW_EXPOSED) dirty = true;
-                else if (e.type == SDL_EVENT_MOUSE_MOTION) last_mouse = now();
+                else if (e.type == SDL_EVENT_MOUSE_MOTION) last_mouse = now(), SDL_ShowCursor();
                 else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT &&
                          e.button.clicks == 2 && !(ui && ImGui::GetIO().WantCaptureMouse))
                     toggle_fullscreen();
                 else if (e.type == SDL_EVENT_KEY_DOWN && !(ui && ui_has_keyboard())) {
                     switch (e.key.key) {
                     case SDLK_SPACE: toggle_pause(); break;
-                    case SDLK_LEFT: seek(pos - 5); break;
-                    case SDLK_RIGHT: seek(pos + 5); break;
+                    case SDLK_LEFT: key_seek(-5); break;
+                    case SDLK_RIGHT: key_seek(5); break;
                     case SDLK_UP: set_volume(volume + 0.1f); break;
                     case SDLK_DOWN: set_volume(volume - 0.1f); break;
                     case SDLK_V: toggle_vsr(); break;
@@ -396,7 +416,11 @@ int main(int argc, char** argv) {
                 ImGui_ImplSDL3_NewFrame();
                 ImGui::NewFrame();
                 bool full = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN;
-                auto acts = draw_ui({pos, dur, now(), last_mouse, paused, have_vsr, vsr_on, full, show_info, volume, info, recent});
+                if (shown && !named) named = true, post(nullptr, std::filesystem::path(path).filename().string(), -1, 2);
+                int pw = 0, ph = 0;
+                SDL_GetWindowSizeInPixels(win, &pw, &ph);
+                auto acts = draw_ui({pos, dur, now(), last_mouse, paused, have_vsr, vsr_on, full, show_info, volume, info, recent,
+                                     std::clamp(ph / 1080.f, 1.f, 2.5f), notice, s});
                 ImGui::Render();
                 diag.ui.add((SDL_GetTicksNS() - ui0) / 1e6);
                 diag.ui_vtx.add(ImGui::GetDrawData()->TotalVtxCount);
@@ -411,9 +435,12 @@ int main(int argc, char** argv) {
                     case UiAction::Open: show_open_dialog(); break;
                     case UiAction::OpenPath: open_video(a.path); break;
                     }
+                // fullscreen: no cursor over a hidden capsule (mouse motion shows it again)
+                bool hide = full && ui_controls_hidden();
+                if (hide != cursor_hidden) { cursor_hidden = hide; if (hide) SDL_HideCursor(); else SDL_ShowCursor(); }
                 bool vis = paused || now() - last_mouse < 2;
                 bool ui_dirty = !acts.empty() || vis != last_vis || ui_redraw > 0 || ImGui::IsAnyItemActive() ||
-                                ImGui::IsAnyItemHovered() || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+                                ImGui::IsAnyItemHovered() || ui_animating(now()) || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
                 last_vis = vis, ui_redraw = std::max(ui_redraw - 1, 0);
                 // while playing, the UI rides along with the next video frame: a redraw of its own would take a
                 // vsync slot from the video
