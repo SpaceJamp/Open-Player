@@ -1,9 +1,12 @@
 #include "ui.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 
@@ -94,58 +97,261 @@ float notice_alpha(double now, const UiNotice& n) {
 
 float notice_level(float volume) { return std::clamp(volume / 2, 0.0f, 1.0f); }
 
+namespace {
+bool g_shown = false;        // the capsule's visibility target at the last draw
+double g_changed_at = -1e9;  // when that target last changed (shifted so a reversed fade continues smoothly)
+float g_alpha = 0;           // the capsule's opacity at the last draw
+UiNotice g_notice;           // the last notice drawn
+bool g_vol_open = false, g_vol_held = false;  // the volume panel
+
+constexpr double FADE_IN = .15, FADE_OUT = .3;
+
+ImU32 col(ImU32 c, float a = 1) { return ImGui::GetColorU32(c, a); }  // times the style alpha (the capsule fade)
+
+ImVec2 text_size(float px, const char* t) { return ImGui::GetFont()->CalcTextSizeA(px, FLT_MAX, 0, t); }
+
+void text_centred(ImDrawList* dl, float px, ImVec2 c, ImU32 colour, const char* t) {
+    ImVec2 sz = text_size(px, t);
+    dl->AddText(ImGui::GetFont(), px, {std::round(c.x - sz.x / 2), std::round(c.y - sz.y / 2)}, colour, t);
+}
+
+// Buttons are circles concentric with the capsule's ends; without the icon font, pills with the text label.
+float button_w(const char* label, float h, float sc) {
+    return theme_loaded() ? h : text_size(16 * sc, label).x + 24 * sc;
+}
+
+bool icon_button(const char* id, const char* icon, const char* label, ImVec2 p, float h, float sc) {
+    const float w = button_w(label, h, sc);
+    ImGui::SetCursorScreenPos(p);
+    bool pressed = ImGui::InvisibleButton(id, {w, h});
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (ImGui::IsItemHovered())
+        dl->AddRectFilled(p, {p.x + w, p.y + h}, col(IM_COL32(255, 255, 255, ImGui::IsItemActive() ? 52 : 30)), h / 2);
+    text_centred(dl, theme_loaded() ? 20 * sc : 16 * sc, {p.x + w / 2, p.y + h / 2}, col(COL_TEXT),
+                 theme_loaded() ? icon : label);
+    return pressed;
+}
+
+struct Track {
+    bool hovered, held, released;
+    float at;  // the mouse's 0..1 position along the track
+};
+// A slim track centred on y, filled to frac; thicker with a knob on hover. Grey and inert when disabled.
+Track track(const char* id, ImVec2 p, float w, float frac, float sc, bool enabled) {
+    const float hit = 20 * sc;
+    ImGui::SetCursorScreenPos({p.x, p.y - hit / 2});
+    ImGui::BeginDisabled(!enabled);
+    ImGui::InvisibleButton(id, {w, hit});
+    Track t{ImGui::IsItemHovered(), ImGui::IsItemActive(), ImGui::IsItemDeactivated(),
+            std::clamp((ImGui::GetIO().MousePos.x - p.x) / w, 0.0f, 1.0f)};
+    ImGui::EndDisabled();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const bool big = enabled && (t.hovered || t.held);
+    const float th = (big ? 6 : 4) * sc, x = p.x + w * std::clamp(frac, 0.0f, 1.0f);
+    dl->AddRectFilled({p.x, p.y - th / 2}, {p.x + w, p.y + th / 2}, col(COL_TRACK, enabled ? 1 : .5f), th / 2);
+    if (!enabled) return t;
+    if (x > p.x) dl->AddRectFilled({p.x, p.y - th / 2}, {x, p.y + th / 2}, col(COL_PLAYED), th / 2);
+    if (big) dl->AddCircleFilled({x, p.y}, 6 * sc, col(IM_COL32_WHITE));
+    return t;
+}
+
+// The centre card: an icon, one line of text and, for a level, a bar under it.
+void draw_notice(const UiNotice& n, float sc, float a) {
+    const ImGuiIO& io = ImGui::GetIO();
+    const char* icon = theme_loaded() ? n.icon : nullptr;
+    std::string text = n.text;
+    if (text.empty() && !icon && n.icon)  // icon-only notice without the icon font: say it
+        text = !strcmp(n.icon, ICON_PAUSE) ? "Pause" : !strcmp(n.icon, ICON_PLAY) ? "Play" : "";
+    if (text.empty() && !icon) return;
+    const bool only_icon = text.empty(), bar = n.level >= 0;
+    const float tp = 18 * sc, ip = (only_icon ? 36 : 24) * sc, gap = 10 * sc;
+    const float padx = (only_icon ? 18 : 22) * sc, pady = (only_icon ? 18 : 14) * sc;
+    const ImVec2 ts = only_icon ? ImVec2{0, 0} : text_size(tp, text.c_str());
+    const float iw = icon ? text_size(ip, icon).x : 0, row_w = iw + (icon && !only_icon ? gap : 0) + ts.x;
+    const float row_h = std::fmax(icon ? ip : 0, ts.y), bar_h = 4 * sc, bar_gap = 12 * sc;
+    // long file names are clipped to the window rather than overflowing it
+    const float w = std::fmin(std::fmax(row_w, bar ? 200 * sc : 0), io.DisplaySize.x - 2 * padx - 32 * sc);
+    const float h = row_h + (bar ? bar_gap + bar_h : 0);
+    const ImVec2 c{io.DisplaySize.x / 2, io.DisplaySize.y / 2};
+    const ImVec2 p0{std::round(c.x - w / 2 - padx), std::round(c.y - h / 2 - pady)};
+    const ImVec2 p1{p0.x + w + 2 * padx, p0.y + h + 2 * pady};
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();  // over the video, under every window
+    dl->AddRectFilled(p0, p1, ImGui::GetColorU32(COL_CAPSULE, a), 14 * sc);
+    float x = c.x - std::fmin(row_w, w) / 2;
+    const float ry = p0.y + pady + row_h / 2;
+    const ImU32 tc = ImGui::GetColorU32(COL_TEXT, a);
+    if (icon) {
+        dl->AddText(ImGui::GetFont(), ip, {std::round(x), std::round(ry - ip / 2)}, tc, icon);
+        x += iw + gap;
+    }
+    if (!only_icon) {
+        const ImVec4 clip{p0.x + padx, p0.y, p1.x - padx, p1.y};
+        dl->AddText(ImGui::GetFont(), tp, {std::round(x), std::round(ry - ts.y / 2)}, tc, text.c_str(), nullptr, 0,
+                    &clip);
+    }
+    if (bar) {
+        const ImVec2 b0{p0.x + padx, p1.y - pady - bar_h}, b1{p1.x - padx, p1.y - pady};
+        dl->AddRectFilled(b0, b1, ImGui::GetColorU32(COL_TRACK, a), bar_h / 2);
+        const float bx = b0.x + (b1.x - b0.x) * std::clamp(n.level, 0.0f, 1.0f);
+        if (bx > b0.x) dl->AddRectFilled(b0, {bx, b1.y}, ImGui::GetColorU32(COL_PLAYED, a), bar_h / 2);
+    }
+}
+}  // namespace
+
+bool ui_animating(double now) {
+    return now - g_changed_at < (g_shown ? FADE_IN : FADE_OUT) || notice_alpha(now, g_notice) > 0;
+}
+
+bool ui_controls_hidden() { return g_alpha == 0; }
+
 std::vector<UiAction> draw_ui(const UiState& s) {
     std::vector<UiAction> out;
     ImGuiIO& io = ImGui::GetIO();
-    const float bar_h = ImGui::GetFrameHeight() * 2;
-    bool hovered = io.MousePos.y >= io.DisplaySize.y - bar_h && io.MousePos.y <= io.DisplaySize.y;
+    const float sc = s.scale;
+    ImGui::PushFont(nullptr, 16 * sc);
+    const float fs = ImGui::GetFontSize();
+    const bool icons = theme_loaded();
 
-    if (controls_visible(s.now, s.last_mouse, s.paused, hovered)) {
-        ImGui::SetNextWindowPos({0, io.DisplaySize.y - bar_h});
-        ImGui::SetNextWindowSize({io.DisplaySize.x, bar_h});
-        ImGui::SetNextWindowBgAlpha(0.6f);
-        ImGui::Begin("controls", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                                              ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
-        if (ImGui::Button(s.paused ? "Play" : "Pause", {ImGui::GetFontSize() * 4, 0}))
-            out.push_back({UiAction::TogglePause});
-        ImGui::SameLine();
-        static double drag = 0;  // the seek slider's value while dragged; follows playback otherwise
-        static bool dragging = false;
-        // while dragging, the time shows where the seek will land
-        ImGui::TextUnformatted((clock_text(dragging ? drag : s.pos) + " / " + (s.dur > 0 ? clock_text(s.dur) : "--:--")).c_str());
-        ImGui::SameLine();
-        // the right side: volume, VSR, open, fullscreen; the seek bar takes what's left
-        const float right = ImGui::GetFontSize() * 26;
-        ImGui::SetNextItemWidth(std::fmax(ImGui::GetContentRegionAvail().x - right, 50));
-        ImGui::BeginDisabled(s.dur <= 0);
-        double lo = 0, hi = std::fmax(s.dur, 1);
-        if (!dragging) drag = std::clamp(s.pos, lo, hi);
-        ImGui::SliderScalar("##seek", ImGuiDataType_Double, &drag, &lo, &hi, "", ImGuiSliderFlags_NoInput);
-        dragging = ImGui::IsItemActive();
-        if (ImGui::IsItemDeactivatedAfterEdit()) out.push_back({UiAction::Seek, drag});  // on release only
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        float pct = s.volume * 100;
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7);
-        if (ImGui::SliderFloat("##volume", &pct, 0, 200, "vol %.0f%%", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_NoInput))
-            out.push_back({UiAction::SetVolume, pct / 100});
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Volume (Up/Down)");
-        ImGui::SameLine();
-        ImGui::BeginDisabled(!s.vsr_available);
-        if (ImGui::Button(!s.vsr_available ? "VSR n/a" : s.vsr_on ? "VSR on" : "VSR off")) out.push_back({UiAction::ToggleVsr});
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip(s.vsr_available ? "Upscaling (V)" : "No upscaling for this video or screen");
-        ImGui::SameLine();
-        if (ImGui::Button("Open")) out.push_back({UiAction::Open});
-        ImGui::SameLine();
-        if (ImGui::Button(s.fullscreen ? "Window" : "Fullscreen")) out.push_back({UiAction::ToggleFullscreen});
-        ImGui::End();
+    // the capsule: 78% wide up to 1100, 48 tall, 14 above the bottom (at scale 1)
+    const float cw = std::fmin(io.DisplaySize.x * .78f, 1100 * sc), ch = 48 * sc;
+    const ImVec2 c0{std::round((io.DisplaySize.x - cw) / 2), std::round(io.DisplaySize.y - 14 * sc - ch)};
+    const ImVec2 c1{c0.x + cw, c0.y + ch};
+    const float cy = c0.y + ch / 2, pad = 8 * sc, bh = 32 * sc, gap = 6 * sc, seek_gap = 12 * sc;
+    const bool hovered = g_vol_open || ImGui::IsMouseHoveringRect(c0, c1, false);
+    const bool vis = controls_visible(s.now, s.last_mouse, s.paused, hovered);
+    if (vis != g_shown) {  // start the new fade from the current opacity, so a reversal doesn't jump
+        g_changed_at = s.now - (vis ? g_alpha * FADE_IN : (1 - g_alpha) * FADE_OUT);
+        g_shown = vis;
     }
+    g_alpha = fade_alpha(s.now, g_changed_at, vis, FADE_IN, FADE_OUT);
 
+    static double drag = 0;  // the seek target while dragged
+    static bool dragging = false;
+    bool vol_hover = false;
+    if (g_alpha > 0) {
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, g_alpha);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+        const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                                       ImGuiWindowFlags_NoBackground;
+        ImGui::SetNextWindowPos(c0);
+        ImGui::SetNextWindowSize({cw, ch});
+        ImGui::Begin("controls", nullptr, flags);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(c0, c1, col(COL_CAPSULE), ch / 2);
+
+        // widths first: the seek bar takes what the rest leaves. Both times get a fixed slot (digits as zeros) so
+        // the bar doesn't twitch as proportional digits change.
+        const std::string elapsed = clock_text(dragging ? drag : s.pos), total = s.dur > 0 ? clock_text(s.dur) : "--:--";
+        std::string slot = clock_text(std::fmax(s.dur, s.pos));
+        for (char& c : slot) c = isdigit((unsigned char)c) ? '0' : c;
+        const float tw = std::fmax(text_size(fs, slot.c_str()).x, text_size(fs, total.c_str()).x);
+        const char* play_l = s.paused ? "Play" : "Pause";
+        const char* vol_l = "Volume";
+        const char* fs_l = s.fullscreen ? "Window" : "Fullscreen";
+        const char* vsr_l = s.vsr_on ? (icons ? "VSR 2x" : "VSR on") : "VSR off";
+        const float badge_px = 14 * sc, badge_w = text_size(badge_px, vsr_l).x + 20 * sc, badge_h = 24 * sc;
+        float x = c0.x + pad;
+        const float seek_x = x + button_w(play_l, bh, sc) + gap + tw + seek_gap;
+        const float right = seek_gap + tw + gap + button_w(vol_l, bh, sc) + gap +
+                            (s.vsr_available ? badge_w + gap : 0) + button_w("Open", bh, sc) + gap +
+                            button_w(fs_l, bh, sc) + pad;
+        const float seek_w = std::fmax(c1.x - right - seek_x, 1);
+
+        if (icon_button("##play", s.paused ? ICON_PLAY : ICON_PAUSE, play_l, {x, cy - bh / 2}, bh, sc))
+            out.push_back({UiAction::TogglePause});
+        x += button_w(play_l, bh, sc) + gap;
+        const ImU32 tc = col(COL_TEXT);
+        dl->AddText({std::round(x + tw - text_size(fs, elapsed.c_str()).x), std::round(cy - fs / 2)}, tc,
+                    elapsed.c_str());  // right-aligned against the bar
+
+        const bool known = s.dur > 0;
+        if (!dragging) drag = std::clamp(s.pos, 0.0, std::fmax(s.dur, 0.0));
+        Track t = track("##seek", {seek_x, cy}, seek_w, known ? (float)(drag / s.dur) : 0, sc, known);
+        if (t.held) drag = t.at * s.dur;  // the time text shows where the seek will land
+        if (t.released && known) out.push_back({UiAction::Seek, drag});  // on release only, click or drag
+        dragging = t.held;
+        if (known && (t.hovered || t.held)) {  // the time under the mouse, above it
+            const std::string at = clock_text(t.at * s.dur);
+            const float px = 14 * sc;
+            const ImVec2 sz = text_size(px, at.c_str()), tip{sz.x + 16 * sc, sz.y + 8 * sc};
+            const float mx = std::clamp(io.MousePos.x, tip.x / 2, io.DisplaySize.x - tip.x / 2);
+            const ImVec2 p0{std::round(mx - tip.x / 2), std::round(c0.y - 8 * sc - tip.y)};
+            ImDrawList* fg = ImGui::GetForegroundDrawList();
+            fg->AddRectFilled(p0, {p0.x + tip.x, p0.y + tip.y}, col(COL_CAPSULE), tip.y / 2);
+            text_centred(fg, px, {p0.x + tip.x / 2, p0.y + tip.y / 2}, tc, at.c_str());
+        }
+        x = seek_x + seek_w + seek_gap;
+        dl->AddText({std::round(x), std::round(cy - fs / 2)}, col(COL_TEXT, known ? 1 : .6f), total.c_str());
+        x += tw + gap;
+
+        icon_button("##volume", s.volume <= 0 ? ICON_VOLUME_OFF : ICON_VOLUME, vol_l, {x, cy - bh / 2}, bh, sc);
+        vol_hover = ImGui::IsItemHovered();
+        const float vol_cx = x + button_w(vol_l, bh, sc) / 2;
+        x += button_w(vol_l, bh, sc) + gap;
+
+        if (s.vsr_available) {  // no badge when this video isn't upscaled
+            const ImVec2 b0{x, std::round(cy - badge_h / 2)}, b1{x + badge_w, b0.y + badge_h};
+            ImGui::SetCursorScreenPos(b0);
+            if (ImGui::InvisibleButton("##vsr", {badge_w, badge_h})) out.push_back({UiAction::ToggleVsr});
+            dl->AddRectFilled(b0, b1, col(s.vsr_on ? COL_VSR_ON : COL_VSR_OFF), badge_h / 2);
+            if (ImGui::IsItemHovered()) {
+                dl->AddRectFilled(b0, b1, col(IM_COL32(255, 255, 255, 36)), badge_h / 2);
+                ImGui::SetTooltip("Upscaling (V)");
+            }
+            text_centred(dl, badge_px, {x + badge_w / 2, cy}, col(IM_COL32_WHITE), vsr_l);
+            x += badge_w + gap;
+        }
+        if (icon_button("##open", ICON_FOLDER, "Open", {x, cy - bh / 2}, bh, sc)) out.push_back({UiAction::Open});
+        x += button_w("Open", bh, sc) + gap;
+        if (icon_button("##full", s.fullscreen ? ICON_MINIMIZE : ICON_MAXIMIZE, fs_l, {x, cy - bh / 2}, bh, sc))
+            out.push_back({UiAction::ToggleFullscreen});
+        ImGui::End();
+
+        // volume panel: above the icon, open while the icon, the panel or the gap between them is hovered
+        const float pw = 176 * sc, ph = 36 * sc;
+        const ImVec2 p0{std::round(std::clamp(vol_cx - pw / 2, 0.0f, io.DisplaySize.x - pw)), c0.y - 8 * sc - ph};
+        if (g_vol_open) vol_hover |= g_vol_held || ImGui::IsMouseHoveringRect(p0, {p0.x + pw, c0.y}, false);
+        if (vol_hover) {
+            ImGui::SetNextWindowPos(p0);
+            ImGui::SetNextWindowSize({pw, ph});
+            ImGui::Begin("volume", nullptr, flags);
+            ImGui::GetWindowDrawList()->AddRectFilled(p0, {p0.x + pw, p0.y + ph}, col(COL_CAPSULE), 10 * sc);
+            const float px = 14 * sc, tx = 40 * sc, inset = 14 * sc;
+            Track v = track("##vol", {p0.x + inset, p0.y + ph / 2}, pw - 2 * inset - tx, s.volume / 2, sc, true);
+            g_vol_held = v.held;
+            const float nv = std::round(v.at * 200) / 100;  // whole percents
+            if (v.held && std::fabs(nv - s.volume) > 1e-4f) out.push_back({UiAction::SetVolume, nv});
+            const std::string pct = std::to_string((int)std::lround(s.volume * 100)) + "%";
+            const ImVec2 sz = text_size(px, pct.c_str());
+            ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), px,
+                                                {std::round(p0.x + pw - inset - sz.x), std::round(p0.y + (ph - sz.y) / 2)},
+                                                tc, pct.c_str());
+            ImGui::End();
+        }
+        ImGui::PopStyleVar(3);
+    }
+    g_vol_open = vol_hover;
+    if (!vol_hover) g_vol_held = false;
+
+    g_notice = s.notice;
+    if (float a = notice_alpha(s.now, s.notice); a > 0) draw_notice(s.notice, sc, a);
+
+    // the rounded card look, shared by the info card and the menu
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12 * sc);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 10 * sc);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {14 * sc, 10 * sc});
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {8 * sc, 6 * sc});
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {8 * sc, 4 * sc});
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, COL_CAPSULE);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, IM_COL32(20, 22, 30, 235));  // the capsule colour, opaque enough to read
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(0x3f, 0xd0, 0xe0, 64));
+    ImGui::PushStyleColor(ImGuiCol_Separator, IM_COL32(255, 255, 255, 30));
     if (s.show_info) {
-        ImGui::SetNextWindowPos({10, 10});
-        ImGui::SetNextWindowBgAlpha(0.6f);
+        ImGui::SetNextWindowPos({10 * sc, 10 * sc});
         ImGui::Begin("info", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
                                           ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings);
         ImGui::TextUnformatted(s.info.c_str());
@@ -154,23 +360,31 @@ std::vector<UiAction> draw_ui(const UiState& s) {
 
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow))
         ImGui::OpenPopup("menu");
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {8 * sc, 8 * sc});
+    auto item = [&](const char* icon, const char* text) { return icons ? std::string(icon) + "  " + text : text; };
     if (ImGui::BeginPopup("menu")) {
-        if (ImGui::MenuItem(s.paused ? "Play" : "Pause", "Space")) out.push_back({UiAction::TogglePause});
-        if (ImGui::MenuItem("Open file...")) out.push_back({UiAction::Open});
-        if (ImGui::BeginMenu("Recent files")) {
+        if (ImGui::MenuItem(item(s.paused ? ICON_PLAY : ICON_PAUSE, s.paused ? "Play" : "Pause").c_str(), "Space"))
+            out.push_back({UiAction::TogglePause});
+        if (ImGui::MenuItem(item(ICON_FOLDER, "Open file...").c_str())) out.push_back({UiAction::Open});
+        if (ImGui::BeginMenu(item(ICON_CLOCK, "Recent files").c_str())) {
             if (s.recent.empty()) ImGui::TextDisabled("none");
             for (const auto& p : s.recent)  // missing files were dropped at startup
                 if (ImGui::MenuItem(fs::path(p).filename().string().c_str())) out.push_back({UiAction::OpenPath, 0, p});
             ImGui::EndMenu();
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("Upscaling (VSR)", "V", s.vsr_on, s.vsr_available)) out.push_back({UiAction::ToggleVsr});
-        if (ImGui::MenuItem("Fullscreen", "F", s.fullscreen)) out.push_back({UiAction::ToggleFullscreen});
-        if (ImGui::MenuItem("Info", "I", s.show_info)) out.push_back({UiAction::ToggleInfo});
+        if (ImGui::MenuItem(item(ICON_SPARKLES, "Upscaling (VSR)").c_str(), "V", s.vsr_on, s.vsr_available))
+            out.push_back({UiAction::ToggleVsr});
+        if (ImGui::MenuItem(item(s.fullscreen ? ICON_MINIMIZE : ICON_MAXIMIZE, "Fullscreen").c_str(), "F", s.fullscreen))
+            out.push_back({UiAction::ToggleFullscreen});
+        if (ImGui::MenuItem(item(ICON_INFO, "Info").c_str(), "I", s.show_info)) out.push_back({UiAction::ToggleInfo});
         ImGui::Separator();
-        if (ImGui::MenuItem("Quit", "Q")) out.push_back({UiAction::Quit});
+        if (ImGui::MenuItem(item(ICON_X, "Quit").c_str(), "Q")) out.push_back({UiAction::Quit});
         ImGui::EndPopup();
     }
+    ImGui::PopStyleVar(8);
+    ImGui::PopStyleColor(4);
+    ImGui::PopFont();
     return out;
 }
 
@@ -207,27 +421,70 @@ int ui_selftest() {
     n.shown_at = 6.2;  // a new notice replaces the fading one: full again
     check(notice_alpha(6.25, n) == 1);
     check(notice_level(0.8f) == 0.4f && notice_level(2.0f) == 1.0f && notice_level(-1) == 0);
-    // headless ImGui: frames without any backend or present must not assert
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = {1920, 1080};
-    io.IniFilename = nullptr;
-    unsigned char* px;
-    int fw, fh;
-    io.Fonts->GetTexDataAsRGBA32(&px, &fw, &fh);
-    for (double dur : {600.0, 0.0})    // normal and unknown-duration video
-        for (int i = 0; i < 3; i++) {  // several frames, as when minimized
-            ImGui::NewFrame();
-            draw_ui({/*pos*/ 12, dur, /*now*/ 5, /*last_mouse*/ 4.5, /*paused*/ false, true, true, false, true, 0.8f, "info", {}});
-            ImGui::Render();
+    // headless ImGui: frames without any backend or present must not assert, themed or not, at every scale
+    for (bool themed : {false, true}) {
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO();
+        io.IniFilename = nullptr;
+        if (themed && !load_theme(assets_dir() + "/fonts")) {
+            printf("note: themed headless frames skipped\n");
+            ImGui::DestroyContext();
+            continue;
         }
-    // shortcut keys stay with the menu while it's open (Esc closes it instead of quitting)
-    ImGui::NewFrame();
-    check(!ui_has_keyboard());
-    ImGui::OpenPopup("menu");
-    check(ui_has_keyboard());
-    ImGui::Render();
-    ImGui::DestroyContext();
+        unsigned char* px;
+        int fw, fh;
+        io.Fonts->GetTexDataAsRGBA32(&px, &fw, &fh);
+        std::vector<UiAction> acts;
+        auto frames = [&](UiState st, int n = 3, double step = .2) {  // several frames, as when minimized
+            for (int i = 0; i < n; i++, st.now += step) {
+                ImGui::NewFrame();
+                auto a = draw_ui(st);
+                acts.insert(acts.end(), a.begin(), a.end());
+                ImGui::Render();
+            }
+        };
+        for (ImVec2 size : {ImVec2{1920, 1080}, ImVec2{3840, 2160}, ImVec2{320, 180}})
+            for (double dur : {600.0, 0.0}) {  // normal and unknown-duration video
+                io.DisplaySize = size;
+                UiState st{12, dur, 5, 4.5, false, true, true, false, true, 0.8f, "info", {"/v/a.mkv"}};
+                st.scale = size.y > 1080 ? 2.5f : 1;  // 2160/1080 = 2; 2.5 is the clamp's top
+                st.notice = {ICON_VOLUME, "Volume 80%", .4f, st.now, 1};
+                frames(st);
+                check(ui_animating(st.now));
+                st.notice = {nullptr, "Am\xc3\xa9lie (2001).mkv", -1, st.now, 2};
+                frames(st);
+                // sweep the mouse along the capsule: hovers every button, the seek bar and the volume panel
+                float sc = st.scale, y = size.y - 14 * sc - 24 * sc;
+                for (float x = 0; x < size.x; x += 8 * sc) io.AddMousePosEvent(x, y), frames(st, 1, 0);
+                io.AddMousePosEvent(size.x / 2, y - 60 * sc);  // over the volume panel's height, not on it
+                st.notice = {};
+                st.last_mouse = st.now - 10;  // idle: the capsule fades out over 0.3 s
+                frames(st);
+                check(ui_controls_hidden() && !ui_animating(st.now + 5));
+            }
+        // a click on the middle of the seek bar seeks there on release
+        io.DisplaySize = {1920, 1080};
+        UiState st{12, 600, 50, 50, false, true, true, false, false, 0.8f, "", {}};
+        io.AddMousePosEvent(960, 1080 - 14 - 24);
+        frames(st, 3, .1);  // fade in
+        st.now += .3;
+        acts.clear();
+        io.AddMouseButtonEvent(0, true);
+        frames(st, 2, 0);
+        check(acts.empty());  // nothing while held
+        io.AddMouseButtonEvent(0, false);
+        frames(st, 2, 0);
+        // mid-track: about the middle of the video (labels without the icon font push the bar left)
+        check(acts.size() == 1 && acts[0].kind == UiAction::Seek && acts[0].value > 200 && acts[0].value < 480);
+        // shortcut keys stay with the menu while it's open (Esc closes it instead of quitting); the menu draws
+        ImGui::NewFrame();
+        check(!ui_has_keyboard());
+        ImGui::OpenPopup("menu");
+        check(ui_has_keyboard());
+        draw_ui({12, 600, 60, 60, true, true, false, true, false, 0, "", {"/v/a.mkv", "/v/b.mkv"}});
+        ImGui::Render();
+        ImGui::DestroyContext();
+    }
 
     // icon strings encode their codepoints
     for (auto [s, cp] : {std::pair{ICON_PLAY, CP_PLAY}, {ICON_PAUSE, CP_PAUSE}, {ICON_VOLUME, CP_VOLUME},

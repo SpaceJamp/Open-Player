@@ -45,8 +45,10 @@ struct UiAction {
 };
 // The control bar shows while the mouse moved in the last 2 s, while paused, or while the mouse is over it.
 bool controls_visible(double now, double last_mouse, bool paused, bool hovered);
-// Draws the control bar, the info overlay (s.show_info) and the right-click menu; returns what the user did.
-// Call between ImGui::NewFrame() and ImGui::Render().
+// Draws the control capsule, the notice card, the info card (s.show_info) and the right-click menu; returns what
+// the user did. Call between ImGui::NewFrame() and ImGui::Render().
 std::vector<UiAction> draw_ui(const UiState& s);
+bool ui_animating(double now);  // the capsule is fading or a notice is showing: keep redrawing
+bool ui_controls_hidden();      // the capsule was fully faded out at the last draw_ui
 
 int ui_selftest();  // --uitest: checks the UI logic without a window or GPU; 0 on pass
