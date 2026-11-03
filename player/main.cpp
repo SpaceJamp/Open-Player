@@ -30,14 +30,6 @@ static const char* USAGE =
     "keys:  space pause | left/right seek 5s | up/down volume | v VSR on/off | f or double-click fullscreen\n"
     "       click the bar at the bottom to seek | q quit\n";
 
-static std::string clock_text(double t) {
-    int s = (int)std::fmax(t, 0);
-    char buf[32];
-    if (s >= 3600) snprintf(buf, sizeof buf, "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60);
-    else snprintf(buf, sizeof buf, "%02d:%02d", s / 60, s % 60);
-    return buf;
-}
-
 static std::string trt_version() {
     int v = getInferLibVersion();  // major*10000 + minor*100 + patch
     return std::to_string(v / 10000) + "." + std::to_string(v / 100 % 100) + "." + std::to_string(v % 100);

@@ -1,10 +1,13 @@
 #include "ui.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+
+#include "imgui.h"
 
 namespace fs = std::filesystem;
 
@@ -47,6 +50,96 @@ std::string recent_file() {
     return (base / "open-player" / "recent.txt").string();
 }
 
+std::string clock_text(double t) {
+    int s = (int)std::fmax(t, 0);
+    char buf[32];
+    if (s >= 3600) snprintf(buf, sizeof buf, "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60);
+    else snprintf(buf, sizeof buf, "%02d:%02d", s / 60, s % 60);
+    return buf;
+}
+
+bool controls_visible(double now, double last_mouse, bool paused, bool hovered) {
+    return paused || hovered || now - last_mouse < 2;
+}
+
+std::vector<UiAction> draw_ui(const UiState& s) {
+    std::vector<UiAction> out;
+    ImGuiIO& io = ImGui::GetIO();
+    const float bar_h = ImGui::GetFrameHeight() * 2;
+    bool hovered = io.MousePos.y >= io.DisplaySize.y - bar_h && io.MousePos.y <= io.DisplaySize.y;
+
+    if (controls_visible(s.now, s.last_mouse, s.paused, hovered)) {
+        ImGui::SetNextWindowPos({0, io.DisplaySize.y - bar_h});
+        ImGui::SetNextWindowSize({io.DisplaySize.x, bar_h});
+        ImGui::SetNextWindowBgAlpha(0.6f);
+        ImGui::Begin("controls", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                              ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
+        if (ImGui::Button(s.paused ? "Play" : "Pause", {ImGui::GetFontSize() * 4, 0}))
+            out.push_back({UiAction::TogglePause});
+        ImGui::SameLine();
+        ImGui::TextUnformatted((clock_text(s.pos) + " / " + (s.dur > 0 ? clock_text(s.dur) : "--:--")).c_str());
+        ImGui::SameLine();
+        // the right side: volume, VSR, fullscreen; the seek bar takes what's left
+        const float right = ImGui::GetFontSize() * 22;
+        static double drag = 0;  // the seek slider's value while dragged; follows playback otherwise
+        static bool dragging = false;
+        ImGui::SetNextItemWidth(std::fmax(ImGui::GetContentRegionAvail().x - right, 50));
+        ImGui::BeginDisabled(s.dur <= 0);
+        double lo = 0, hi = std::fmax(s.dur, 1);
+        if (!dragging) drag = std::clamp(s.pos, lo, hi);
+        ImGui::SliderScalar("##seek", ImGuiDataType_Double, &drag, &lo, &hi, "");
+        dragging = ImGui::IsItemActive();
+        if (ImGui::IsItemDeactivatedAfterEdit()) out.push_back({UiAction::Seek, drag});  // on release only
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        float vol = s.volume;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7);
+        if (ImGui::SliderFloat("##volume", &vol, 0, 2, "vol %.0f%%", ImGuiSliderFlags_AlwaysClamp))
+            out.push_back({UiAction::SetVolume, vol});
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Volume (Up/Down)");
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!s.vsr_available);
+        if (ImGui::Button(!s.vsr_available ? "VSR n/a" : s.vsr_on ? "VSR on" : "VSR off")) out.push_back({UiAction::ToggleVsr});
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(s.vsr_available ? "Upscaling (V)" : "No upscaling for this video or screen");
+        ImGui::SameLine();
+        if (ImGui::Button(s.fullscreen ? "Window" : "Fullscreen")) out.push_back({UiAction::ToggleFullscreen});
+        ImGui::End();
+    }
+
+    if (s.show_info) {
+        ImGui::SetNextWindowPos({10, 10});
+        ImGui::SetNextWindowBgAlpha(0.6f);
+        ImGui::Begin("info", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                                          ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::TextUnformatted(s.info.c_str());
+        ImGui::End();
+    }
+
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow))
+        ImGui::OpenPopup("menu");
+    if (ImGui::BeginPopup("menu")) {
+        if (ImGui::MenuItem(s.paused ? "Play" : "Pause", "Space")) out.push_back({UiAction::TogglePause});
+        if (ImGui::MenuItem("Open file...")) out.push_back({UiAction::Open});
+        if (ImGui::BeginMenu("Recent files")) {
+            auto recent = existing_only(s.recent);
+            if (recent.empty()) ImGui::TextDisabled("none");
+            for (const auto& p : recent)
+                if (ImGui::MenuItem(fs::path(p).filename().string().c_str())) out.push_back({UiAction::OpenPath, 0, p});
+            ImGui::EndMenu();
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Upscaling (VSR)", "V", s.vsr_on, s.vsr_available)) out.push_back({UiAction::ToggleVsr});
+        if (ImGui::MenuItem("Fullscreen", "F", s.fullscreen)) out.push_back({UiAction::ToggleFullscreen});
+        if (ImGui::MenuItem("Info", "I", s.show_info)) out.push_back({UiAction::ToggleInfo});
+        ImGui::Separator();
+        if (ImGui::MenuItem("Quit", "Q")) out.push_back({UiAction::Quit});
+        ImGui::EndPopup();
+    }
+    return out;
+}
+
 int ui_selftest() {
     int fails = 0;
 #define check(cond) \
@@ -66,6 +159,24 @@ int ui_selftest() {
     check(load_recent(tmp) == (std::vector<std::string>{odd, "/b.mp4"}));
     check(existing_only({tmp, "/definitely/missing.mkv"}) == std::vector<std::string>{tmp});
     std::filesystem::remove(tmp);
+
+    check(controls_visible(10, 9, false, false) && !controls_visible(10, 7, false, false));  // 2 s rule
+    check(controls_visible(10, 0, true, false) && controls_visible(10, 0, false, true));    // paused, hovered
+    // headless ImGui: frames without any backend or present must not assert
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = {1920, 1080};
+    io.IniFilename = nullptr;
+    unsigned char* px;
+    int fw, fh;
+    io.Fonts->GetTexDataAsRGBA32(&px, &fw, &fh);
+    for (double dur : {600.0, 0.0})    // normal and unknown-duration video
+        for (int i = 0; i < 3; i++) {  // several frames, as when minimized
+            ImGui::NewFrame();
+            draw_ui({/*pos*/ 12, dur, /*now*/ 5, /*last_mouse*/ 4.5, /*paused*/ false, true, true, false, true, 0.8f, "info", {}});
+            ImGui::Render();
+        }
+    ImGui::DestroyContext();
 
 #undef check
     if (!fails) printf("ui checks passed\n");
