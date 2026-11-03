@@ -120,6 +120,9 @@ int main(int argc, char** argv) {
     SDL_Window* win = SDL_CreateWindow("Open Player", 1280, 720,
                                        SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!win) return fprintf(stderr, "SDL: %s\n", SDL_GetError()), 1;
+    if (const char* base = SDL_GetBasePath())  // build/open-player -> assets/; missing icon: the default one
+        if (SDL_Surface* icon = SDL_LoadPNG((std::string(base) + "../assets/icon-64.png").c_str()))
+            SDL_SetWindowIcon(win, icon), SDL_DestroySurface(icon);
 
     int rc = 1;
     ImGui::CreateContext();
@@ -191,11 +194,16 @@ int main(int argc, char** argv) {
 
         const double dur = media.duration();
         bool running = true, paused = false, reset = true, step = false, size_warned = false;
-        bool dirty = true, last_bar = false;  // redraw only when the picture changed: each redraw costs a full copy
+        bool dirty = true;   // redraw only when the picture or the UI changed
+        bool fresh = false;  // a new frame is waiting to be converted and copied (redraws of the UI alone skip that)
+        bool show_info = false, last_vis = false;
+        int ui_redraw = 0;  // a few redraws after input, so ImGui's hover and click states catch up
+        std::string info;   // info overlay, refreshed once a second
+        std::vector<std::string> recent = load_recent(recent_file());
         int serial = media.serial(), sw = 0, sh = 0, frames_shown = 0;
         float volume = 1;
         const __half* shown = nullptr;
-        double pos = 0, wall_base = 0, last_mouse = -10, last_title = -10, last_report = 0;
+        double pos = 0, wall_base = 0, last_mouse = -10, last_report = 0;
         Diag diag;
         bool info_done = false;
         auto gpu_ms = [](cudaEvent_t a, cudaEvent_t b) {
@@ -248,41 +256,44 @@ int main(int argc, char** argv) {
             paused = p;
             media.set_paused(p);
         };
+        // shared by the keys and the on-screen controls
+        auto toggle_pause = [&] { set_paused(!paused); };
+        auto set_volume = [&](float v) { media.set_volume(volume = std::clamp(v, 0.f, 2.f)); };
+        auto toggle_vsr = [&] {  // paused: show the change now
+            if (have_vsr) vsr_on = !vsr_on, reset = true, step |= paused, drop_ahead();
+        };
+        auto toggle_fullscreen = [&] { SDL_SetWindowFullscreen(win, !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN)); };
+        const std::string vsr_desc =
+            have_vsr ? std::to_string(s) + "x" + (shrink ? " from " + std::to_string(nw) + "x" + std::to_string(nh) : "")
+            : worth_it ? "none" : "off (fills screen)";
+        SDL_SetWindowTitle(win, std::filesystem::path(path).filename().string().c_str());
 
         while (running) {
             SDL_Event e;
             while (SDL_PollEvent(&e)) {
-                if (ui) ImGui_ImplSDL3_ProcessEvent(&e);
+                if (ui) ImGui_ImplSDL3_ProcessEvent(&e), ui_redraw = 2;
                 if (e.type == SDL_EVENT_QUIT) running = false;
                 else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) disp.resized(), dirty = true;
                 else if (e.type == SDL_EVENT_WINDOW_EXPOSED) dirty = true;
                 else if (e.type == SDL_EVENT_MOUSE_MOTION) last_mouse = now();
-                else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
-                    int ww, wh;
-                    SDL_GetWindowSize(win, &ww, &wh);
-                    // the picture is letterboxed inside the window (same fit as Display::present); the seek bar
-                    // is drawn along the picture's bottom edge, so clicks are measured against the picture
-                    float pw = sw ? sw : w, ph = sh ? sh : h, k = std::fmin(ww / pw, wh / ph);
-                    float x0 = (ww - pw * k) / 2, y0 = (wh - ph * k) / 2, bottom = y0 + ph * k;
-                    if (e.button.clicks == 2) SDL_SetWindowFullscreen(win, !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN));
-                    else if (dur > 0 && e.button.y > bottom - ph * k * 0.08f && e.button.y <= bottom)
-                        seek(std::clamp((e.button.x - x0) / (pw * k), 0.f, 1.f) * dur);
-                } else if (e.type == SDL_EVENT_KEY_DOWN) {
-                    bool full = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN;
+                else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT &&
+                         e.button.clicks == 2 && !(ui && ImGui::GetIO().WantCaptureMouse))
+                    toggle_fullscreen();
+                else if (e.type == SDL_EVENT_KEY_DOWN) {
                     switch (e.key.key) {
-                    case SDLK_SPACE: set_paused(!paused); break;
+                    case SDLK_SPACE: toggle_pause(); break;
                     case SDLK_LEFT: seek(pos - 5); break;
                     case SDLK_RIGHT: seek(pos + 5); break;
-                    case SDLK_UP: media.set_volume(volume = std::fmin(volume + 0.1f, 2.f)); break;
-                    case SDLK_DOWN: media.set_volume(volume = std::fmax(volume - 0.1f, 0.f)); break;
-                    case SDLK_V:  // paused: show the change now
-                        if (have_vsr) vsr_on = !vsr_on, reset = true, step |= paused, drop_ahead();
-                        break;
-                    case SDLK_F: SDL_SetWindowFullscreen(win, !full); break;
-                    case SDLK_ESCAPE: if (full) { SDL_SetWindowFullscreen(win, false); break; } [[fallthrough]];
+                    case SDLK_UP: set_volume(volume + 0.1f); break;
+                    case SDLK_DOWN: set_volume(volume - 0.1f); break;
+                    case SDLK_V: toggle_vsr(); break;
+                    case SDLK_F: toggle_fullscreen(); break;
+                    case SDLK_I: show_info = !show_info, dirty = true; break;
+                    case SDLK_ESCAPE:
+                        if (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) { toggle_fullscreen(); break; }
+                        [[fallthrough]];
                     case SDLK_Q: running = false; break;
                     }
-                    last_title = -10;  // refresh the title now
                 }
             }
             if (media.serial() != serial) {  // a seek finished: VSR history is stale; show the new spot even if paused
@@ -326,7 +337,7 @@ int main(int argc, char** argv) {
             if (!ahead.empty() && (ahead.front().pts <= clock() || step)) {  // the oldest prepared frame is due
                 Prepared& p = ahead.front();
                 cudaEventSynchronize(p.ev[2]);  // usually long done: the GPU had up to a frame's time
-                shown = p.out, sw = p.w, sh = p.h, pos = p.pts, step = false, dirty = true;
+                shown = p.out, sw = p.w, sh = p.h, pos = p.pts, step = false, dirty = fresh = true;
                 frames_shown++, diag.shown++;
                 diag.convert.add(gpu_ms(p.ev[0], p.ev[1]));
                 if (p.vsr) diag.vsr.add(gpu_ms(p.ev[1], p.ev[2]));
@@ -337,59 +348,82 @@ int main(int argc, char** argv) {
                 set_paused(true);  // stay on the last frame, like a normal player
             }
 
-            bool bar = dur > 0 && (paused || now() - last_mouse < 2), drawn = false;
-            if (bar != last_bar) last_bar = bar, dirty = true;
             if (ui) {
                 ImGui_ImplVulkan_NewFrame();
                 ImGui_ImplSDL3_NewFrame();
                 ImGui::NewFrame();
-                ImGui::Text("Open Player");
+                bool full = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN;
+                auto acts = draw_ui({pos, dur, now(), last_mouse, paused, have_vsr, vsr_on, full, show_info, volume, info, recent});
                 ImGui::Render();
+                for (const UiAction& a : acts) switch (a.kind) {
+                    case UiAction::TogglePause: toggle_pause(); break;
+                    case UiAction::Seek: seek(a.value); break;
+                    case UiAction::SetVolume: set_volume((float)a.value); break;
+                    case UiAction::ToggleVsr: toggle_vsr(); break;
+                    case UiAction::ToggleFullscreen: toggle_fullscreen(); break;
+                    case UiAction::ToggleInfo: show_info = !show_info; break;
+                    case UiAction::Quit: running = false; break;
+                    case UiAction::Open: case UiAction::OpenPath: break;  // opening files: not yet
+                    }
+                bool vis = paused || now() - last_mouse < 2;
+                bool ui_dirty = !acts.empty() || vis != last_vis || ui_redraw > 0 || ImGui::IsAnyItemActive() ||
+                                ImGui::IsAnyItemHovered() || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+                last_vis = vis, ui_redraw = std::max(ui_redraw - 1, 0);
+                // while playing, the UI rides along with the next video frame: a redraw of its own would take a
+                // vsync slot from the video
+                if (paused && ui_dirty) dirty = true;
             }
+            bool drawn = false;
             if (shown && dirty) {
-                uint8_t* target = disp.begin_frame();
-                cudaEventRecord(rgba_ev[0], ds);
-                rgb_to_rgba8(shown, sw, sh, target, bar ? pos / dur : -1, ds);
-                cudaEventRecord(rgba_ev[1], ds);
-                drawn = disp.present(sw, sh, ds, true);
+                if (fresh) {
+                    uint8_t* target = disp.begin_frame();
+                    cudaEventRecord(rgba_ev[0], ds);
+                    rgb_to_rgba8(shown, sw, sh, target, ds);
+                    cudaEventRecord(rgba_ev[1], ds);
+                }
+                drawn = disp.present(sw, sh, ds, fresh);
                 if (drawn) {
-                    dirty = false;
                     diag.redraws++;
-                    diag.rgba.add(gpu_ms(rgba_ev[0], rgba_ev[1]));
-                    diag.copy.add(disp.last_copy_ms);
-                    diag.map.add(disp.last_map_ms);
+                    if (fresh) {
+                        diag.rgba.add(gpu_ms(rgba_ev[0], rgba_ev[1]));
+                        diag.copy.add(disp.last_copy_ms);
+                        diag.map.add(disp.last_map_ms);
+                    }
                     diag.present.add(disp.last_present_ms);
+                    dirty = fresh = false;
                 }
             }
             if (!drawn) SDL_Delay(2);  // nothing new to show (or minimized); a redraw is paced by vsync instead
             if (!paused) diag.queue.add(media.queued_frames());
 
-            if (stats && now() - last_report >= 1) {
+            if (now() - last_report >= 1) {  // info overlay; with --stats also one JSON line
                 last_report = now();
-                if (!info_done && !media.decode_desc().empty()) {
+                int dropped = media.take_dropped();
+                char buf[512];
+                snprintf(buf, sizeof buf,
+                         "GPU      %s (%s)\nDecode   %s\nVideo    %dx%d @ %.2f fps\nScreen   %dx%d\n"
+                         "VSR      %s%s\nShown    %d fps, %d dropped\nNetwork  %.1f ms per frame",
+                         disp.gpu_name(), disp.zero_copy() ? "zero-copy" : "CPU copy", media.decode_desc().c_str(), w, h,
+                         media.fps(), screen_w, screen_h, vsr_desc.c_str(), have_vsr && !vsr_on ? " (switched off)" : "",
+                         diag.shown, dropped, diag.vsr.mean());
+                if (info != buf) info = buf, dirty |= show_info && paused;
+                if (stats && !info_done && !media.decode_desc().empty()) {
                     printf("info {\"gpu\":\"%s\",\"display\":\"%s\",\"decode\":\"%s\",\"video\":\"%dx%d@%.2f\","
                            "\"screen\":\"%dx%d\",\"window_on_planned_screen\":%s,\"vsr\":\"%s\",\"tensorrt\":\"%s\"}\n",
                            disp.gpu_name(), disp.zero_copy() ? "zero-copy" : "CPU copy", media.decode_desc().c_str(),
                            w, h, media.fps(), screen_w, screen_h,
-                           SDL_GetDisplayForWindow(win) == screen_id ? "true" : "false",
-                           have_vsr ? (std::to_string(s) + "x" +
-                                       (shrink ? " from " + std::to_string(nw) + "x" + std::to_string(nh) : "")).c_str()
-                                    : worth_it ? "none" : "off (fills screen)",
+                           SDL_GetDisplayForWindow(win) == screen_id ? "true" : "false", vsr_desc.c_str(),
                            trt_version().c_str());
                     info_done = true;
                 }
-                size_t free_b = 0, total_b = 0;
-                cudaMemGetInfo(&free_b, &total_b);
-                diag.report(pos, media.fps(), media.take_dropped(), media.audio_buffered(),
-                            (total_b - free_b) / 1048576.0, vsr_on, paused);
-            }
-
-            if (now() - last_title > 0.5) {
-                last_title = now();
-                std::string t = std::string(paused ? "|| " : "") + clock_text(pos) + " / " + clock_text(dur) +
-                                (have_vsr ? (vsr_on ? "   VSR " + std::to_string(s) + "x" : "   VSR off") : "") +
-                                "   vol " + std::to_string((int)std::lround(volume * 100)) + "%   " + path;
-                SDL_SetWindowTitle(win, t.c_str());
+                if (stats) {
+                    size_t free_b = 0, total_b = 0;
+                    cudaMemGetInfo(&free_b, &total_b);
+                    diag.report(pos, media.fps(), dropped, media.audio_buffered(), (total_b - free_b) / 1048576.0,
+                                vsr_on, paused);
+                } else {
+                    diag = Diag();
+                }
             }
         }
         drop_ahead();

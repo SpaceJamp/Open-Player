@@ -85,20 +85,15 @@ void abs_diff_sum(const __half* a, const __half* b, int n, float* sum, cudaStrea
     k_absdiff<<<256, 256, 0, s>>>(a, b, n, sum);
 }
 
-__global__ void k_rgba(const __half* rgb, int w, int h, uint8_t* out, float progress) {
+__global__ void k_rgba(const __half* rgb, int w, int h, uint8_t* out) {
     int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= w || y >= h) return;
     int n = w * h, i = y * w + x;
     float r = __half2float(rgb[i]), g = __half2float(rgb[n + i]), b = __half2float(rgb[2 * n + i]);
-    int bar = max(4, h / 120);
-    if (progress >= 0 && y >= h - bar) {
-        if (x < progress * w) r = 0.95f, g = 0.8f, b = 0.3f;  // played part: amber, visible on white video too
-        else r *= 0.35f, g *= 0.35f, b *= 0.35f;              // rest: dimmed video
-    }
     uchar4 px = make_uchar4(__saturatef(r) * 255.f + .5f, __saturatef(g) * 255.f + .5f, __saturatef(b) * 255.f + .5f, 255);
     ((uchar4*)out)[i] = px;
 }
 
-void rgb_to_rgba8(const __half* rgb, int w, int h, uint8_t* rgba, float progress, cudaStream_t s) {
-    k_rgba<<<grid2d(w, h), dim3(16, 16), 0, s>>>(rgb, w, h, rgba, progress);
+void rgb_to_rgba8(const __half* rgb, int w, int h, uint8_t* rgba, cudaStream_t s) {
+    k_rgba<<<grid2d(w, h), dim3(16, 16), 0, s>>>(rgb, w, h, rgba);
 }

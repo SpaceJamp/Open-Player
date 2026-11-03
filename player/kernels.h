@@ -24,5 +24,5 @@ void shrink_rgb(const __half* src, int w, int h, __half* dst, int W, int H, cuda
 // *sum = sum of |a-b| over n values (sum: one device float), without waiting
 void abs_diff_sum(const __half* a, const __half* b, int n, float* sum, cudaStream_t s);
 
-// Planar fp16 RGB -> packed RGBA8 for display, with a seek bar along the bottom when progress >= 0
-void rgb_to_rgba8(const __half* rgb, int w, int h, uint8_t* rgba, float progress, cudaStream_t s);
+// Planar fp16 RGB -> packed RGBA8 for display
+void rgb_to_rgba8(const __half* rgb, int w, int h, uint8_t* rgba, cudaStream_t s);

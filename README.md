@@ -96,6 +96,10 @@ Speed on an RTX 5080, 1080p → 4K, measured with `--stats`:
 The player prepares each frame's network work up to a frame early, so it runs on the GPU while the previous
 frame is being shown.
 
+Move the mouse to show the control bar along the bottom: play/pause, time, a seek bar, volume, VSR on/off
+and fullscreen. It hides 2 s after the mouse stops, and stays while paused. Right-click for a menu with the
+same actions plus the info overlay.
+
 | Key | Action |
 |---|---|
 | Space | pause |
@@ -103,7 +107,7 @@ frame is being shown.
 | ↑ / ↓ | volume |
 | V | VSR on/off (compare) |
 | F, double-click | fullscreen |
-| click bottom edge | seek |
+| I | info overlay: GPU, decoder, VSR, frame rate, dropped frames |
 | Q | quit |
 
 ### Diagnostics
