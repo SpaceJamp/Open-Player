@@ -11,6 +11,7 @@
 #include <fstream>
 
 #include "imgui.h"
+#include "imgui_internal.h"  // the self-test finds the volume panel's window
 #include "theme.h"
 
 namespace fs = std::filesystem;
@@ -309,10 +310,11 @@ std::vector<UiAction> draw_ui(const UiState& s) {
             out.push_back({UiAction::ToggleFullscreen});
         ImGui::End();
 
-        // volume panel: above the icon, open while the icon, the panel or the gap between them is hovered
+        // volume panel: above the icon, open while the icon, the panel or the gap between them is hovered (down to
+        // the icon's top, so the strip above it inside the capsule doesn't close the panel on the way up)
         const float pw = 176 * sc, ph = 36 * sc;
         const ImVec2 p0{std::round(std::clamp(vol_cx - pw / 2, 0.0f, io.DisplaySize.x - pw)), c0.y - 8 * sc - ph};
-        if (g_vol_open) vol_hover |= g_vol_held || ImGui::IsMouseHoveringRect(p0, {p0.x + pw, c0.y}, false);
+        if (g_vol_open) vol_hover |= g_vol_held || ImGui::IsMouseHoveringRect(p0, {p0.x + pw, c0.y + pad}, false);
         if (vol_hover) {
             ImGui::SetNextWindowPos(p0);
             ImGui::SetNextWindowSize({pw, ph});
@@ -476,6 +478,27 @@ int ui_selftest() {
         frames(st, 2, 0);
         // mid-track: about the middle of the video (labels without the icon font push the bar left)
         check(acts.size() == 1 && acts[0].kind == UiAction::Seek && acts[0].value > 200 && acts[0].value < 480);
+        // the volume panel stays open on the way up from the icon, through the capsule's edge, to its slider
+        const float cy = 1080 - 14 - 24, top = cy - 24;
+        float vol_cx = -1;
+        for (float x = 960; x < 1920 && vol_cx < 0; x += 4) {  // find the icon: the panel opens over it
+            io.AddMousePosEvent(x, cy);
+            frames(st, 1, 0);
+            if (ImGuiWindow* w = ImGui::FindWindowByName("volume"); w && w->Active) vol_cx = w->Pos.x + w->Size.x / 2;
+        }
+        check(vol_cx > 0);
+        io.AddMousePosEvent(vol_cx, cy);
+        frames(st, 1, 0);
+        io.AddMousePosEvent(vol_cx, top + 2);  // above the icon, below the capsule's top edge
+        frames(st, 1, 0);
+        io.AddMousePosEvent(vol_cx, top - 8 - 18);  // the panel's middle, on its slider
+        frames(st, 1, 0);
+        acts.clear();
+        io.AddMouseButtonEvent(0, true);
+        frames(st, 1, 0);
+        io.AddMouseButtonEvent(0, false);
+        frames(st, 1, 0);
+        check(!acts.empty() && acts[0].kind == UiAction::SetVolume);
         // shortcut keys stay with the menu while it's open (Esc closes it instead of quitting); the menu draws
         ImGui::NewFrame();
         check(!ui_has_keyboard());
