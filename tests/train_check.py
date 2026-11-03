@@ -3,9 +3,14 @@
     python tests/train_check.py
 """
 import math
+import random
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
+import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -54,5 +59,50 @@ assert abs(same) < 1e-6, same
 gain = train.validate(VSR(2, 16, 2).to(memory_format=torch.channels_last), val_lr, val_hr, 2)  # real net runs
 assert math.isfinite(gain), gain
 
-print(f"train checks passed (compression error q100 {near_lossless:.4f}, q30 {crushed:.4f}; "
+# validation set: made once from held-out videos, reused unchanged after a video is added, refused if --crop changes
+class FakeClips:
+    def __init__(self, names, crop=64):
+        self.root, self.frames, self.crop = Path("/videos"), 2, crop
+        self.videos = [(self.root / n, 128, 128, 60.0) for n in names]
+
+    def decode(self):
+        return np.random.randint(0, 256, (self.frames, 128, 128, 3), np.uint8)
+
+
+with tempfile.TemporaryDirectory() as d:
+    path = Path(d) / "vsr.val.pt"
+    first = FakeClips(["a.mp4", "b.mp4", "c.mp4", "sub/d.mp4"])
+    lr1, hr1, made = train.validation_set(first, 2, path)
+    held = torch.load(path)["held"]
+    assert made and len(held) == train.VAL_VIDEOS and lr1.shape[0] == train.VAL_CLIPS
+    assert not {v[0].relative_to(first.root).as_posix() for v in first.videos} & set(held), "held-out videos left in"
+    again = FakeClips(["a.mp4", "b.mp4", "c.mp4", "sub/d.mp4", "new.mp4"])  # a video added between runs
+    lr2, hr2, made = train.validation_set(again, 2, path)
+    assert not made and torch.equal(lr1, lr2) and torch.equal(hr1, hr2)
+    assert len(again.videos) == 5 - train.VAL_VIDEOS and any(v[0].name == "new.mp4" for v in again.videos)
+    try:
+        train.validation_set(FakeClips(["a.mp4", "b.mp4"], crop=128), 2, path)
+        raise AssertionError("a different --crop must be refused")
+    except SystemExit:
+        pass
+
+# a video tagged as rotated (as phones save them) must decode to its stored pixels, not turned and scrambled
+if shutil.which("ffmpeg"):
+    with tempfile.TemporaryDirectory() as d:
+        ff = ["ffmpeg", "-v", "error", "-y"]
+        subprocess.run(ff + ["-f", "lavfi", "-i", "testsrc2=size=320x192:rate=25", "-t", "3", "-c:v", "libx264",
+                             "-pix_fmt", "yuv420p", f"{d}/plain.mp4"], check=True)
+        Path(d, "rot").mkdir(), Path(d, "plain").mkdir()
+        subprocess.run(ff + ["-display_rotation", "90", "-i", f"{d}/plain.mp4", "-c", "copy", f"{d}/rot/v.mp4"], check=True)
+        shutil.copy(f"{d}/plain.mp4", f"{d}/plain/v.mp4")
+        frames = []
+        for sub in ("plain", "rot"):
+            random.seed(5)  # same start time and skip for both
+            frames.append(train.Clips(f"{d}/{sub}", 2, 64).decode())
+        assert np.array_equal(*frames), "rotated video decoded differently from its unrotated twin"
+    rotation = "rotated video ok"
+else:
+    rotation = "rotation check skipped (no ffmpeg)"
+
+print(f"train checks passed ({rotation}; compression error q100 {near_lossless:.4f}, q30 {crushed:.4f}; "
       f"bilinear {same:+.2f} dB, untrained net {gain:+.2f} dB)")

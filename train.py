@@ -3,7 +3,7 @@
     python train.py                 # videos from ./videos (subfolders included)
     python train.py ~/Movies        # or any other folder
 """
-import argparse, json, math, random, signal, subprocess, time
+import argparse, copy, json, math, random, signal, subprocess, time
 from pathlib import Path
 
 import numpy as np
@@ -14,8 +14,10 @@ from torch.utils.data import DataLoader, Dataset
 from model import VSR, load, save, warp
 
 VIDEO_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts"}
-# (channels, blocks). 1080p -> 4K on an RTX 5080: standard 23 ms per frame (up to 30 fps), fast 9.4 ms (60 fps)
-SIZES = {"standard": (48, 6), "fast": (32, 4)}
+# (channels, blocks, attention gates). 1080p -> 4K on an RTX 5080: standard 23 ms per frame (up to 30 fps),
+# fast 9.4 ms (60 fps). lean drops the gates, which cost a full pass over the activations, for 10 blocks: 48%
+# more parameters at no more time (best of 3 builds: 25.0 ms vs standard's 28.3 in the same session)
+SIZES = {"standard": (48, 6, True), "fast": (32, 4, True), "lean": (48, 10, False)}
 
 
 def probe(path):
@@ -38,7 +40,8 @@ class Clips(Dataset):
     def __init__(self, root, frames, crop):
         self.frames, self.crop, self.videos = frames, crop, []
         self.runs, self.turn = [[None, 0] for _ in range(RUNS)], 0  # per worker: [decoded frames, crops left]
-        for p in sorted(Path(root).expanduser().rglob("*")):
+        self.root = Path(root).expanduser()
+        for p in sorted(self.root.rglob("*")):
             if p.suffix.lower() not in VIDEO_EXT:
                 continue
             try:
@@ -74,7 +77,9 @@ class Clips(Dataset):
             # don't all open on a keyframe, which is sharper than the frames that follow it
             t, skip = random.uniform(0, dur - 1.5), random.randrange(12)
             raw = subprocess.run(
-                ["ffmpeg", "-v", "error", "-noaccurate_seek", "-ss", f"{t:.3f}", "-i", str(p), "-frames:v",
+                # -noautorotate: frames keep the stored size probe() reported. Phone videos tagged as rotated
+                # otherwise come out turned, and reshaping them to the stored size scrambles them silently.
+                ["ffmpeg", "-v", "error", "-noautorotate", "-noaccurate_seek", "-ss", f"{t:.3f}", "-i", str(p), "-frames:v",
                  str(skip + T), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True).stdout
             if len(raw) == (skip + T) * w * h * 3:
                 return np.frombuffer(raw, np.uint8).reshape(skip + T, h, w, 3)[skip:]
@@ -142,11 +147,11 @@ def unroll(model, lr):
     return outs, flows
 
 
-VAL_CLIPS = 32  # fixed clips scored every 1000 steps: a steady "still improving?" number
+VAL_CLIPS, VAL_VIDEOS = 32, 2  # fixed clips scored every 1000 steps, cut from videos held out of training
 
 
 def make_val(clips, s):
-    """VAL_CLIPS clips from the training videos with fixed crops and degradations, identical on every run."""
+    """VAL_CLIPS clips from `clips`' videos with fixed crops and degradations."""
     saved, g = random.getstate(), torch.Generator().manual_seed(1234)
     random.seed(1234)
     hr, lr = [], []
@@ -157,6 +162,31 @@ def make_val(clips, s):
         lr.append(make_lr(hr[-1][None].float() / 255, s, g)[0])
     random.setstate(saved)
     return torch.stack(lr).half(), torch.stack(hr)  # (n,T,3,h,w) fp16, (n,T,3,H,W) uint8
+
+
+def validation_set(clips, s, path):
+    """The validation clips, made once and saved to `path`, then reused, so scores stay comparable across runs:
+    picking them afresh changed them whenever a video was added (one model scored +2.59 dB, then +4.11).
+    They come from VAL_VIDEOS videos held out of training, so the score measures unseen footage; this removes
+    those videos from `clips`. Returns (val_lr, val_hr, made_now)."""
+    rel = lambda p: p.relative_to(clips.root).as_posix()
+    made = not path.exists()
+    if made:
+        names = sorted(rel(p) for p, *_ in clips.videos)
+        held = random.Random(1234).sample(names, min(VAL_VIDEOS, len(names) - 1))  # keep one to train on
+        vc = copy.copy(clips)
+        vc.videos = [v for v in clips.videos if rel(v[0]) in held] or clips.videos  # a single video: share it
+        lr, hr = make_val(vc, s)
+        v = {"lr": lr, "hr": hr, "held": held, "frames": clips.frames, "crop": clips.crop, "scale": s}
+        torch.save(v, path)
+        print(f"validation set saved to {path}, from held-out videos {held or '(none: only one video)'}")
+    else:
+        v = torch.load(path)
+        if (v["frames"], v["crop"], v["scale"]) != (clips.frames, clips.crop, s):
+            raise SystemExit(f"{path} was made for --frames {v['frames']} --crop {v['crop']} and scale {v['scale']}: "
+                             "use those, or delete it for a new validation set (scores then stop comparing)")
+    clips.videos = [x for x in clips.videos if rel(x[0]) not in v["held"]]
+    return v["lr"], v["hr"], made
 
 
 @torch.no_grad()
@@ -192,8 +222,8 @@ def main():
     ap.add_argument("--out", default="vsr.pt")
     ap.add_argument("--resume", help="checkpoint to continue from")
     ap.add_argument("--scale", type=int, default=2)
-    ap.add_argument("--size", choices=SIZES, help="standard (best quality, up to 1080p30 -> 4K) or fast "
-                    "(1080p60 -> 4K); default standard. A resumed model keeps its size.")
+    ap.add_argument("--size", choices=SIZES, help="standard (up to 1080p30 -> 4K), fast (1080p60 -> 4K) or lean "
+                    "(standard's speed, more capacity, no attention gates); default standard. A resumed model keeps its size.")
     ap.add_argument("--frames", type=int, default=8, help="frames per clip the recurrence is trained over")
     ap.add_argument("--crop", type=int, default=256, help="high-res crop size")
     ap.add_argument("--batch", type=int, default=8)
@@ -207,7 +237,8 @@ def main():
     dev = "cuda"
     if a.resume:
         model = load(a.resume, dev).train()
-        have = next((k for k, v in SIZES.items() if v == (model.ch, model.blocks)), f"{model.ch}x{model.blocks}")
+        have = next((k for k, v in SIZES.items() if v == (model.ch, model.blocks, model.gate)),
+                    f"{model.ch}x{model.blocks}{'' if model.gate else ' no-gate'}")
         if a.size and a.size != have:
             raise SystemExit(f"{a.resume} is a {have} model; rename or delete it to train a {a.size} one")
     else:
@@ -225,9 +256,25 @@ def main():
             raise SystemExit(f"{a.resume} already has {start} steps; raise --steps to train further")
         print(f"resuming at step {start}")
     clips = Clips(a.videos, a.frames, a.crop)
-    val_lr, val_hr = (v.to(dev) for v in make_val(clips, s))
-    print(f"step {start}  validation {validate(model, val_lr, val_hr, s):+.2f} dB vs bilinear "
-          f"({VAL_CLIPS} fixed clips, degraded like the training input)", flush=True)
+    out = Path(a.out)
+    val_lr, val_hr, new_set = validation_set(clips, s, out.with_suffix(".val.pt"))
+    val_lr, val_hr = val_lr.to(dev), val_hr.to(dev)
+    # the best model so far is kept apart: vsr.pt is overwritten every 2000 steps. A new validation set can't be
+    # compared with an old best score, so that starts over.
+    best_path = out.with_name(out.stem + "_best.pt")
+    best = -math.inf if new_set or not best_path.exists() else torch.load(best_path, map_location="cpu")["val_db"]
+
+    def check(step):
+        nonlocal best
+        score = validate(model, val_lr, val_hr, s)
+        note = ""
+        if score > best:
+            best = score
+            save(model, best_path, step=step, val_db=score)
+            note = f"  (best so far, saved to {best_path.name})"
+        print(f"step {step}  validation {score:+.2f} dB vs bilinear{note}", flush=True)
+
+    check(start)
     data = DataLoader(clips, batch_size=a.batch, num_workers=a.workers,
                       persistent_workers=a.workers > 0, pin_memory=True, worker_init_fn=ignore_sigint)
 
@@ -257,7 +304,7 @@ def main():
             print(f"step {step}  loss {loss.item():.4f}  {(time.time() - t0) / 100:.2f}s/step", flush=True)
             t0 = time.time()
         if step % 1000 == 0:
-            print(f"step {step}  validation {validate(model, val_lr, val_hr, s):+.2f} dB vs bilinear", flush=True)
+            check(step)
         if step % 2000 == 0 or step == a.steps or stop:
             save(model, a.out, step=step, opt=opt.state_dict())
         if stop:

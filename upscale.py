@@ -35,8 +35,10 @@ def main():
     w, h, fps = probe(a.input)
     W, H = w * s, h * s
 
-    dec = subprocess.Popen(["ffmpeg", "-v", "error", "-i", a.input, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-                           stdout=subprocess.PIPE)
+    # -noautorotate: frames keep the stored size probe() reported; turned frames would be read scrambled.
+    # shortcut: a phone video tagged as rotated comes out unrotated; copy the tag to the output if that matters
+    dec = subprocess.Popen(["ffmpeg", "-v", "error", "-noautorotate", "-i", a.input, "-f", "rawvideo", "-pix_fmt", "rgb24",
+                            "-"], stdout=subprocess.PIPE)
     enc = subprocess.Popen(
         ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", fps, "-i", "-",
          "-i", a.input, "-map", "0:v", "-map", "1:a?", "-c:a", "copy",

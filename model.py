@@ -21,22 +21,23 @@ def warp(x, flow):
 
 
 class Block(nn.Module):
-    """Residual conv block gated by pixel attention (a per-pixel, per-channel sigmoid mask)."""
+    """Residual conv block, optionally gated by pixel attention (a per-pixel, per-channel sigmoid mask). The gate
+    is cheap maths but a full extra pass over the activations: about half of the 1080p time on an RTX 5080."""
 
-    def __init__(self, ch):
+    def __init__(self, ch, gate=True):
         super().__init__()
         self.conv = nn.Sequential(nn.Conv2d(ch, ch, 3, padding=1), nn.LeakyReLU(0.1, True), nn.Conv2d(ch, ch, 3, padding=1))
-        self.attn = nn.Conv2d(ch, ch, 1)
+        self.attn = nn.Conv2d(ch, ch, 1) if gate else None
 
     def forward(self, x):
         y = self.conv(x)
-        return x + y * torch.sigmoid(self.attn(y))
+        return x + (y * torch.sigmoid(self.attn(y)) if self.attn is not None else y)
 
 
 class VSR(nn.Module):
-    def __init__(self, scale=2, ch=48, blocks=6):
+    def __init__(self, scale=2, ch=48, blocks=6, gate=True):
         super().__init__()
-        self.scale, self.ch, self.blocks = scale, ch, blocks
+        self.scale, self.ch, self.blocks, self.gate = scale, ch, blocks, gate
         act = lambda: nn.LeakyReLU(0.1, True)
         self.flow_net = nn.Sequential(
             nn.Conv2d(6, 32, 3, padding=1), act(),
@@ -47,7 +48,7 @@ class VSR(nn.Module):
         nn.init.zeros_(self.flow_net[-1].weight)  # start as identity warp
         nn.init.zeros_(self.flow_net[-1].bias)
         self.head = nn.Conv2d(3 + 3 * scale * scale, ch, 3, padding=1)
-        self.body = nn.Sequential(*[Block(ch) for _ in range(blocks)], nn.Conv2d(ch, ch, 3, padding=1))
+        self.body = nn.Sequential(*[Block(ch, gate) for _ in range(blocks)], nn.Conv2d(ch, ch, 3, padding=1))
         self.tail = nn.Conv2d(ch, 3 * scale * scale, 3, padding=1)
 
     def coarse_flow(self, cur, prev):
@@ -73,13 +74,14 @@ class VSR(nn.Module):
 
 def load(path, device="cuda"):
     ck = torch.load(path, map_location=device)
-    m = VSR(ck["scale"], ck["ch"], ck["blocks"]).to(device)
+    m = VSR(ck["scale"], ck["ch"], ck["blocks"], ck.get("gate", True)).to(device)  # older checkpoints: gated
     m.load_state_dict(ck["state"])
     return m.eval()
 
 
 def save(model, path, **extra):
-    torch.save({"scale": model.scale, "ch": model.ch, "blocks": model.blocks, "state": model.state_dict(), **extra}, path)
+    torch.save({"scale": model.scale, "ch": model.ch, "blocks": model.blocks, "gate": model.gate,
+                "state": model.state_dict(), **extra}, path)
 
 
 if __name__ == "__main__":  # self-check
@@ -91,4 +93,15 @@ if __name__ == "__main__":  # self-check
     prev, prev_hr = m.init_state(x)
     hr, flow = m(x, prev, prev_hr)
     assert hr.shape == (2, 3, 34, 46) and flow.shape == (2, 2, 17, 23), (hr.shape, flow.shape)
+    lean = VSR(2, 48, 10, gate=False)  # no attention gates
+    assert lean(x, prev, prev_hr)[0].shape == hr.shape and lean.body[0].attn is None
+    import os, tempfile
+    with tempfile.TemporaryDirectory() as d:
+        save(lean, os.path.join(d, "lean.pt"))
+        back = load(os.path.join(d, "lean.pt"), "cpu")
+        assert (back.blocks, back.gate) == (10, False)
+        assert all(torch.equal(a, b) for a, b in zip(lean.state_dict().values(), back.state_dict().values()))
+        ck = {"scale": 2, "ch": 48, "blocks": 6, "state": m.state_dict()}  # a checkpoint from before "gate" existed
+        torch.save(ck, os.path.join(d, "old.pt"))
+        assert load(os.path.join(d, "old.pt"), "cpu").gate is True
     print("ok", sum(p.numel() for p in m.parameters()), "params")

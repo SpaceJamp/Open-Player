@@ -56,8 +56,10 @@ How training works, and what helps:
 - The input is made by shrinking frames and then adding random blur, grain and JPEG-style block
   compression, so the network learns to clean up real compressed video instead of sharpening its artifacts.
   A model trained on clean input alone scored +0.07 dB over bilinear on such input.
-- Every 1000 steps it prints `validation +X dB vs bilinear`, scored on 32 fixed clips from your videos.
-  When that number stops rising, export and stop; the remaining steps only polish.
+- Every 1000 steps it prints `validation +X dB vs bilinear`, scored on 32 clips from two of your videos
+  that are held out of training, so the score reflects footage the model hasn't seen. The clips are saved to
+  `vsr.val.pt` on the first run and reused, so scores stay comparable even after you add videos. When the number
+  stops rising, export and stop; the best model so far is always kept as `vsr_best.pt` (export that one).
 - The source videos set the ceiling: the network can't get sharper than its targets. High-bitrate sources
   (Blu-ray quality) beat 2–3 Mbit/s web rips, and 4K material shrunk to 1080p makes especially clean targets.
 
