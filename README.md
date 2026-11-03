@@ -100,7 +100,6 @@ Move the mouse to show the floating control capsule along the bottom: play/pause
 cursor hides in fullscreen), and stays while paused. Volume, seek keys, pause and VSR changes show a brief notice
 in the middle of the window. Everything scales with the window height, so it stays sharp at 4K. Right-click for a
 menu with the same actions plus the info overlay.
-same actions plus the info overlay.
 
 | Key | Action |
 |---|---|
