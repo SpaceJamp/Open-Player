@@ -95,6 +95,10 @@ with tempfile.TemporaryDirectory() as d:
     except SystemExit:
         pass
 
+# clip sampling: each title (a top-level file or folder, e.g. a whole series) is picked equally often
+w = train.title_weights([Path("/v/a.mp4"), Path("/v/S/e1.mkv"), Path("/v/S/e2.mkv"), Path("/v/S/x/e3.mkv")], Path("/v"))
+assert w == [1.0, 1 / 3, 1 / 3, 1 / 3], w
+
 # distillation: W=0 is the plain loss; the teacher gets no gradient and does not change; a tiny run with --teacher works
 dh, dl = torch.rand(2, 3, 3, 32, 32), torch.rand(2, 3, 3, 16, 16)
 student, teacher = VSR(2, 8, 1), VSR(2, 8, 1)

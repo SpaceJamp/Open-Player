@@ -35,6 +35,13 @@ def probe(path):
 CROPS_PER_DECODE, RUNS = 8, 2
 
 
+def title_weights(paths, root):
+    """Sampling weight per video so each title (a top-level file or folder under root, e.g. a whole series) is
+    picked equally often: 8 episodes of one show otherwise outweigh a film 8 to 1."""
+    key = [Path(p).relative_to(root).parts[0] for p in paths]
+    return [1 / key.count(k) for k in key]
+
+
 class Clips(Dataset):
     """Random runs of `frames` consecutive frames, randomly cropped to crop x crop, as uint8 (T,H,W,3)."""
 
@@ -73,7 +80,7 @@ class Clips(Dataset):
         """`frames` consecutive full-size frames from a random spot in a random video, as uint8 (T,H,W,3)."""
         T = self.frames
         for _ in range(10):  # retry on reads that come up short (end of file, broken streams)
-            p, w, h, dur = random.choice(self.videos)
+            p, w, h, dur = random.choices(self.videos, title_weights([v[0] for v in self.videos], self.root))[0]
             # start at the keyframe before t instead of decoding up to t exactly, then skip a few frames so runs
             # don't all open on a keyframe, which is sharper than the frames that follow it
             t, skip = random.uniform(0, dur - 1.5), random.randrange(12)
