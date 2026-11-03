@@ -32,6 +32,15 @@ flat = torch.full((1, 3, 32, 32), 0.4)
 assert torch.allclose(train.blur(flat, 1.2), flat, atol=1e-6)
 assert train.blur(x, 0.7).shape == x.shape
 
+# frequency loss: 0 for identical images, positive for a blurred copy, and gradients reach the prediction
+assert train.fft_loss(x, x).item() == 0
+soft = train.blur(x, 1.5)
+assert train.fft_loss(soft, x).item() > 0
+p = soft.clone().requires_grad_()
+train.fft_loss(p, x).backward()
+assert p.grad is not None and p.grad.abs().sum() > 0
+assert train.fft_loss(x.bfloat16(), x).dtype == torch.float32  # computed in fp32 even for autocast outputs
+
 # degraded input: right size and range, and the same from the same seed (the validation set relies on that)
 hr = torch.rand(2, 4, 3, 64, 64)
 a = train.make_lr(hr, 2, torch.Generator().manual_seed(7))

@@ -135,6 +135,12 @@ def make_lr(hr, s, g=None):
     return torch.stack(clips)
 
 
+def fft_loss(pred, target):
+    """Mean magnitude of the spectrum difference, in float32 even under autocast. Pixel losses reward blur; this
+    punishes missing high frequencies."""
+    return (torch.fft.rfft2(pred.float()) - torch.fft.rfft2(target.float())).abs().mean()
+
+
 def unroll(model, lr):
     """Run the recurrent net over clips (B,T,3,h,w); returns each frame's output and flow."""
     prev, prev_hr = model.init_state(lr[:, 0])
@@ -229,6 +235,8 @@ def main():
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--steps", type=int, default=100_000, help="total steps; a resumed run continues up to this")
     ap.add_argument("--lr", type=float, default=2e-4)
+    ap.add_argument("--fft-loss", type=float, default=0, metavar="W", help="weight of a frequency-domain loss "
+                    "added to the pixel loss, for sharper output; 0 = off, try 0.05. A resumed run keeps its checkpoint's value.")
     ap.add_argument("--workers", type=int, default=8)
     a = ap.parse_args()
     if a.crop % (a.scale * 8):  # the low-res crop must split into the 8x8 blocks of the compression step
@@ -250,6 +258,7 @@ def main():
     if a.resume:
         ck = torch.load(a.resume, map_location=dev)
         start = ck.get("step", 0)
+        a.fft_loss = a.fft_loss or ck.get("fft_loss", 0)
         if "opt" in ck:  # checkpoints from before this was saved restart the optimizer
             opt.load_state_dict(ck["opt"])
         if start >= a.steps:
@@ -289,6 +298,9 @@ def main():
         with torch.autocast("cuda", torch.bfloat16):
             outs, flows = unroll(model, lr)
             loss = sum(F.l1_loss(out.float(), hr[:, t]) for t, out in enumerate(outs))
+            if a.fft_loss:
+                fft = sum(fft_loss(out, hr[:, t]) for t, out in enumerate(outs))
+                loss = loss + a.fft_loss * fft
             # teach the flow net real motion: the warped previous frame should match the current one
             loss = loss + 0.1 * sum(F.l1_loss(warp(lr[:, t - 1], flows[t].float()), lr[:, t]) for t in range(1, T))
             loss = loss / T
@@ -301,12 +313,12 @@ def main():
         opt.step()
 
         if step % 100 == 0:
-            print(f"step {step}  loss {loss.item():.4f}  {(time.time() - t0) / 100:.2f}s/step", flush=True)
+            print(f"step {step}  loss {loss.item():.4f}  {f"fft {fft.item() / T:.4f}  " if a.fft_loss else ""}{(time.time() - t0) / 100:.2f}s/step", flush=True)
             t0 = time.time()
         if step % 1000 == 0:
             check(step)
         if step % 2000 == 0 or step == a.steps or stop:
-            save(model, a.out, step=step, opt=opt.state_dict())
+            save(model, a.out, step=step, opt=opt.state_dict(), fft_loss=a.fft_loss)
         if stop:
             break
     print(f"saved {a.out} at step {step}")
