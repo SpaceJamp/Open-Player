@@ -82,6 +82,18 @@ bool controls_visible(double now, double last_mouse, bool paused, bool hovered) 
     return paused || hovered || now - last_mouse < 2;
 }
 
+float fade_alpha(double now, double changed_at, bool visible, double in, double out) {
+    double t = std::clamp((now - changed_at) / (visible ? in : out), 0.0, 1.0);
+    return (float)(visible ? t : 1 - t);
+}
+
+float notice_alpha(double now, const UiNotice& n) {
+    if (now < n.shown_at) return 0;
+    return fade_alpha(now, n.shown_at + n.hold, false, 0, 0.3);  // hidden after the hold, fades over 0.3 s
+}
+
+float notice_level(float volume) { return std::clamp(volume / 2, 0.0f, 1.0f); }
+
 std::vector<UiAction> draw_ui(const UiState& s) {
     std::vector<UiAction> out;
     ImGuiIO& io = ImGui::GetIO();
@@ -188,6 +200,13 @@ int ui_selftest() {
     check(restart_args({"open-player", "--model", "m.onnx", "a.mkv", "--screen", "2"}, "/x/My Movie (2012).mkv") ==
           (std::vector<std::string>{"open-player", "--model", "m.onnx", "/x/My Movie (2012).mkv", "--screen", "2"}));
     check(restart_args({"open-player", "a.mkv"}, "/b.mp4") == (std::vector<std::string>{"open-player", "/b.mp4"}));
+    check(fade_alpha(10, 10, true, .15, .3) == 0 && std::fabs(fade_alpha(10.075, 10, true, .15, .3) - .5f) < 1e-3 && fade_alpha(10.2, 10, true, .15, .3) == 1);
+    check(fade_alpha(10, 10, false, .15, .3) == 1 && std::fabs(fade_alpha(10.15, 10, false, .15, .3) - .5f) < 1e-3 && fade_alpha(10.4, 10, false, .15, .3) == 0);
+    UiNotice n{nullptr, "Volume 80%", .4f, 5, 1};
+    check(notice_alpha(4, n) == 0 && notice_alpha(5.5, n) == 1 && std::fabs(notice_alpha(6.15, n) - .5f) < 1e-3 && notice_alpha(6.4, n) == 0);
+    n.shown_at = 6.2;  // a new notice replaces the fading one: full again
+    check(notice_alpha(6.25, n) == 1);
+    check(notice_level(0.8f) == 0.4f && notice_level(2.0f) == 1.0f && notice_level(-1) == 0);
     // headless ImGui: frames without any backend or present must not assert
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();

@@ -17,12 +17,26 @@ bool ui_has_keyboard();  // a menu or text field has the keys, so the player's s
 // argument that isn't a flag or the value of --model/--screen; none: the video is added at the end.
 std::vector<std::string> restart_args(const std::vector<std::string>& argv, const std::string& video);  // 01:05 or 1:02:03
 
+struct UiNotice {  // a brief message over the video (volume, VSR), shown for hold seconds then faded
+    const char* icon = nullptr;
+    std::string text;
+    float level = -1;      // 0..1 bar; < 0: no bar
+    double shown_at = -1e9;
+    double hold = 1;       // seconds
+};
+// 0..1 opacity: fades in over `in` seconds after changed_at when visible, out over `out` seconds when hidden
+float fade_alpha(double now, double changed_at, bool visible, double in, double out);
+float notice_alpha(double now, const UiNotice& n);  // 0 before shown_at, 1 for hold seconds, then fades out
+float notice_level(float volume);                   // volume 0..2 -> bar 0..1
+
 struct UiState {
     double pos, dur, now, last_mouse;  // seconds; dur <= 0: unknown length
     bool paused, vsr_available, vsr_on, fullscreen, show_info;
     float volume;      // 0..2
     std::string info;  // info overlay text
     std::vector<std::string> recent;
+    float scale = 1;
+    UiNotice notice;
 };
 struct UiAction {
     enum Kind { TogglePause, Seek, SetVolume, ToggleVsr, ToggleFullscreen, ToggleInfo, Open, OpenPath, Quit } kind;
