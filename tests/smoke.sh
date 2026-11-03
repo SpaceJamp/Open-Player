@@ -30,6 +30,9 @@ ffmpeg -v error -f lavfi -i testsrc2=size=640x360:rate=25 -t 4 -c:v libx264 -pix
 t=$(reached "$T/raw.h264" 10 --no-vsr)
 check "plays a stream without timestamps (reached ${t:-nothing} of 4 s)" "$(at_least "$t" 3.5)"
 
+"$P" --uitest >/dev/null 2>&1 && ok=yes || ok=no
+check "UI logic self-test" "$ok"
+
 if [ $# -ge 1 ]; then
   "$P" --selftest "$1" >/dev/null 2>&1 && ok=yes || ok=no
   check "model self-test ($1)" "$ok"

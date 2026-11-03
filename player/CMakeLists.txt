@@ -27,7 +27,7 @@ find_path(TENSORRT_INCLUDE NvInfer.h HINTS ${TENSORRT_ROOT}/include REQUIRED)
 find_library(NVINFER nvinfer HINTS ${TENSORRT_ROOT}/lib REQUIRED)  # rpath to it is set automatically
 find_library(NVONNXPARSER nvonnxparser HINTS ${TENSORRT_ROOT}/lib REQUIRED)
 
-add_executable(open-player main.cpp media.cpp vsr.cpp display.cpp kernels.cu)
+add_executable(open-player main.cpp media.cpp vsr.cpp display.cpp ui.cpp kernels.cu)
 target_include_directories(open-player SYSTEM PRIVATE ${TENSORRT_INCLUDE})  # SYSTEM: hide NVIDIA's own deprecation warnings
 # DT_RPATH instead of RUNPATH: glibc also searches the program's RPATH when libnvinfer dlopen()s its builder
 # resources, which a tarball install in /opt/tensorrt needs (their odd sonames keep ldconfig from finding them)

@@ -15,6 +15,7 @@
 #include "display.h"
 #include "kernels.h"
 #include "media.h"
+#include "ui.h"
 #include "vsr.h"
 
 static const char* USAGE =
@@ -106,6 +107,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--stats")) stats = true;
         else if (!strcmp(argv[i], "--selftest")) selftest = true;
         else if (!strcmp(argv[i], "--check")) checking = true;
+        else if (!strcmp(argv[i], "--uitest")) return ui_selftest();
         else if (argv[i][0] != '-') (selftest || checking ? model : path) = argv[i];
         else return fputs(USAGE, stderr), 2;
     }
