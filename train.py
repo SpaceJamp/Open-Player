@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from model import VSR, load, save, warp
+from train_diag import Diag
 
 VIDEO_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts"}
 # (channels, blocks, attention gates). 1080p -> 4K on an RTX 5080: standard 23 ms per frame (up to 30 fps),
@@ -300,6 +301,8 @@ def main():
     best_path = out.with_name(out.stem + "_best.pt")
     best = -math.inf if new_set or not best_path.exists() else torch.load(best_path, map_location="cpu")["val_db"]
 
+    dg = Diag(out.with_suffix(".diag.jsonl"), fresh=new_set)  # train_diag.py: <out>.diag.jsonl and `suggest:` lines
+
     def check(step):
         nonlocal best
         score = validate(model, val_lr, val_hr, s)
@@ -309,6 +312,7 @@ def main():
             save(model, best_path, step=step, val_db=score)
             note = f"  (best so far, saved to {best_path.name})"
         print(f"step {step}  validation {score:+.2f} dB vs bilinear{note}", flush=True)
+        print(dg.validation(model, val_lr, val_hr, s, step, unroll), flush=True)
 
     check(start)
     data = DataLoader(clips, batch_size=a.batch, num_workers=a.workers,
@@ -318,9 +322,10 @@ def main():
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
     t0, it = time.time(), iter(data)
     for step in range(start + 1, a.steps + 1):
-        hr = next(it).to(dev, non_blocking=True).permute(0, 1, 4, 2, 3).float().div_(255)  # (B,T,3,H,W)
+        hr = dg.next(it).to(dev, non_blocking=True).permute(0, 1, 4, 2, 3).float().div_(255)  # (B,T,3,H,W)
         T = hr.shape[1]
         lr = make_lr(hr, s)
+        dg.got_batch(hr, lr)
 
         with torch.autocast("cuda", torch.bfloat16):
             outs, flows = unroll(model, lr)
@@ -335,10 +340,11 @@ def main():
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         for g in opt.param_groups:
             g["lr"] = lr_at(step, a.steps, a.lr)
         opt.step()
+        dg.end(step, loss, gnorm, g["lr"])
 
         if step % 100 == 0:
             tl = f"  distill {F.l1_loss(outs[-1].float(), touts[-1].float()).item():.4f}" if teacher else ""
