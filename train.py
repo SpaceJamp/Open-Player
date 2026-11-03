@@ -153,6 +153,21 @@ def unroll(model, lr):
     return outs, flows
 
 
+@torch.no_grad()
+def teacher_outputs(teacher, lr):
+    """The teacher's frames for the same input clips, from its own recurrent state."""
+    return unroll(teacher, lr)[0]
+
+
+def pixel_loss(outs, hr, touts=None, w=0.0):
+    """Summed L1 of the student's frames to the ground truth, or with a teacher: (1-w) of that plus w of the same
+    against the teacher's frames."""
+    gt = sum(F.l1_loss(out.float(), hr[:, t]) for t, out in enumerate(outs))
+    if touts is None:
+        return gt
+    return (1 - w) * gt + w * sum(F.l1_loss(out.float(), touts[t].float()) for t, out in enumerate(outs))
+
+
 VAL_CLIPS, VAL_VIDEOS = 32, 2  # fixed clips scored every 1000 steps, cut from videos held out of training
 
 
@@ -237,6 +252,8 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--fft-loss", type=float, default=0, metavar="W", help="weight of a frequency-domain loss "
                     "added to the pixel loss, for sharper output; 0 = off, try 0.05. A resumed run keeps its checkpoint's value.")
+    ap.add_argument("--teacher", help="trained checkpoint (any size) whose output the student also learns to copy")
+    ap.add_argument("--distill", type=float, help="weight 0..1 of the teacher's output in the pixel loss (default 0.5 with --teacher)")
     ap.add_argument("--workers", type=int, default=8)
     a = ap.parse_args()
     if a.crop % (a.scale * 8):  # the low-res crop must split into the 8x8 blocks of the compression step
@@ -263,7 +280,17 @@ def main():
             opt.load_state_dict(ck["opt"])
         if start >= a.steps:
             raise SystemExit(f"{a.resume} already has {start} steps; raise --steps to train further")
+        a.teacher, a.distill = a.teacher or ck.get("teacher"), a.distill if a.distill is not None else ck.get("distill")
         print(f"resuming at step {start}")
+    if a.teacher and a.distill is None:
+        a.distill = 0.5
+    if a.distill is not None and not (a.teacher and 0 <= a.distill <= 1):
+        raise SystemExit("--distill needs --teacher and a weight between 0 and 1")
+    teacher = None
+    if a.teacher:
+        teacher = load(a.teacher, dev).requires_grad_(False).to(memory_format=torch.channels_last)
+        if teacher.scale != s:
+            raise SystemExit(f"{a.teacher} upscales {teacher.scale}x, this model {s}x")
     clips = Clips(a.videos, a.frames, a.crop)
     out = Path(a.out)
     val_lr, val_hr, new_set = validation_set(clips, s, out.with_suffix(".val.pt"))
@@ -297,7 +324,8 @@ def main():
 
         with torch.autocast("cuda", torch.bfloat16):
             outs, flows = unroll(model, lr)
-            loss = sum(F.l1_loss(out.float(), hr[:, t]) for t, out in enumerate(outs))
+            touts = teacher_outputs(teacher, lr) if teacher else None
+            loss = pixel_loss(outs, hr, touts, a.distill)
             if a.fft_loss:
                 fft = sum(fft_loss(out, hr[:, t]) for t, out in enumerate(outs))
                 loss = loss + a.fft_loss * fft
@@ -313,12 +341,14 @@ def main():
         opt.step()
 
         if step % 100 == 0:
-            print(f"step {step}  loss {loss.item():.4f}  {f"fft {fft.item() / T:.4f}  " if a.fft_loss else ""}{(time.time() - t0) / 100:.2f}s/step", flush=True)
+            tl = f"  distill {F.l1_loss(outs[-1].float(), touts[-1].float()).item():.4f}" if teacher else ""
+            fl = f"  fft {fft.item() / T:.4f}" if a.fft_loss else ""
+            print(f"step {step}  loss {loss.item():.4f}{tl}{fl}  {(time.time() - t0) / 100:.2f}s/step", flush=True)
             t0 = time.time()
         if step % 1000 == 0:
             check(step)
         if step % 2000 == 0 or step == a.steps or stop:
-            save(model, a.out, step=step, opt=opt.state_dict(), fft_loss=a.fft_loss)
+            save(model, a.out, step=step, opt=opt.state_dict(), fft_loss=a.fft_loss, teacher=a.teacher, distill=a.distill)
         if stop:
             break
     print(f"saved {a.out} at step {step}")

@@ -95,6 +95,39 @@ with tempfile.TemporaryDirectory() as d:
     except SystemExit:
         pass
 
+# distillation: W=0 is the plain loss; the teacher gets no gradient and does not change; a tiny run with --teacher works
+dh, dl = torch.rand(2, 3, 3, 32, 32), torch.rand(2, 3, 3, 16, 16)
+student, teacher = VSR(2, 8, 1), VSR(2, 8, 1)
+souts, _ = train.unroll(student, dl)
+touts = train.teacher_outputs(teacher, dl)
+plain = train.pixel_loss(souts, dh)
+assert torch.equal(train.pixel_loss(souts, dh, touts, 0.0), plain), "W=0 must equal the plain loss"
+assert not torch.equal(train.pixel_loss(souts, dh, touts, 0.5), plain)
+before = [p.clone() for p in teacher.parameters()]
+opt = torch.optim.SGD(student.parameters(), lr=0.1)
+train.pixel_loss(souts, dh, touts, 1.0).backward()
+opt.step()
+assert all(p.grad is None for p in teacher.parameters()) and not any(t.requires_grad for t in touts)
+assert all(torch.equal(a, b) for a, b in zip(before, teacher.parameters())), "teacher changed"
+
+if torch.cuda.is_available() and shutil.which("ffmpeg"):  # train.py trains on cuda only
+    with tempfile.TemporaryDirectory() as d:
+        for i in range(3):
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=96x96:rate=25", "-t", "3",
+                            "-pix_fmt", "yuv420p", f"{d}/v{i}.mp4"], check=True)
+        from model import save
+        save(VSR(2, 8, 2, False), f"{d}/teacher.pt")
+        cmd = [sys.executable, str(Path(train.__file__)), d, "--out", f"{d}/s.pt", "--teacher", f"{d}/teacher.pt",
+               "--distill", "0.5", "--size", "fast", "--crop", "32", "--frames", "2", "--batch", "2", "--steps", "100",
+               "--workers", "0"]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        assert r.returncode == 0 and "distill" in r.stdout, r.stdout + r.stderr
+        ck = torch.load(f"{d}/s.pt")
+        assert ck["teacher"] == f"{d}/teacher.pt" and ck["distill"] == 0.5
+    distilled = "distill run ok"
+else:
+    distilled = "distill run skipped (no cuda/ffmpeg)"
+
 # a video tagged as rotated (as phones save them) must decode to its stored pixels, not turned and scrambled
 if shutil.which("ffmpeg"):
     with tempfile.TemporaryDirectory() as d:
@@ -113,5 +146,5 @@ if shutil.which("ffmpeg"):
 else:
     rotation = "rotation check skipped (no ffmpeg)"
 
-print(f"train checks passed ({rotation}; compression error q100 {near_lossless:.4f}, q30 {crushed:.4f}; "
+print(f"train checks passed ({rotation}; {distilled}; compression error q100 {near_lossless:.4f}, q30 {crushed:.4f}; "
       f"bilinear {same:+.2f} dB, untrained net {gain:+.2f} dB)")
