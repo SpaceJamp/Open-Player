@@ -10,7 +10,10 @@ std::vector<std::string> load_recent(const std::string& file);               // 
 void save_recent(const std::string& file, const std::vector<std::string>& list);  // failures are ignored
 std::string recent_file();  // $XDG_CONFIG_HOME/open-player/recent.txt, default ~/.config/open-player/recent.txt
 
-std::string clock_text(double t);  // 01:05 or 1:02:03
+std::string clock_text(double t);
+// The player's own arguments with the video replaced, to restart it on another file. The video is the first
+// argument that isn't a flag or the value of --model/--screen; none: the video is added at the end.
+std::vector<std::string> restart_args(const std::vector<std::string>& argv, const std::string& video);  // 01:05 or 1:02:03
 
 struct UiState {
     double pos, dur, now, last_mouse;  // seconds; dur <= 0: unknown length

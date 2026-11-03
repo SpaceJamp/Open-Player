@@ -58,6 +58,16 @@ std::string clock_text(double t) {
     return buf;
 }
 
+std::vector<std::string> restart_args(const std::vector<std::string>& argv, const std::string& video) {
+    std::vector<std::string> out = argv;
+    for (size_t i = 1; i < out.size(); i++) {
+        if (out[i] == "--model" || out[i] == "--screen") i++;  // skip the flag's value
+        else if (out[i].empty() || out[i][0] != '-') return out[i] = video, out;
+    }
+    out.push_back(video);
+    return out;
+}
+
 bool controls_visible(double now, double last_mouse, bool paused, bool hovered) {
     return paused || hovered || now - last_mouse < 2;
 }
@@ -162,6 +172,9 @@ int ui_selftest() {
 
     check(controls_visible(10, 9, false, false) && !controls_visible(10, 7, false, false));  // 2 s rule
     check(controls_visible(10, 0, true, false) && controls_visible(10, 0, false, true));    // paused, hovered
+    check(restart_args({"open-player", "--model", "m.onnx", "a.mkv", "--screen", "2"}, "/x/My Movie (2012).mkv") ==
+          (std::vector<std::string>{"open-player", "--model", "m.onnx", "/x/My Movie (2012).mkv", "--screen", "2"}));
+    check(restart_args({"open-player", "a.mkv"}, "/b.mp4") == (std::vector<std::string>{"open-player", "/b.mp4"}));
     // headless ImGui: frames without any backend or present must not assert
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();

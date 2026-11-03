@@ -2,8 +2,10 @@
 // decode (NVDEC) -> YUV->RGB (CUDA) -> VSR (TensorRT) -> RGBA (CUDA) -> Vulkan blit to the window
 #include <SDL3/SDL.h>
 #include <dlfcn.h>
+#include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -199,7 +201,10 @@ int main(int argc, char** argv) {
         bool show_info = false, last_vis = false;
         int ui_redraw = 0;  // a few redraws after input, so ImGui's hover and click states catch up
         std::string info;   // info overlay, refreshed once a second
-        std::vector<std::string> recent = load_recent(recent_file());
+        std::error_code ec;
+        std::string abs_path = std::filesystem::absolute(path, ec).string();
+        std::vector<std::string> recent = add_recent(load_recent(recent_file()), ec ? path : abs_path);
+        save_recent(recent_file(), recent);
         int serial = media.serial(), sw = 0, sh = 0, frames_shown = 0;
         float volume = 1;
         const __half* shown = nullptr;
@@ -263,6 +268,30 @@ int main(int argc, char** argv) {
             if (have_vsr) vsr_on = !vsr_on, reset = true, step |= paused, drop_ahead();
         };
         auto toggle_fullscreen = [&] { SDL_SetWindowFullscreen(win, !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN)); };
+        // Opening another file restarts the player on it with the same arguments: every buffer, the engine and
+        // the window size depend on the video, so a fresh start is the simple, safe way to switch.
+        auto open_video = [&](const std::string& p) {
+            save_recent(recent_file(), add_recent(load_recent(recent_file()), p));
+            std::vector<std::string> args = restart_args(std::vector<std::string>(argv, argv + argc), p);
+            std::vector<char*> cargs;
+            for (auto& a : args) cargs.push_back(a.data());
+            cargs.push_back(nullptr);
+            execv("/proc/self/exe", cargs.data());
+            fprintf(stderr, "can't open %s: restart failed (%s)\n", p.c_str(), strerror(errno));
+        };
+        // the dialog answers from another thread: hand the path to the main loop as an event
+        auto show_open_dialog = [&] {
+            static const SDL_DialogFileFilter filters[] = {
+                {"Videos", "mp4;mkv;webm;mov;avi;m4v;ts;h264;hevc;wmv;ogv"}, {"All files", "*"}};
+            SDL_ShowOpenFileDialog(
+                [](void*, const char* const* files, int) {
+                    if (!files || !files[0]) return;  // cancelled or failed
+                    SDL_Event ev{SDL_EVENT_USER};
+                    ev.user.data1 = SDL_strdup(files[0]);
+                    SDL_PushEvent(&ev);
+                },
+                nullptr, win, filters, 2, nullptr, false);
+        };
         const std::string vsr_desc =
             have_vsr ? std::to_string(s) + "x" + (shrink ? " from " + std::to_string(nw) + "x" + std::to_string(nh) : "")
             : worth_it ? "none" : "off (fills screen)";
@@ -273,6 +302,12 @@ int main(int argc, char** argv) {
             while (SDL_PollEvent(&e)) {
                 if (ui) ImGui_ImplSDL3_ProcessEvent(&e), ui_redraw = 2;
                 if (e.type == SDL_EVENT_QUIT) running = false;
+                else if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) open_video(e.drop.data);
+                else if (e.type == SDL_EVENT_USER) {  // a file picked in the open dialog
+                    std::string p = (char*)e.user.data1;
+                    SDL_free(e.user.data1);
+                    open_video(p);
+                }
                 else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) disp.resized(), dirty = true;
                 else if (e.type == SDL_EVENT_WINDOW_EXPOSED) dirty = true;
                 else if (e.type == SDL_EVENT_MOUSE_MOTION) last_mouse = now();
@@ -363,7 +398,8 @@ int main(int argc, char** argv) {
                     case UiAction::ToggleFullscreen: toggle_fullscreen(); break;
                     case UiAction::ToggleInfo: show_info = !show_info; break;
                     case UiAction::Quit: running = false; break;
-                    case UiAction::Open: case UiAction::OpenPath: break;  // opening files: not yet
+                    case UiAction::Open: show_open_dialog(); break;
+                    case UiAction::OpenPath: open_video(a.path); break;
                     }
                 bool vis = paused || now() - last_mouse < 2;
                 bool ui_dirty = !acts.empty() || vis != last_vis || ui_redraw > 0 || ImGui::IsAnyItemActive() ||

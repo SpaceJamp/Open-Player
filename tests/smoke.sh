@@ -8,6 +8,7 @@ cd "$(dirname "$0")/.."
 export SDL_VIDEO_DRIVER=${SDL_VIDEO_DRIVER:-offscreen} SDL_AUDIO_DRIVER=${SDL_AUDIO_DRIVER:-dummy}
 P=./build/open-player
 T=$(mktemp -d)
+export XDG_CONFIG_HOME="$T"  # the player records recent files; keep test clips out of the real list
 trap 'rm -rf "$T"' EXIT
 fail=0
 check() { if [ "$2" = yes ]; then echo "PASS  $1"; else echo "FAIL  $1"; fail=1; fi; }
