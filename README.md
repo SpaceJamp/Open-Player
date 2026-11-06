@@ -136,3 +136,7 @@ were dropped (decode, upload, convert, vsr, display copy, present).
 - Audio-only files don't open, and there's no switching between audio tracks yet.
 - On WSL, CUDA and Vulkan can't share memory, so each frame goes through the CPU. Native Linux is zero-copy.
 - Training uses a clean bicubic downscale, so compression artifacts in streamed video get sharpened as well.
+
+## License
+
+Open Player is licensed under the [GNU General Public License v3.0](LICENSE), with an [additional permission](LICENSE-EXCEPTION) to link NVIDIA's CUDA and TensorRT libraries. Bundled third-party code and fonts keep their own licenses: Dear ImGui (MIT, `player/third_party/imgui/LICENSE.txt`), Inter (SIL OFL) and Tabler Icons (MIT, both in `assets/fonts/`).
