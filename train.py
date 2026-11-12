@@ -269,6 +269,7 @@ def main():
         raise SystemExit(f"--crop must be a multiple of {a.scale * 8}")
 
     dev = "cuda"
+    torch.backends.cudnn.benchmark = True  # crops are a fixed size: time cuDNN's conv algorithms once, keep the fastest
     if a.resume:
         model = load(a.resume, dev).train()
         have = next((k for k, v in SIZES.items() if v == (model.ch, model.blocks, model.gate)),
@@ -279,7 +280,7 @@ def main():
         model = VSR(a.scale, *SIZES[a.size or "standard"]).to(dev)
     s = model.scale
     model = model.to(memory_format=torch.channels_last)  # fp16 convs run 1.8x faster in this layout (0.132 -> 0.074 s/step)
-    opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=0)
+    opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=0, fused=True)  # one kernel per step, same math
     start = 0
     if a.resume:
         ck = torch.load(a.resume, map_location=dev)
