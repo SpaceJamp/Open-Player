@@ -60,6 +60,10 @@ How training works, and what helps:
   that are held out of training, so the score reflects footage the model hasn't seen. The clips are saved to
   `vsr.val.pt` on the first run and reused, so scores stay comparable even after you add videos. When the number
   stops rising, export and stop; the best model so far is always kept as `vsr_best.pt` (export that one).
+- After each validation it prints one `suggest: ...` line naming what to improve (waiting on data, plateau,
+  overfitting, unstable gradients, a weak clip, flicker, soft edges, or `ok`). Every 100 steps and every
+  validation also go to `vsr.diag.jsonl` (steps/s, data wait, GPU memory, grad norm, per-clip gain, SSIM,
+  flicker, edge vs flat PSNR, train-vs-val gap); `python train_diag.py vsr.diag.jsonl` prints a summary.
 - The source videos set the ceiling: the network can't get sharper than its targets. High-bitrate sources
   (Blu-ray quality) beat 2–3 Mbit/s web rips, and 4K material shrunk to 1080p makes especially clean targets.
 

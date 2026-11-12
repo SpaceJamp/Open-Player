@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from model import VSR, load, save, warp
+from train_diag import Diag
 
 VIDEO_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts"}
 # (channels, blocks, attention gates). 1080p -> 4K on an RTX 5080: standard 23 ms per frame (up to 30 fps),
@@ -32,6 +33,13 @@ def probe(path):
 # Decoding 1080p limits training speed, so each decoded run of frames gives several crops. Each worker keeps two
 # runs and alternates between them, so a batch still mixes scenes. 8 crops: 11.1 batches/s, 4: 5.8 (RTX 5080 box).
 CROPS_PER_DECODE, RUNS = 8, 2
+
+
+def title_weights(paths, root):
+    """Sampling weight per video so each title (a top-level file or folder under root, e.g. a whole series) is
+    picked equally often: 8 episodes of one show otherwise outweigh a film 8 to 1."""
+    key = [Path(p).relative_to(root).parts[0] for p in paths]
+    return [1 / key.count(k) for k in key]
 
 
 class Clips(Dataset):
@@ -72,7 +80,7 @@ class Clips(Dataset):
         """`frames` consecutive full-size frames from a random spot in a random video, as uint8 (T,H,W,3)."""
         T = self.frames
         for _ in range(10):  # retry on reads that come up short (end of file, broken streams)
-            p, w, h, dur = random.choice(self.videos)
+            p, w, h, dur = random.choices(self.videos, title_weights([v[0] for v in self.videos], self.root))[0]
             # start at the keyframe before t instead of decoding up to t exactly, then skip a few frames so runs
             # don't all open on a keyframe, which is sharper than the frames that follow it
             t, skip = random.uniform(0, dur - 1.5), random.randrange(12)
@@ -135,6 +143,12 @@ def make_lr(hr, s, g=None):
     return torch.stack(clips)
 
 
+def fft_loss(pred, target):
+    """Mean magnitude of the spectrum difference, in float32 even under autocast. Pixel losses reward blur; this
+    punishes missing high frequencies."""
+    return (torch.fft.rfft2(pred.float()) - torch.fft.rfft2(target.float())).abs().mean()
+
+
 def unroll(model, lr):
     """Run the recurrent net over clips (B,T,3,h,w); returns each frame's output and flow."""
     prev, prev_hr = model.init_state(lr[:, 0])
@@ -145,6 +159,21 @@ def unroll(model, lr):
         outs.append(out), flows.append(flow)
         prev, prev_hr = cur, out
     return outs, flows
+
+
+@torch.no_grad()
+def teacher_outputs(teacher, lr):
+    """The teacher's frames for the same input clips, from its own recurrent state."""
+    return unroll(teacher, lr)[0]
+
+
+def pixel_loss(outs, hr, touts=None, w=0.0):
+    """Summed L1 of the student's frames to the ground truth, or with a teacher: (1-w) of that plus w of the same
+    against the teacher's frames."""
+    gt = sum(F.l1_loss(out.float(), hr[:, t]) for t, out in enumerate(outs))
+    if touts is None:
+        return gt
+    return (1 - w) * gt + w * sum(F.l1_loss(out.float(), touts[t].float()) for t, out in enumerate(outs))
 
 
 VAL_CLIPS, VAL_VIDEOS = 32, 2  # fixed clips scored every 1000 steps, cut from videos held out of training
@@ -229,6 +258,10 @@ def main():
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--steps", type=int, default=100_000, help="total steps; a resumed run continues up to this")
     ap.add_argument("--lr", type=float, default=2e-4)
+    ap.add_argument("--fft-loss", type=float, default=0, metavar="W", help="weight of a frequency-domain loss "
+                    "added to the pixel loss, for sharper output; 0 = off, try 0.05. A resumed run keeps its checkpoint's value.")
+    ap.add_argument("--teacher", help="trained checkpoint (any size) whose output the student also learns to copy")
+    ap.add_argument("--distill", type=float, help="weight 0..1 of the teacher's output in the pixel loss (default 0.5 with --teacher)")
     ap.add_argument("--workers", type=int, default=8)
     a = ap.parse_args()
     if a.crop % (a.scale * 8):  # the low-res crop must split into the 8x8 blocks of the compression step
@@ -250,11 +283,22 @@ def main():
     if a.resume:
         ck = torch.load(a.resume, map_location=dev)
         start = ck.get("step", 0)
+        a.fft_loss = a.fft_loss or ck.get("fft_loss", 0)
         if "opt" in ck:  # checkpoints from before this was saved restart the optimizer
             opt.load_state_dict(ck["opt"])
         if start >= a.steps:
             raise SystemExit(f"{a.resume} already has {start} steps; raise --steps to train further")
+        a.teacher, a.distill = a.teacher or ck.get("teacher"), a.distill if a.distill is not None else ck.get("distill")
         print(f"resuming at step {start}")
+    if a.teacher and a.distill is None:
+        a.distill = 0.5
+    if a.distill is not None and not (a.teacher and 0 <= a.distill <= 1):
+        raise SystemExit("--distill needs --teacher and a weight between 0 and 1")
+    teacher = None
+    if a.teacher:
+        teacher = load(a.teacher, dev).requires_grad_(False).to(memory_format=torch.channels_last)
+        if teacher.scale != s:
+            raise SystemExit(f"{a.teacher} upscales {teacher.scale}x, this model {s}x")
     clips = Clips(a.videos, a.frames, a.crop)
     out = Path(a.out)
     val_lr, val_hr, new_set = validation_set(clips, s, out.with_suffix(".val.pt"))
@@ -263,6 +307,8 @@ def main():
     # compared with an old best score, so that starts over.
     best_path = out.with_name(out.stem + "_best.pt")
     best = -math.inf if new_set or not best_path.exists() else torch.load(best_path, map_location="cpu")["val_db"]
+
+    dg = Diag(out.with_suffix(".diag.jsonl"), fresh=new_set)  # train_diag.py: <out>.diag.jsonl and `suggest:` lines
 
     def check(step):
         nonlocal best
@@ -273,6 +319,7 @@ def main():
             save(model, best_path, step=step, val_db=score)
             note = f"  (best so far, saved to {best_path.name})"
         print(f"step {step}  validation {score:+.2f} dB vs bilinear{note}", flush=True)
+        print(dg.validation(model, val_lr, val_hr, s, step, unroll), flush=True)
 
     check(start)
     data = DataLoader(clips, batch_size=a.batch, num_workers=a.workers,
@@ -282,31 +329,39 @@ def main():
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
     t0, it = time.time(), iter(data)
     for step in range(start + 1, a.steps + 1):
-        hr = next(it).to(dev, non_blocking=True).permute(0, 1, 4, 2, 3).float().div_(255)  # (B,T,3,H,W)
+        hr = dg.next(it).to(dev, non_blocking=True).permute(0, 1, 4, 2, 3).float().div_(255)  # (B,T,3,H,W)
         T = hr.shape[1]
         lr = make_lr(hr, s)
+        dg.got_batch(hr, lr)
 
         with torch.autocast("cuda", torch.bfloat16):
             outs, flows = unroll(model, lr)
-            loss = sum(F.l1_loss(out.float(), hr[:, t]) for t, out in enumerate(outs))
+            touts = teacher_outputs(teacher, lr) if teacher else None
+            loss = pixel_loss(outs, hr, touts, a.distill)
+            if a.fft_loss:
+                fft = sum(fft_loss(out, hr[:, t]) for t, out in enumerate(outs))
+                loss = loss + a.fft_loss * fft
             # teach the flow net real motion: the warped previous frame should match the current one
             loss = loss + 0.1 * sum(F.l1_loss(warp(lr[:, t - 1], flows[t].float()), lr[:, t]) for t in range(1, T))
             loss = loss / T
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         for g in opt.param_groups:
             g["lr"] = lr_at(step, a.steps, a.lr)
         opt.step()
+        dg.end(step, loss, gnorm, g["lr"])
 
         if step % 100 == 0:
-            print(f"step {step}  loss {loss.item():.4f}  {(time.time() - t0) / 100:.2f}s/step", flush=True)
+            tl = f"  distill {F.l1_loss(outs[-1].float(), touts[-1].float()).item():.4f}" if teacher else ""
+            fl = f"  fft {fft.item() / T:.4f}" if a.fft_loss else ""
+            print(f"step {step}  loss {loss.item():.4f}{tl}{fl}  {(time.time() - t0) / 100:.2f}s/step", flush=True)
             t0 = time.time()
         if step % 1000 == 0:
             check(step)
         if step % 2000 == 0 or step == a.steps or stop:
-            save(model, a.out, step=step, opt=opt.state_dict())
+            save(model, a.out, step=step, opt=opt.state_dict(), fft_loss=a.fft_loss, teacher=a.teacher, distill=a.distill)
         if stop:
             break
     print(f"saved {a.out} at step {step}")
