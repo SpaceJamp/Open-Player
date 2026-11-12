@@ -40,6 +40,12 @@ p = soft.clone().requires_grad_()
 train.fft_loss(p, x).backward()
 assert p.grad is not None and p.grad.abs().sum() > 0
 assert train.fft_loss(x.bfloat16(), x).dtype == torch.float32  # computed in fp32 even for autocast outputs
+# same per-pixel error, same loss, at any crop size: else --fft-loss W means something different per --crop and
+# swamps the pixel loss (unnormalised FFTs grow with sqrt(h*w))
+g = torch.Generator().manual_seed(0)
+small, big = (torch.randn(1, 3, n, n, generator=g) * 0.05 for n in (32, 256))
+fs, fb = train.fft_loss(small, torch.zeros_like(small)).item(), train.fft_loss(big, torch.zeros_like(big)).item()
+assert 0.9 < fb / fs < 1.1 and fb < 0.1, (fs, fb)  # about 0.89 x the error's std (mean |complex gaussian|)
 
 # degraded input: right size and range, and the same from the same seed (the validation set relies on that)
 hr = torch.rand(2, 4, 3, 64, 64)

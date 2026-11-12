@@ -146,7 +146,8 @@ def make_lr(hr, s, g=None):
 def fft_loss(pred, target):
     """Mean magnitude of the spectrum difference, in float32 even under autocast. Pixel losses reward blur; this
     punishes missing high frequencies."""
-    return (torch.fft.rfft2(pred.float()) - torch.fft.rfft2(target.float())).abs().mean()
+    # ortho: the same per-pixel error gives the same loss at any crop size, on the scale of the pixel loss
+    return (torch.fft.rfft2(pred.float(), norm="ortho") - torch.fft.rfft2(target.float(), norm="ortho")).abs().mean()
 
 
 def unroll(model, lr):
