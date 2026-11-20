@@ -55,7 +55,12 @@ bool Vsr::open(const std::string& onnx, int w, int h, cudaStream_t s) {
 
 bool Vsr::load_or_build(const std::string& onnx, bool allow_cache) {
     int s = scale_;
-    fs::path cache = onnx + "." + std::to_string(w_) + "x" + std::to_string(h_) + ".engine";
+#ifdef _WIN32  // plans only load on the platform that built them; WSL and Windows share the model's folder
+    const char* platform = ".win";
+#else
+    const char* platform = "";
+#endif
+    fs::path cache = onnx + "." + std::to_string(w_) + "x" + std::to_string(h_) + platform + ".engine";
     std::error_code ec;
     bool cached = allow_cache && fs::exists(cache) && fs::last_write_time(cache, ec) >= fs::last_write_time(onnx, ec);
     std::vector<char> plan;

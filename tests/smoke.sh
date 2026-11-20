@@ -6,6 +6,9 @@
 set -u
 cd "$(dirname "$0")/.."
 export SDL_VIDEO_DRIVER=${SDL_VIDEO_DRIVER:-offscreen} SDL_AUDIO_DRIVER=${SDL_AUDIO_DRIVER:-dummy}
+SIG=INT SCREEN=()  # Windows: NVIDIA's Vulkan driver can't render offscreen, so tests play on a monitor (default: the 2nd)
+# (and Git Bash can't send Ctrl-C to a native program, so it is killed instead)
+case "$(uname -s)" in MINGW*|MSYS*) unset SDL_VIDEO_DRIVER; SIG=KILL; SCREEN=(--screen "${OPEN_PLAYER_SCREEN:-2}") ;; esac
 P=${OPEN_PLAYER:-./build/open-player}  # Windows: OPEN_PLAYER=build-win/open-player.exe
 T=$(mktemp -d)
 export XDG_CONFIG_HOME="$T"  # the player records recent files; keep test clips out of the real list
@@ -15,7 +18,7 @@ check() { if [ "$2" = yes ]; then echo "PASS  $1"; else echo "FAIL  $1"; fail=1;
 # furthest playback position (--stats "t") within $2 seconds; stops at the end of the clip, where the player
 # pauses on the last frame. Further arguments go to the player.
 reached() {
-  timeout -s INT "$2" "$P" "$1" "${@:3}" --stats 2>/dev/null |
+  timeout -s "$SIG" "$2" "$P" "$1" "${@:3}" "${SCREEN[@]}" --stats 2>/dev/null |
     awk -F'"t":' '/^stats/ { split($2, a, ","); t = a[1] } /"paused":true/ { exit } END { print t + 0 }'
 }
 at_least() { awk -v a="${1:-0}" -v b="$2" 'BEGIN { print (a >= b) ? "yes" : "no" }'; }
@@ -27,7 +30,7 @@ t=$(reached "$T/short_audio.mp4" 12 --no-vsr)
 check "plays past where the audio ends (reached ${t:-nothing} of 6 s)" "$(at_least "$t" 5.5)"
 
 # --stats reports what the on-screen controls cost
-timeout -s INT 4 "$P" "$T/short_audio.mp4" --no-vsr --stats 2>/dev/null | grep -q '"ui_ms":[0-9.]*,"ui_max_ms":[0-9.]*,"ui_vtx"' && ok=yes || ok=no
+timeout -s "$SIG" 4 "$P" "$T/short_audio.mp4" --no-vsr "${SCREEN[@]}" --stats 2>/dev/null | grep -q '"ui_ms":[0-9.]*,"ui_max_ms":[0-9.]*,"ui_vtx"' && ok=yes || ok=no
 check "stats include UI timings" "$ok"
 
 # raw H.264 stream: frames carry no timestamps and used to be dropped, leaving a black window

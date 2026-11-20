@@ -5,6 +5,9 @@
 set -u
 cd "$(dirname "$0")/.."
 export SDL_VIDEO_DRIVER=${SDL_VIDEO_DRIVER:-offscreen} SDL_AUDIO_DRIVER=${SDL_AUDIO_DRIVER:-dummy}
+SIG=INT SCREEN=()  # Windows: NVIDIA's Vulkan driver can't render offscreen, so tests play on a monitor (default: the 2nd)
+# (and Git Bash can't send Ctrl-C to a native program, so it is killed instead)
+case "$(uname -s)" in MINGW*|MSYS*) unset SDL_VIDEO_DRIVER; SIG=KILL; SCREEN=(--screen "${OPEN_PLAYER_SCREEN:-2}") ;; esac
 P=${OPEN_PLAYER:-./build/open-player}  # Windows: OPEN_PLAYER=build-win/open-player.exe
 T=$(mktemp -d)
 export XDG_CONFIG_HOME="$T"  # the player records recent files; keep test clips out of the real list
@@ -54,7 +57,7 @@ for c in "${cases[@]}"; do
     printf "%-22s %-34s %s\n" "$name" "-" "SKIP (ffmpeg can't encode it: $(head -c 60 "$T/err" | tr '\n' ' '))"
     continue
   fi
-  out=$(timeout -s INT 9 "$P" "$f" --no-vsr --stats 2>&1 | awk '{ print } /"paused":true/ { exit }')  # stop at the end
+  out=$(timeout -s "$SIG" 9 "$P" "$f" --no-vsr "${SCREEN[@]}" --stats 2>&1 | awk '{ print } /"paused":true/ { exit }')  # stop at the end
   decoded=$(grep -o '"decode":"[^"]*"' <<< "$out" | head -1 | cut -d'"' -f4)
   t=$(grep -o '"t":[0-9.]*' <<< "$out" | cut -d: -f2 | sort -n | tail -1)
   a=$(grep -o '"audio_s":[0-9.]*' <<< "$out" | cut -d: -f2 | sort -n | tail -1)  # audio buffered for the device
