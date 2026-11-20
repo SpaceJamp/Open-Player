@@ -8,3 +8,4 @@ __pycache__/
 *.engine
 .superpowers/
 *.diag.jsonl
+build-win/

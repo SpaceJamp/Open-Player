@@ -8,7 +8,19 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+// CUDA and Vulkan share the frame buffer through an OS handle: a file descriptor on Linux, a Win32 handle on Windows
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <vulkan/vulkan_win32.h>
+static const char* const MEM_EXT = VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME;
+static constexpr auto MEM_HANDLE = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+#else
 #include <unistd.h>
+static const char* const MEM_EXT = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
+static constexpr auto MEM_HANDLE = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+#endif
 
 bool Display::init(SDL_Window* win) {
     win_ = win;
@@ -65,8 +77,8 @@ bool Display::init(SDL_Window* win) {
         return std::any_of(avail.begin(), avail.end(), [&](auto& a) { return !strcmp(a.extensionName, e); });
     };
     std::vector<const char*> dev_ext{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-    interop_ = best_cuda >= 0 && has(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
-    if (interop_) dev_ext.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+    interop_ = best_cuda >= 0 && has(MEM_EXT);
+    if (interop_) dev_ext.push_back(MEM_EXT);
 
     float prio = 1;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -125,13 +137,13 @@ bool Display::alloc(int max_w, int max_h) {
     VkDeviceSize size = (VkDeviceSize)max_w * max_h * 4;
     auto make_buffer = [&](bool exported) {
         VkExternalMemoryBufferCreateInfo ebi{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
-        ebi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+        ebi.handleTypes = MEM_HANDLE;
         VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, exported ? &ebi : nullptr};
         bi.size = size, bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         if (vkCreateBuffer(dev_, &bi, nullptr, &buf_) != VK_SUCCESS) return false;
         vkGetBufferMemoryRequirements(dev_, buf_, &req);
         VkExportMemoryAllocateInfo emi{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
-        emi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+        emi.handleTypes = MEM_HANDLE;
         VkMemoryAllocateInfo bai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, exported ? &emi : nullptr};
         bai.allocationSize = req.size;
         // fallback: system memory, cached if offered. On WSL the uncached type took 43 ms per 1440p frame to fill
@@ -163,14 +175,27 @@ bool Display::alloc(int max_w, int max_h) {
             // else GPU -> CUDA-pinned memory (fast), then a plain memcpy into Vulkan's
             return cudaMallocHost(&pinned_, size) == cudaSuccess;
         }
+#ifdef _WIN32
+        auto get_handle = (PFN_vkGetMemoryWin32HandleKHR)vkGetDeviceProcAddr(dev_, "vkGetMemoryWin32HandleKHR");
+        VkMemoryGetWin32HandleInfoKHR gi{VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR};
+        gi.memory = buf_mem_, gi.handleType = MEM_HANDLE;
+        HANDLE handle = nullptr;
+        if (!get_handle || get_handle(dev_, &gi, &handle) != VK_SUCCESS) return false;
+        cudaExternalMemoryHandleDesc hd{};
+        hd.type = cudaExternalMemoryHandleTypeOpaqueWin32, hd.handle.win32.handle = handle, hd.size = req.size;
+        bool imported = cudaImportExternalMemory(&ext_, &hd) == cudaSuccess;
+        CloseHandle(handle);  // unlike an fd, CUDA never takes over a Win32 handle
+        if (!imported) return false;
+#else
         auto get_fd = (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(dev_, "vkGetMemoryFdKHR");
         VkMemoryGetFdInfoKHR gi{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};
-        gi.memory = buf_mem_, gi.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+        gi.memory = buf_mem_, gi.handleType = MEM_HANDLE;
         int fd = -1;
         if (!get_fd || get_fd(dev_, &gi, &fd) != VK_SUCCESS) return false;
         cudaExternalMemoryHandleDesc hd{};
         hd.type = cudaExternalMemoryHandleTypeOpaqueFd, hd.handle.fd = fd, hd.size = req.size;
         if (cudaImportExternalMemory(&ext_, &hd) != cudaSuccess) return close(fd), false;  // CUDA owns fd on success
+#endif
         cudaExternalMemoryBufferDesc bd{};
         bd.size = size;
         return cudaExternalMemoryGetMappedBuffer((void**)&dev_ptr_, ext_, &bd) == cudaSuccess;

@@ -1,0 +1,13 @@
+{
+  "name": "open-player",
+  "version-string": "0",
+  "description": "Windows dependencies (Linux uses the system packages)",
+  "dependencies": [
+    "sdl3",
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": ["avcodec", "avformat", "swresample", "swscale", "nvcodec", "dav1d"]
+    }
+  ]
+}

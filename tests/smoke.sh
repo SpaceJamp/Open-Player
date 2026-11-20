@@ -6,7 +6,7 @@
 set -u
 cd "$(dirname "$0")/.."
 export SDL_VIDEO_DRIVER=${SDL_VIDEO_DRIVER:-offscreen} SDL_AUDIO_DRIVER=${SDL_AUDIO_DRIVER:-dummy}
-P=./build/open-player
+P=${OPEN_PLAYER:-./build/open-player}  # Windows: OPEN_PLAYER=build-win/open-player.exe
 T=$(mktemp -d)
 export XDG_CONFIG_HOME="$T"  # the player records recent files; keep test clips out of the real list
 trap 'rm -rf "$T"' EXIT

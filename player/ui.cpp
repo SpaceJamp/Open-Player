@@ -49,9 +49,14 @@ void save_recent(const std::string& file, const std::vector<std::string>& list) 
 }
 
 std::string recent_file() {
+#ifdef _WIN32
+    const char* appdata = getenv("APPDATA");
+    fs::path base = appdata && *appdata ? fs::path(appdata) : fs::path(".");
+#else
     const char* xdg = getenv("XDG_CONFIG_HOME");
     const char* home = getenv("HOME");
     fs::path base = xdg && *xdg ? fs::path(xdg) : fs::path(home ? home : ".") / ".config";
+#endif
     return (base / "open-player" / "recent.txt").string();
 }
 
@@ -68,6 +73,23 @@ float ui_scale(float display_h) { return std::clamp(display_h / 1080.f, 1.f, 2.5
 std::string seek_notice_text(double delta, double target, double dur) {
     if (dur > 0) target = std::fmin(target, dur);
     return std::string(delta > 0 ? "+5 s" : "−5 s") + " · " + clock_text(target);
+}
+
+std::string quote_arg(const std::string& a) {
+    if (!a.empty() && a.find_first_of(" \t\n\v\"") == std::string::npos) return a;
+    std::string out = "\"";
+    for (size_t i = 0;; i++) {
+        size_t slashes = 0;
+        while (i < a.size() && a[i] == '\\') i++, slashes++;
+        if (i == a.size()) {  // backslashes before the closing quote must not escape it
+            out.append(slashes * 2, '\\');
+            break;
+        }
+        if (a[i] == '"') out.append(slashes * 2 + 1, '\\');
+        else out.append(slashes, '\\');
+        out += a[i];
+    }
+    return out + '"';
 }
 
 std::vector<std::string> restart_args(const std::vector<std::string>& argv, const std::string& video) {
@@ -413,14 +435,14 @@ int ui_selftest() {
     l = add_recent(l, "/v5.mkv");
     check(l.front() == "/v5.mkv" && std::count(l.begin(), l.end(), "/v5.mkv") == 1);  // no duplicates
     check(load_recent("/nonexistent/dir/recent.txt").empty());  // missing file -> empty
-    save_recent("/proc/forbidden/recent.txt", l);                // unwritable -> no crash
     // round trip through a temp file, including a path with spaces and non-ASCII
     std::string tmp = (std::filesystem::temp_directory_path() / "open-player-uitest-recent.txt").string();
     std::string odd = "/mnt/c/Users/Yeti/Vid\xc3\xa9os/My Movie (2012).mkv";
     save_recent(tmp, {odd, "/b.mp4"});
+    save_recent(tmp + "/under-a-file/recent.txt", l);  // unwritable (parent is a file) -> no crash
     check(load_recent(tmp) == (std::vector<std::string>{odd, "/b.mp4"}));
     check(existing_only({tmp, "/definitely/missing.mkv"}) == std::vector<std::string>{tmp});
-    check(can_open(tmp) && !can_open("/tmp") && !can_open("/definitely/missing.mkv"));  // files only
+    check(can_open(tmp) && !can_open(std::filesystem::temp_directory_path().string()) && !can_open("/definitely/missing.mkv"));  // files only
     std::filesystem::remove(tmp);
 
     check(ui_scale(1080) == 1 && ui_scale(2160) == 2 && ui_scale(720) == 1 && ui_scale(4320) == 2.5f);  // logical points, clamped 1-2.5
@@ -434,6 +456,11 @@ int ui_selftest() {
     check(restart_args({"open-player", "--model", "m.onnx", "a.mkv", "--screen", "2"}, "/x/My Movie (2012).mkv") ==
           (std::vector<std::string>{"open-player", "--model", "m.onnx", "/x/My Movie (2012).mkv", "--screen", "2"}));
     check(restart_args({"open-player", "a.mkv"}, "/b.mp4") == (std::vector<std::string>{"open-player", "/b.mp4"}));
+    // Windows restart: one argument each after the C runtime splits the command line again
+    check(quote_arg("plain.mkv") == "plain.mkv" && quote_arg("") == "\"\"");
+    check(quote_arg("C:\\Videos\\My Movie (2012).mkv") == "\"C:\\Videos\\My Movie (2012).mkv\"");
+    check(quote_arg("C:\\dir with space\\") == "\"C:\\dir with space\\\\\"");  // trailing backslash doubled
+    check(quote_arg("say \"hi\"") == "\"say \\\"hi\\\"\"");
     check(fade_alpha(10, 10, true, .15, .3) == 0 && std::fabs(fade_alpha(10.075, 10, true, .15, .3) - .5f) < 1e-3 && fade_alpha(10.2, 10, true, .15, .3) == 1);
     check(fade_alpha(10, 10, false, .15, .3) == 1 && std::fabs(fade_alpha(10.15, 10, false, .15, .3) - .5f) < 1e-3 && fade_alpha(10.4, 10, false, .15, .3) == 0);
     UiNotice n{nullptr, "Volume 80%", .4f, 5, 1};

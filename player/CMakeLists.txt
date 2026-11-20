@@ -19,13 +19,25 @@ endif()
 find_package(CUDAToolkit REQUIRED)
 find_package(Vulkan REQUIRED)
 find_package(SDL3 REQUIRED CONFIG)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswresample libswscale)
+add_library(ffmpeg INTERFACE)
+if(WIN32)  # from vcpkg (player/vcpkg.json); Linux uses the system's FFmpeg
+  find_package(FFMPEG REQUIRED)
+  target_include_directories(ffmpeg INTERFACE ${FFMPEG_INCLUDE_DIRS})
+  target_link_directories(ffmpeg INTERFACE ${FFMPEG_LIBRARY_DIRS})
+  target_link_libraries(ffmpeg INTERFACE ${FFMPEG_LIBRARIES})
+  set(TENSORRT_DEFAULT "C:/TensorRT/TensorRT-11.5.0.63")
+else()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswresample libswscale)
+  target_link_libraries(ffmpeg INTERFACE PkgConfig::FFMPEG)
+  set(TENSORRT_DEFAULT "/opt/tensorrt")
+endif()
 
-set(TENSORRT_ROOT "/opt/tensorrt" CACHE PATH "TensorRT folder when it is not in the system paths (Fedora tarball)")
+set(TENSORRT_ROOT ${TENSORRT_DEFAULT} CACHE PATH "TensorRT folder when it is not in the system paths (Fedora tarball, Windows zip)")
 find_path(TENSORRT_INCLUDE NvInfer.h HINTS ${TENSORRT_ROOT}/include REQUIRED)
-find_library(NVINFER nvinfer HINTS ${TENSORRT_ROOT}/lib REQUIRED)  # rpath to it is set automatically
-find_library(NVONNXPARSER nvonnxparser HINTS ${TENSORRT_ROOT}/lib REQUIRED)
+# the Windows zip names its libraries after the major version (nvinfer_11.lib)
+find_library(NVINFER NAMES nvinfer nvinfer_11 HINTS ${TENSORRT_ROOT}/lib REQUIRED)  # rpath to it is set automatically
+find_library(NVONNXPARSER NAMES nvonnxparser nvonnxparser_11 HINTS ${TENSORRT_ROOT}/lib REQUIRED)
 
 set(IMGUI third_party/imgui)
 add_executable(open-player main.cpp media.cpp vsr.cpp display.cpp ui.cpp theme.cpp kernels.cu
@@ -33,7 +45,18 @@ add_executable(open-player main.cpp media.cpp vsr.cpp display.cpp ui.cpp theme.c
   ${IMGUI}/backends/imgui_impl_sdl3.cpp ${IMGUI}/backends/imgui_impl_vulkan.cpp)
 target_include_directories(open-player SYSTEM PRIVATE ${IMGUI} ${IMGUI}/backends)  # SYSTEM: no warnings from it
 target_include_directories(open-player SYSTEM PRIVATE ${TENSORRT_INCLUDE})  # SYSTEM: hide NVIDIA's own deprecation warnings
-# DT_RPATH instead of RUNPATH: glibc also searches the program's RPATH when libnvinfer dlopen()s its builder
-# resources, which a tarball install in /opt/tensorrt needs (their odd sonames keep ldconfig from finding them)
-target_link_options(open-player PRIVATE -Wl,--disable-new-dtags)
-target_link_libraries(open-player PRIVATE ${CMAKE_DL_LIBS} CUDA::cudart Vulkan::Vulkan SDL3::SDL3 PkgConfig::FFMPEG ${NVINFER} ${NVONNXPARSER})
+target_link_libraries(open-player PRIVATE ${CMAKE_DL_LIBS} Vulkan::Vulkan SDL3::SDL3 ffmpeg ${NVINFER} ${NVONNXPARSER})
+if(WIN32)
+  target_link_libraries(open-player PRIVATE CUDA::cudart_static)  # one DLL less to ship
+  target_compile_definitions(open-player PRIVATE _CRT_SECURE_NO_WARNINGS)  # getenv, strerror: fine here
+  target_sources(open-player PRIVATE open-player.manifest)  # UTF-8 code page for file names
+  # TensorRT's DLLs (incl. the builder resources it loads when making an engine) next to the exe; vcpkg copies its own
+  file(GLOB TENSORRT_DLLS ${TENSORRT_ROOT}/bin/nvinfer*.dll ${TENSORRT_ROOT}/bin/nvonnxparser*.dll)
+  add_custom_command(TARGET open-player POST_BUILD
+                     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${TENSORRT_DLLS} $<TARGET_FILE_DIR:open-player>)
+else()
+  target_link_libraries(open-player PRIVATE CUDA::cudart)
+  # DT_RPATH instead of RUNPATH: glibc also searches the program's RPATH when libnvinfer dlopen()s its builder
+  # resources, which a tarball install in /opt/tensorrt needs (their odd sonames keep ldconfig from finding them)
+  target_link_options(open-player PRIVATE -Wl,--disable-new-dtags)
+endif()

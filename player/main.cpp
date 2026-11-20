@@ -1,8 +1,15 @@
 // Open Player: video player that upscales with our VSR network on the GPU.
 // decode (NVDEC) -> YUV->RGB (CUDA) -> VSR (TensorRT) -> RGBA (CUDA) -> Vulkan blit to the window
 #include <SDL3/SDL.h>
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <process.h>
+#include <windows.h>
+#else
 #include <dlfcn.h>
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cerrno>
@@ -54,9 +61,17 @@ static int check(const char* model) {
                                  ", driver CUDA " + std::to_string(drv / 1000) + "." + std::to_string(drv % 1000 / 10));
     else line("FAIL", "CUDA", "no CUDA GPU visible (driver missing, or on WSL: Windows driver too old)");
 
-    void* nvcuvid = dlopen("libnvcuvid.so.1", RTLD_NOW);  // what FFmpeg's NVDEC loads
-    line(nvcuvid ? "PASS" : "WARN", "NVDEC", nvcuvid ? "libnvcuvid found" : "libnvcuvid missing: videos decode on the CPU");
+#ifdef _WIN32
+    HMODULE nvcuvid = LoadLibraryA("nvcuvid.dll");  // what FFmpeg's NVDEC loads
+#else
+    void* nvcuvid = dlopen("libnvcuvid.so.1", RTLD_NOW);
+#endif
+    line(nvcuvid ? "PASS" : "WARN", "NVDEC", nvcuvid ? "nvcuvid found" : "nvcuvid missing: videos decode on the CPU");
+#ifdef _WIN32
+    if (nvcuvid) FreeLibrary(nvcuvid);
+#else
     if (nvcuvid) dlclose(nvcuvid);
+#endif
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         if (SDL_Window* win = SDL_CreateWindow("Open Player check", 64, 64, SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN)) {
@@ -300,10 +315,17 @@ int main(int argc, char** argv) {
             // otherwise end playback for nothing
             if (!can_open(p)) return (void)fprintf(stderr, "can't open %s: not a file\n", p.c_str());
             std::vector<std::string> args = restart_args(std::vector<std::string>(argv, argv + argc), p);
+#ifdef _WIN32
+            for (auto& a : args) a = quote_arg(a);  // _execv joins the arguments with spaces and doesn't quote them
+#endif
             std::vector<char*> cargs;
             for (auto& a : args) cargs.push_back(a.data());
             cargs.push_back(nullptr);
+#ifdef _WIN32
+            _execv(exe_path().c_str(), cargs.data());
+#else
             execv("/proc/self/exe", cargs.data());
+#endif
             fprintf(stderr, "can't open %s: restart failed (%s)\n", p.c_str(), strerror(errno));
         };
         // the dialog answers from another thread: hand the path to the main loop as an event

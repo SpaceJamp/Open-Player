@@ -2,15 +2,36 @@
 
 #include <cstdio>
 #include <filesystem>
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 namespace {
 bool g_loaded = false;
 }
 
-std::string assets_dir() {
+std::string exe_path() {
+#ifdef _WIN32
+    static wchar_t buf[32768];  // the longest path Windows allows
+    DWORD n = GetModuleFileNameW(nullptr, buf, 32768);
+    return std::filesystem::path(std::wstring(buf, n)).string();  // UTF-8: the manifest sets the code page
+#else
     std::error_code ec;
-    auto exe = std::filesystem::read_symlink("/proc/self/exe", ec);
-    return (exe.parent_path() / ".." / "assets").lexically_normal().string();
+    return std::filesystem::read_symlink("/proc/self/exe", ec).string();
+#endif
+}
+
+std::string assets_dir() {
+    // build/open-player -> assets/; a multi-config Windows build puts the exe one level deeper (build\Release)
+    auto dir = std::filesystem::path(exe_path()).parent_path();
+    for (const char* up : {"..", "../.."}) {
+        std::error_code ec;
+        auto a = (dir / up / "assets").lexically_normal();
+        if (std::filesystem::is_directory(a, ec)) return a.string();
+    }
+    return (dir / ".." / "assets").lexically_normal().string();
 }
 
 bool theme_loaded() { return g_loaded; }
