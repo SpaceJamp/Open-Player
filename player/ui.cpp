@@ -63,6 +63,13 @@ std::string clock_text(double t) {
     return buf;
 }
 
+float ui_scale(float display_h) { return std::clamp(display_h / 1080.f, 1.f, 2.5f); }
+
+std::string seek_notice_text(double delta, double target, double dur) {
+    if (dur > 0) target = std::fmin(target, dur);
+    return std::string(delta > 0 ? "+5 s" : "−5 s") + " · " + clock_text(target);
+}
+
 std::vector<std::string> restart_args(const std::vector<std::string>& argv, const std::string& video) {
     std::vector<std::string> out = argv;
     for (size_t i = 1; i < out.size(); i++) {
@@ -416,7 +423,13 @@ int ui_selftest() {
     check(can_open(tmp) && !can_open("/tmp") && !can_open("/definitely/missing.mkv"));  // files only
     std::filesystem::remove(tmp);
 
-    check(controls_visible(10, 9, false, false) && !controls_visible(10, 7, false, false));  // 2 s rule
+    check(ui_scale(1080) == 1 && ui_scale(2160) == 2 && ui_scale(720) == 1 && ui_scale(4320) == 2.5f);  // logical points, clamped 1-2.5
+    check(seek_notice_text(5, 100, 90) == "+5 s · " + clock_text(90));   // target past the end
+    check(seek_notice_text(-5, -2, 90) == "−5 s · 00:00");              // before the start
+    check(seek_notice_text(5, 100, 0) == "+5 s · " + clock_text(100));  // unknown duration: unclamped above
+    check(seek_notice_text(5, 40, 90) == "+5 s · 00:40");
+
+    check(controls_visible(10, 9, false, false) &&!controls_visible(10, 7, false, false));  // 2 s rule
     check(controls_visible(10, 0, true, false) && controls_visible(10, 0, false, true));    // paused, hovered
     check(restart_args({"open-player", "--model", "m.onnx", "a.mkv", "--screen", "2"}, "/x/My Movie (2012).mkv") ==
           (std::vector<std::string>{"open-player", "--model", "m.onnx", "/x/My Movie (2012).mkv", "--screen", "2"}));

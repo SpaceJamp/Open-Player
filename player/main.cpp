@@ -202,7 +202,7 @@ int main(int argc, char** argv) {
         bool running = true, paused = false, reset = true, step = false, size_warned = false;
         bool dirty = true;   // redraw only when the picture or the UI changed
         bool fresh = false;  // a new frame is waiting to be converted and copied (redraws of the UI alone skip that)
-        bool show_info = false, last_vis = false, named = false, cursor_hidden = false;
+        bool show_info = false, last_vis = false, named = false;
         int ui_redraw = 0;  // a few redraws after input, so ImGui's hover and click states catch up
         std::string info;   // info overlay, refreshed once a second
         std::error_code ec;
@@ -288,8 +288,9 @@ int main(int argc, char** argv) {
         };
         auto key_seek = [&](double dt) {  // the seek bar shows its own position, so only keys post a notice
             double t = std::fmax(0, pos + dt);
+            if (dur > 0) t = std::fmin(t, dur);
             seek(t);
-            post(dt > 0 ? ICON_FORWARD_5 : ICON_BACKWARD_5, std::string(dt > 0 ? "+5 s" : "−5 s") + " · " + clock_text(t));
+            post(dt > 0 ? ICON_FORWARD_5 : ICON_BACKWARD_5, seek_notice_text(dt, t, dur));
         };
         auto toggle_fullscreen = [&] { SDL_SetWindowFullscreen(win, !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN)); };
         // Opening another file restarts the player on it with the same arguments: every buffer, the engine and
@@ -337,7 +338,7 @@ int main(int argc, char** argv) {
                 }
                 else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) disp.resized(), dirty = true;
                 else if (e.type == SDL_EVENT_WINDOW_EXPOSED) dirty = true;
-                else if (e.type == SDL_EVENT_MOUSE_MOTION) last_mouse = now(), SDL_ShowCursor();
+                else if (e.type == SDL_EVENT_MOUSE_MOTION) last_mouse = now();
                 else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT &&
                          e.button.clicks == 2 && !(ui && ImGui::GetIO().WantCaptureMouse))
                     toggle_fullscreen();
@@ -417,10 +418,9 @@ int main(int argc, char** argv) {
                 ImGui::NewFrame();
                 bool full = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN;
                 if (shown && !named) named = true, post(nullptr, std::filesystem::path(path).filename().string(), -1, 2);
-                int pw = 0, ph = 0;
-                SDL_GetWindowSizeInPixels(win, &pw, &ph);
                 auto acts = draw_ui({pos, dur, now(), last_mouse, paused, have_vsr, vsr_on, full, show_info, volume, info, recent,
-                                     std::clamp(ph / 1080.f, 1.f, 2.5f), notice, s});
+                                     ui_scale(ImGui::GetIO().DisplaySize.y), notice, s});
+                if (full && ui_controls_hidden()) ImGui::SetMouseCursor(ImGuiMouseCursor_None);  // the SDL3 backend hides the OS cursor at its next NewFrame
                 ImGui::Render();
                 diag.ui.add((SDL_GetTicksNS() - ui0) / 1e6);
                 diag.ui_vtx.add(ImGui::GetDrawData()->TotalVtxCount);
@@ -435,9 +435,6 @@ int main(int argc, char** argv) {
                     case UiAction::Open: show_open_dialog(); break;
                     case UiAction::OpenPath: open_video(a.path); break;
                     }
-                // fullscreen: no cursor over a hidden capsule (mouse motion shows it again)
-                bool hide = full && ui_controls_hidden();
-                if (hide != cursor_hidden) { cursor_hidden = hide; if (hide) SDL_HideCursor(); else SDL_ShowCursor(); }
                 bool vis = paused || now() - last_mouse < 2;
                 bool ui_dirty = !acts.empty() || vis != last_vis || ui_redraw > 0 || ImGui::IsAnyItemActive() ||
                                 ImGui::IsAnyItemHovered() || ui_animating(now()) || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);

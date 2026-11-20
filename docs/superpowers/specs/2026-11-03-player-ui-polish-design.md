@@ -46,9 +46,10 @@ and icons are crisp at 4K fullscreen, and the UI costs no more than the current 
 
 ### Scale
 
-- UI scale = window pixel height / 1080, clamped to 1–2.5; every size above is at scale 1. Fonts are
-  rasterised at the scaled size (ImGui 1.93 dynamic fonts), so text stays sharp: 16 px at 1080p,
-  32 px at 4K fullscreen.
+- UI scale = window height in logical points (ImGui's DisplaySize.y) / 1080, clamped to 1–2.5; every size
+  above is at scale 1. Fonts are rasterised at the scaled size and the framebuffer density (ImGui 1.93
+  dynamic fonts), so text stays sharp: 16 px at 1080p, 32 px at 4K fullscreen, and a 200%-scaled 4K
+  screen (1920x1080 points) is as sharp as an unscaled one.
 
 ## Fonts and icons
 

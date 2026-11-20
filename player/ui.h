@@ -11,6 +11,9 @@ void save_recent(const std::string& file, const std::vector<std::string>& list);
 std::string recent_file();  // $XDG_CONFIG_HOME/open-player/recent.txt, default ~/.config/open-player/recent.txt
 
 std::string clock_text(double t);
+float ui_scale(float display_h);  // ImGui's logical DisplaySize.y / 1080, clamped to 1..2.5
+// Notice for a key seek of delta seconds that lands on target; the time is clamped to 0 and, when dur > 0, to dur.
+std::string seek_notice_text(double delta, double target, double dur);
 bool can_open(const std::string& path);  // an existing regular file: worth restarting the player on
 bool ui_has_keyboard();  // a menu or text field has the keys, so the player's shortcuts must not act on them
 // The player's own arguments with the video replaced, to restart it on another file. The video is the first
