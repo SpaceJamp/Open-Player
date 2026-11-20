@@ -133,6 +133,17 @@ were dropped (decode, upload, convert, vsr, display copy, present).
 
 [upscale.py](upscale.py) does the same upscaling without the player (`python upscale.py in.mp4 -o out.mp4`).
 
+## Windows
+
+Open Player also builds natively on Windows, where it upscales with **NVIDIA RTX Video Super Resolution** first and
+falls back to the trained model (`--no-rtx` picks the model). It needs Visual Studio 2022+ with the C++ tools, CUDA,
+the Vulkan SDK, vcpkg in `C:\vcpkg`, TensorRT unzipped to `C:\TensorRT\TensorRT-11.5.0.63`, and, for RTX VSR, the
+[NVIDIA RTX Video SDK](https://developer.nvidia.com/rtx-video-sdk) unzipped to `C:\rtx_video_sdk` (download it
+yourself: its license keeps it out of this repo). Then run `build-windows.bat`; the first run builds SDL3 and FFmpeg
+with vcpkg. `build-win\open-player.exe --check vsr.onnx` tests each part, RTX VSR included.
+
+This software uses the NVIDIA RTX Video SDK. NVIDIA, GeForce RTX and NVIDIA RTX are trademarks of NVIDIA Corporation.
+
 ## Limits
 
 - SDR only. HDR video plays with washed-out colors.
@@ -143,4 +154,4 @@ were dropped (decode, upload, convert, vsr, display copy, present).
 
 ## License
 
-Open Player is licensed under the [GNU Affero General Public License v3.0](LICENSE), with an [additional permission](LICENSE-EXCEPTION) to link NVIDIA's CUDA and TensorRT libraries. Bundled third-party code and fonts keep their own licenses: Dear ImGui (MIT, `player/third_party/imgui/LICENSE.txt`), Inter (SIL OFL) and Tabler Icons (MIT, both in `assets/fonts/`).
+Open Player is licensed under the [GNU Affero General Public License v3.0](LICENSE), with an [additional permission](LICENSE-EXCEPTION) to link NVIDIA's CUDA, TensorRT and RTX Video SDK libraries. Bundled third-party code and fonts keep their own licenses: Dear ImGui (MIT, `player/third_party/imgui/LICENSE.txt`), Inter (SIL OFL) and Tabler Icons (MIT, both in `assets/fonts/`).

@@ -97,3 +97,15 @@ __global__ void k_rgba(const __half* rgb, int w, int h, uint8_t* out) {
 void rgb_to_rgba8(const __half* rgb, int w, int h, uint8_t* rgba, cudaStream_t s) {
     k_rgba<<<grid2d(w, h), dim3(16, 16), 0, s>>>(rgb, w, h, rgba);
 }
+
+__global__ void k_unrgba(const uint8_t* in, int w, int h, __half* rgb) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w || y >= h) return;
+    int n = w * h, i = y * w + x;
+    uchar4 px = ((const uchar4*)in)[i];
+    rgb[i] = __float2half(px.x / 255.f), rgb[n + i] = __float2half(px.y / 255.f), rgb[2 * n + i] = __float2half(px.z / 255.f);
+}
+
+void rgba8_to_rgb(const uint8_t* rgba, int w, int h, __half* rgb, cudaStream_t s) {
+    k_unrgba<<<grid2d(w, h), dim3(16, 16), 0, s>>>(rgba, w, h, rgb);
+}

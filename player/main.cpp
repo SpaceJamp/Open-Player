@@ -1,6 +1,7 @@
 // Open Player: video player that upscales with our VSR network on the GPU.
 // decode (NVDEC) -> YUV->RGB (CUDA) -> VSR (TensorRT) -> RGBA (CUDA) -> Vulkan blit to the window
 #include <SDL3/SDL.h>
+#include <cuda.h>
 #ifdef _WIN32
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -30,9 +31,13 @@
 #include "theme.h"
 #include "ui.h"
 #include "vsr.h"
+#ifdef HAVE_RTX_VSR
+#include "rtx_vsr.h"
+#endif
 
 static const char* USAGE =
-    "usage: open-player <video> [--model vsr.onnx] [--no-vsr] [--stats] [--screen N] [--fullscreen]\n"
+    "usage: open-player <video> [--model vsr.onnx] [--no-vsr] [--no-rtx] [--stats] [--screen N] [--fullscreen]\n"
+    "--no-rtx: on Windows, upscale with our model instead of NVIDIA RTX VSR\n"
     "--screen N: play on monitor N (1 = first; --check lists them); upscaling is planned for that monitor\n"
     "       open-player --selftest [vsr.onnx]   compare the TensorRT engine against PyTorch\n"
     "       open-player --check [vsr.onnx]      test each part of the setup on its own\n"
@@ -55,9 +60,13 @@ static int check(const char* model) {
     int n = 0, drv = 0;
     cudaGetDeviceCount(&n);
     cudaDriverGetVersion(&drv);
-    cudaDeviceProp p{};
-    if (n > 0 && cudaGetDeviceProperties(&p, 0) == cudaSuccess)
-        line("PASS", "CUDA", std::string(p.name) + ", sm_" + std::to_string(p.major) + std::to_string(p.minor) +
+    int major = 0, minor = 0;  // driver API and attributes, not cudaGetDeviceProperties: see rtx_vsr.cpp
+    char name[256] = "";
+    CUdevice cd;
+    if (n > 0 && cuDeviceGet(&cd, 0) == CUDA_SUCCESS && cuDeviceGetName(name, sizeof name, cd) == CUDA_SUCCESS &&
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, 0) == cudaSuccess &&
+        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, 0) == cudaSuccess)
+        line("PASS", "CUDA", std::string(name) + ", sm_" + std::to_string(major) + std::to_string(minor) +
                                  ", driver CUDA " + std::to_string(drv / 1000) + "." + std::to_string(drv % 1000 / 10));
     else line("FAIL", "CUDA", "no CUDA GPU visible (driver missing, or on WSL: Windows driver too old)");
 
@@ -103,6 +112,11 @@ static int check(const char* model) {
     } else line("FAIL", "SDL", SDL_GetError());
 
     line("PASS", "TensorRT", trt_version());
+#ifdef HAVE_RTX_VSR
+    bool rtx = RtxVsr::selftest() == 0;
+    line(rtx ? "PASS" : "WARN", "RTX VSR", rtx ? "NVIDIA RTX Video Super Resolution works"
+                                              : "unavailable (GPU or driver): our model upscales instead");
+#endif
     if (!std::filesystem::exists(model)) line("FAIL", "Model", std::string(model) + " not found: train, then export");
     else line(Vsr::selftest(model) == 0 ? "PASS" : "FAIL", "Model", model);
     printf(fails ? "%d problem(s) found\n" : "all good\n", fails);
@@ -111,12 +125,13 @@ static int check(const char* model) {
 
 int main(int argc, char** argv) {
     const char *path = nullptr, *model = "vsr.onnx";
-    bool vsr_on = true, selftest = false, checking = false, stats = false, fullscreen = false;
+    bool vsr_on = true, selftest = false, checking = false, stats = false, fullscreen = false, want_rtx = true;
     int screen = 0;  // --screen N, counted from 1; 0 = the primary display
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
         else if (!strcmp(argv[i], "--screen") && i + 1 < argc) screen = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-vsr")) vsr_on = false;
+        else if (!strcmp(argv[i], "--no-rtx")) want_rtx = false;
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = true;
         else if (!strcmp(argv[i], "--stats")) stats = true;
         else if (!strcmp(argv[i], "--selftest")) selftest = true;
@@ -209,6 +224,16 @@ int main(int argc, char** argv) {
         else if (!have_vsr) fprintf(stderr, "VSR unavailable (no %s?), playing without upscaling\n", model);
         vsr_on &= have_vsr;
         int s = have_vsr ? vsr.scale() : 1;
+        // NVIDIA RTX VSR goes first on Windows; our network when the GPU or driver lacks it, with --no-rtx, and on Linux.
+        // shortcut: sized from our model's factor and screen plan, so it needs the model too; RTX can scale freely
+#ifdef HAVE_RTX_VSR
+        RtxVsr rtx;
+        bool use_rtx = have_vsr && want_rtx && rtx.open(w, h, nw * s, nh * s, st);
+        if (have_vsr) fprintf(stderr, "VSR: %s\n", use_rtx ? "NVIDIA RTX Video Super Resolution" : "our model");
+#else
+        const bool use_rtx = false;
+        (void)want_rtx;
+#endif
         __half* plain = nullptr;  // RGB frame when there is no VSR engine to borrow the input buffer from
         if (!have_vsr) cudaMalloc(&plain, 3ull * w * h * 2);
         if (!disp.alloc(std::max(w, nw * s), std::max(h, nh * s))) return fprintf(stderr, "display: out of GPU memory\n"), 1;
@@ -342,9 +367,10 @@ int main(int argc, char** argv) {
                 nullptr, win, filters, 2, nullptr, false);
         };
         auto dims = [](int a, int b) { return std::to_string(a) + "x" + std::to_string(b); };
-        const std::string vsr_desc = have_vsr ? std::to_string(s) + "x, " + dims(nw, nh) + " -> " + dims(nw * s, nh * s) +
-                                                    (shrink ? " (shrunk from " + dims(w, h) + ")" : "")
-                                     : worth_it ? "none" : "off (fills screen)";
+        const std::string vsr_desc = !have_vsr ? (worth_it ? "none" : "off (fills screen)")
+                                     : use_rtx ? "NVIDIA RTX, " + dims(w, h) + " -> " + dims(nw * s, nh * s)  // full-size in
+                                               : std::to_string(s) + "x, " + dims(nw, nh) + " -> " + dims(nw * s, nh * s) +
+                                                     (shrink ? " (shrunk from " + dims(w, h) + ")" : "");
         SDL_SetWindowTitle(win, std::filesystem::path(path).filename().string().c_str());
 
         while (running) {
@@ -403,8 +429,12 @@ int main(int argc, char** argv) {
                     YuvFrame yuv = media.to_gpu(f, st);
                     diag.upload.add((SDL_GetTicksNS() - u0) / 1e6);
                     yuv_to_rgb(yuv, in, st);
-                    if (vsr_on && shrink) shrink_rgb(full, w, h, vsr.input(), nw, nh, st);
+                    if (vsr_on && shrink && !use_rtx) shrink_rgb(full, w, h, vsr.input(), nw, nh, st);
                     cudaEventRecord(p.ev[1], st);
+#ifdef HAVE_RTX_VSR
+                    if (vsr_on && use_rtx) p.out = rtx.run(in), p.w = nw * s, p.h = nh * s;  // full-size input
+                    else
+#endif
                     if (vsr_on) p.out = vsr.run(reset), p.w = nw * s, p.h = nh * s, reset = false;
                     else p.out = in;
                     cudaEventRecord(p.ev[2], st);

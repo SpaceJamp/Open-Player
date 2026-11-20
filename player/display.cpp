@@ -1,6 +1,7 @@
 #include "display.h"
 
 #include <SDL3/SDL_vulkan.h>
+#include <cuda.h>
 
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
@@ -60,8 +61,10 @@ bool Display::init(SDL_Window* win) {
         vkGetPhysicalDeviceProperties2(g, &p2);
         int cuda = -1;
         for (int c = 0; c < n_cuda && cuda < 0; c++) {
-            cudaDeviceProp prop;
-            if (cudaGetDeviceProperties(&prop, c) == cudaSuccess && !memcmp(prop.uuid.bytes, id.deviceUUID, VK_UUID_SIZE))
+            CUdevice cd;  // driver API, not cudaGetDeviceProperties: see rtx_vsr.cpp
+            CUuuid uuid;
+            if (cuDeviceGet(&cd, c) == CUDA_SUCCESS && cuDeviceGetUuid(&uuid, cd) == CUDA_SUCCESS &&
+                !memcmp(uuid.bytes, id.deviceUUID, VK_UUID_SIZE))
                 cuda = c;
         }
         if (!gpu_ || (cuda >= 0 && best_cuda < 0)) gpu_ = g, qfam_ = fam, best_cuda = cuda;

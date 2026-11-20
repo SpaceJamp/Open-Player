@@ -26,3 +26,5 @@ void abs_diff_sum(const __half* a, const __half* b, int n, float* sum, cudaStrea
 
 // Planar fp16 RGB -> packed RGBA8 for display
 void rgb_to_rgba8(const __half* rgb, int w, int h, uint8_t* rgba, cudaStream_t s);
+// Packed RGBA8 -> planar fp16 RGB (alpha dropped), the inverse of rgb_to_rgba8
+void rgba8_to_rgb(const uint8_t* rgba, int w, int h, __half* rgb, cudaStream_t s);

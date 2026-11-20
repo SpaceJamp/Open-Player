@@ -42,7 +42,7 @@ bool Vsr::open(const std::string& onnx, int w, int h, cudaStream_t s) {
     w_ = w, h_ = h, s_ = s, scale_ = model_scale(onnx);
     if (scale_ <= 0) {
         fprintf(stderr, "vsr: missing %s (export.py writes it next to the .onnx)\n",
-                fs::path(onnx).replace_extension(".ref").c_str());
+                fs::path(onnx).replace_extension(".ref").string().c_str());
         return false;
     }
     if (!load_or_build(onnx, true)) return false;

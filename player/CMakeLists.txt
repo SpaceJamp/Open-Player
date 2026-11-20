@@ -45,7 +45,7 @@ add_executable(open-player main.cpp media.cpp vsr.cpp display.cpp ui.cpp theme.c
   ${IMGUI}/backends/imgui_impl_sdl3.cpp ${IMGUI}/backends/imgui_impl_vulkan.cpp)
 target_include_directories(open-player SYSTEM PRIVATE ${IMGUI} ${IMGUI}/backends)  # SYSTEM: no warnings from it
 target_include_directories(open-player SYSTEM PRIVATE ${TENSORRT_INCLUDE})  # SYSTEM: hide NVIDIA's own deprecation warnings
-target_link_libraries(open-player PRIVATE ${CMAKE_DL_LIBS} Vulkan::Vulkan SDL3::SDL3 ffmpeg ${NVINFER} ${NVONNXPARSER})
+target_link_libraries(open-player PRIVATE ${CMAKE_DL_LIBS} CUDA::cuda_driver Vulkan::Vulkan SDL3::SDL3 ffmpeg ${NVINFER} ${NVONNXPARSER})
 if(WIN32)
   target_link_libraries(open-player PRIVATE CUDA::cudart_static)  # one DLL less to ship
   target_compile_definitions(open-player PRIVATE _CRT_SECURE_NO_WARNINGS)  # getenv, strerror: fine here
@@ -54,6 +54,20 @@ if(WIN32)
   file(GLOB TENSORRT_DLLS ${TENSORRT_ROOT}/bin/nvinfer*.dll ${TENSORRT_ROOT}/bin/nvonnxparser*.dll)
   add_custom_command(TARGET open-player POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${TENSORRT_DLLS} $<TARGET_FILE_DIR:open-player>)
+  # NVIDIA RTX Video SDK (optional, never in this repo: its license forbids that): RTX VSR as the first upscaler
+  set(RTX_VIDEO_SDK "C:/rtx_video_sdk" CACHE PATH "NVIDIA RTX Video SDK folder")
+  if(EXISTS ${RTX_VIDEO_SDK}/include/nvsdk_ngx.h)
+    target_sources(open-player PRIVATE rtx_vsr.cpp)
+    target_compile_definitions(open-player PRIVATE HAVE_RTX_VSR)
+    target_include_directories(open-player SYSTEM PRIVATE ${RTX_VIDEO_SDK}/include)
+    # _d: the build against the DLL C runtime (/MD), like the rest of the player
+    target_link_libraries(open-player PRIVATE ${RTX_VIDEO_SDK}/lib/Windows/x64/nvsdk_ngx_d.lib)
+    target_link_options(open-player PRIVATE /FORCE:MULTIPLE)  # our cudaGetDeviceProperties for NGX, see rtx_vsr.cpp
+    add_custom_command(TARGET open-player POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                       ${RTX_VIDEO_SDK}/bin/Windows/x64/rel/nvngx_vsr.dll $<TARGET_FILE_DIR:open-player>)
+  else()
+    message(STATUS "RTX Video SDK not found in ${RTX_VIDEO_SDK}: building without NVIDIA RTX VSR")
+  endif()
 else()
   target_link_libraries(open-player PRIVATE CUDA::cudart)
   # DT_RPATH instead of RUNPATH: glibc also searches the program's RPATH when libnvinfer dlopen()s its builder
