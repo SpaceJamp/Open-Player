@@ -1,6 +1,6 @@
 # Player settings window
 
-Date: 2026-11-21. Status: design agreed in chat; awaiting the user's review of this document.
+Date: 2026-11-21. Status: approved by the user, 2026-11-21.
 Follows `2026-11-03-player-ui-design.md` (the ImGui UI) and `2026-11-03-player-ui-polish-design.md` (its look).
 
 ## Intent
