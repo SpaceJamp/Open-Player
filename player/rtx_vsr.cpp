@@ -6,7 +6,9 @@
 #include <nvsdk_ngx_helpers_vsr.h>
 
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <vector>
 
@@ -16,17 +18,22 @@
 // cudaGetDeviceProperties (it asks the driver API instead), so this replacement only ever serves NGX. Linked with
 // /FORCE:MULTIPLE so it wins over the CUDA runtime's own.
 extern "C" cudaError_t CUDARTAPI cudaGetDeviceProperties(cudaDeviceProp* p, int device) {
+    // always succeeds: on an error NGX waits for Enter and exits the process. Zeroed fields just make it decline.
+    memset(p, 0, offsetof(cudaDeviceProp, totalGlobalMem));
     CUdevice d;
-    if (cuDeviceGet(&d, device) != CUDA_SUCCESS) return cudaErrorInvalidDevice;
-    cuDeviceGetName(p->name, sizeof p->name, d);
-    cuDeviceGetUuid((CUuuid*)&p->uuid, d);
-    cuDeviceGetLuid(p->luid, &p->luidDeviceNodeMask, d);
+    if (cuDeviceGet(&d, device) == CUDA_SUCCESS) {
+        cuDeviceGetName(p->name, sizeof p->name, d);
+        cuDeviceGetUuid((CUuuid*)&p->uuid, d);
+        cuDeviceGetLuid(p->luid, &p->luidDeviceNodeMask, d);
+    }
     return cudaSuccess;
 }
 
 bool RtxVsr::open(int w, int h, int out_w, int out_h, cudaStream_t s) {
     w_ = w, h_ = h, ow_ = out_w, oh_ = out_h, s_ = s;
-    cudaFree(nullptr);  // make sure the runtime's context exists, NGX wants it
+    if (out_w <= w || out_h <= h) return false;  // RTX VSR only upscales
+    // the runtime's context must exist (NGX wants it), and NGX exits the process if CUDA isn't usable
+    if (cudaFree(nullptr) != cudaSuccess) return cudaGetLastError(), false;
     CUcontext ctx = nullptr;
     cuCtxGetCurrent(&ctx);
     // NGX keeps its logs in this folder
@@ -64,7 +71,7 @@ const __half* RtxVsr::run(const __half* in) {
     ep.pInput = &tex_, ep.pOutput = &surf_;
     ep.InputSubrectSize = {(unsigned)w_, (unsigned)h_}, ep.OutputSubrectSize = {(unsigned)ow_, (unsigned)oh_};
     ep.QualityLevel = NVSDK_NGX_VSR_Quality_High;
-    NGX_CUDA_EVALUATE_VSR(feature_, params_, &ep);  // on the stream given at open()
+    if (NVSDK_NGX_FAILED(NGX_CUDA_EVALUATE_VSR(feature_, params_, &ep))) return nullptr;  // on open()'s stream
     cudaMemcpy2DFromArrayAsync(rgba_out_, 4ull * ow_, dst_, 0, 0, 4ull * ow_, oh_, cudaMemcpyDeviceToDevice, s_);
     i_ ^= 1;  // two outputs: the shown frame stays intact while the next one is prepared
     rgba8_to_rgb(rgba_out_, ow_, oh_, out_[i_], s_);
@@ -97,7 +104,8 @@ int RtxVsr::selftest() {
         if (r.open(w, h, W, H, s) && cudaMalloc(&in, img.size() * 2) == cudaSuccess) {
             cudaMemcpy(in, img.data(), img.size() * 2, cudaMemcpyHostToDevice);
             std::vector<__half> out(3 * W * H);
-            cudaMemcpyAsync(out.data(), r.run(in), out.size() * 2, cudaMemcpyDeviceToHost, s);
+            const __half* up = r.run(in);
+            if (up) cudaMemcpyAsync(out.data(), up, out.size() * 2, cudaMemcpyDeviceToHost, s);
             cudaStreamSynchronize(s);
             double a = 0, b = 0;
             for (auto v : img) a += __half2float(v);

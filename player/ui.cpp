@@ -49,11 +49,11 @@ void save_recent(const std::string& file, const std::vector<std::string>& list) 
 }
 
 std::string recent_file() {
+    const char* xdg = getenv("XDG_CONFIG_HOME");  // also on Windows: the tests point it at a temp folder
 #ifdef _WIN32
     const char* appdata = getenv("APPDATA");
-    fs::path base = appdata && *appdata ? fs::path(appdata) : fs::path(".");
+    fs::path base = xdg && *xdg ? fs::path(xdg) : appdata && *appdata ? fs::path(appdata) : fs::path(".");
 #else
-    const char* xdg = getenv("XDG_CONFIG_HOME");
     const char* home = getenv("HOME");
     fs::path base = xdg && *xdg ? fs::path(xdg) : fs::path(home ? home : ".") / ".config";
 #endif
@@ -458,6 +458,13 @@ int ui_selftest() {
     check(restart_args({"open-player", "a.mkv"}, "/b.mp4") == (std::vector<std::string>{"open-player", "/b.mp4"}));
     // Windows restart: one argument each after the C runtime splits the command line again
     check(quote_arg("plain.mkv") == "plain.mkv" && quote_arg("") == "\"\"");
+    // a test run must never write the user's own recent list
+#ifdef _WIN32
+    _putenv_s("XDG_CONFIG_HOME", "uitest-config");
+#else
+    setenv("XDG_CONFIG_HOME", "uitest-config", 1);
+#endif
+    check(recent_file().rfind("uitest-config", 0) == 0);
     check(quote_arg("C:\\Videos\\My Movie (2012).mkv") == "\"C:\\Videos\\My Movie (2012).mkv\"");
     check(quote_arg("C:\\dir with space\\") == "\"C:\\dir with space\\\\\"");  // trailing backslash doubled
     check(quote_arg("say \"hi\"") == "\"say \\\"hi\\\"\"");

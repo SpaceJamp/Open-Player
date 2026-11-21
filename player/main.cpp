@@ -140,6 +140,16 @@ int main(int argc, char** argv) {
         else if (argv[i][0] != '-') (selftest || checking ? model : path) = argv[i];
         else return fputs(USAGE, stderr), 2;
     }
+    // double-clicked or "Open with": the working folder is anywhere, so also look next to the program
+    std::string near_exe;
+    if (!std::filesystem::exists(model) && std::filesystem::path(model).is_relative())
+        for (const char* up : {".", ".."}) {
+            auto m = std::filesystem::path(exe_path()).parent_path() / up / model;
+            if (std::filesystem::exists(m)) {
+                model = (near_exe = m.lexically_normal().string()).c_str();
+                break;
+            }
+        }
     if (selftest) return Vsr::selftest(model);
     if (checking) return check(model);
     if (!path) return fputs(USAGE, stderr), 2;
@@ -147,6 +157,8 @@ int main(int argc, char** argv) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) return fprintf(stderr, "SDL: %s\n", SDL_GetError()), 1;
     int n_disp = 0;
     SDL_DisplayID* ids = SDL_GetDisplays(&n_disp);
+    if (screen > n_disp) fprintf(stderr, "no screen %d: this machine has %d, playing on the primary one\n", screen, n_disp),
+                         screen = 0;
     SDL_DisplayID screen_id = !screen ? SDL_GetPrimaryDisplay() : screen > 0 && screen <= n_disp ? ids[screen - 1] : 0;
     SDL_free(ids);
     if (!screen_id) return fprintf(stderr, "no screen %d: this machine has %d (see --check)\n", screen, n_disp), 2;
@@ -313,6 +325,7 @@ int main(int argc, char** argv) {
         };
         // shared by the keys and the on-screen controls
         auto toggle_pause = [&] {
+            if (paused && media.finished()) seek(0);  // at the end: play it again
             set_paused(!paused);
             post(paused ? ICON_PAUSE : ICON_PLAY, "");
         };
@@ -326,8 +339,10 @@ int main(int argc, char** argv) {
             vsr_on = !vsr_on, reset = true, step |= paused, drop_ahead();
             post(ICON_SPARKLES, vsr_on ? "VSR on, " + std::to_string(s) + "x" : "VSR off");
         };
+        double seek_to = NAN;  // a key seek whose frame isn't shown yet: the next key seek builds on it
         auto key_seek = [&](double dt) {  // the seek bar shows its own position, so only keys post a notice
-            double t = std::fmax(0, pos + dt);
+            double t = std::fmax(0, (std::isnan(seek_to) ? pos : seek_to) + dt);
+            seek_to = t;
             if (dur > 0) t = std::fmin(t, dur);
             seek(t);
             post(dt > 0 ? ICON_FORWARD_5 : ICON_BACKWARD_5, seek_notice_text(dt, t, dur));
@@ -338,8 +353,17 @@ int main(int argc, char** argv) {
         auto open_video = [&](const std::string& p) {
             // the new process records it in recent files once it opened; a folder or a missing file would
             // otherwise end playback for nothing
-            if (!can_open(p)) return (void)fprintf(stderr, "can't open %s: not a file\n", p.c_str());
+            if (!can_open(p) || !Media::has_video(p.c_str())) {
+                post(ICON_X, "Can't play " + std::filesystem::path(p).filename().string(), -1, 2);
+                return (void)fprintf(stderr, "can't open %s: not a playable video\n", p.c_str());
+            }
             std::vector<std::string> args = restart_args(std::vector<std::string>(argv, argv + argc), p);
+            // keep how it plays now: fullscreen and VSR off survive the restart
+            args.erase(std::remove_if(args.begin() + 1, args.end(),
+                                      [](const std::string& a) { return a == "--fullscreen" || a == "--no-vsr"; }),
+                       args.end());
+            if (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) args.push_back("--fullscreen");
+            if (have_vsr && !vsr_on) args.push_back("--no-vsr");
 #ifdef _WIN32
             for (auto& a : args) a = quote_arg(a);  // _execv joins the arguments with spaces and doesn't quote them
 #endif
@@ -390,7 +414,11 @@ int main(int argc, char** argv) {
                 else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT &&
                          e.button.clicks == 2 && !(ui && ImGui::GetIO().WantCaptureMouse))
                     toggle_fullscreen();
-                else if (e.type == SDL_EVENT_KEY_DOWN && !(ui && ui_has_keyboard())) {
+                else if (e.type == SDL_EVENT_KEY_DOWN && !(ui && ui_has_keyboard()) &&
+                         !(e.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) &&
+                         // holding a key repeats seeking and volume only; a held toggle would flicker
+                         (!e.key.repeat || e.key.key == SDLK_LEFT || e.key.key == SDLK_RIGHT || e.key.key == SDLK_UP ||
+                          e.key.key == SDLK_DOWN)) {
                     switch (e.key.key) {
                     case SDLK_SPACE: toggle_pause(); break;
                     case SDLK_LEFT: key_seek(-5); break;
@@ -432,7 +460,12 @@ int main(int argc, char** argv) {
                     if (vsr_on && shrink && !use_rtx) shrink_rgb(full, w, h, vsr.input(), nw, nh, st);
                     cudaEventRecord(p.ev[1], st);
 #ifdef HAVE_RTX_VSR
-                    if (vsr_on && use_rtx) p.out = rtx.run(in), p.w = nw * s, p.h = nh * s;  // full-size input
+                    if (vsr_on && use_rtx && !(p.out = rtx.run(in))) {  // full-size input
+                        use_rtx = false;  // NVIDIA's upscaler failed: our model from here on
+                        fprintf(stderr, "VSR: NVIDIA RTX failed, switching to our model\n");
+                        if (shrink) shrink_rgb(full, w, h, vsr.input(), nw, nh, st);
+                    }
+                    if (vsr_on && use_rtx) p.w = nw * s, p.h = nh * s;
                     else
 #endif
                     if (vsr_on) p.out = vsr.run(reset), p.w = nw * s, p.h = nh * s, reset = false;
@@ -452,7 +485,7 @@ int main(int argc, char** argv) {
             if (!ahead.empty() && (ahead.front().pts <= clock() || step)) {  // the oldest prepared frame is due
                 Prepared& p = ahead.front();
                 cudaEventSynchronize(p.ev[2]);  // usually long done: the GPU had up to a frame's time
-                shown = p.out, sw = p.w, sh = p.h, pos = p.pts, step = false, dirty = fresh = true;
+                shown = p.out, sw = p.w, sh = p.h, pos = p.pts, step = false, dirty = fresh = true, seek_to = NAN;
                 frames_shown++, diag.shown++;
                 diag.convert.add(gpu_ms(p.ev[0], p.ev[1]));
                 if (p.vsr) diag.vsr.add(gpu_ms(p.ev[1], p.ev[2]));
@@ -472,7 +505,7 @@ int main(int argc, char** argv) {
                 if (shown && !named) named = true, post(nullptr, std::filesystem::path(path).filename().string(), -1, 2);
                 auto acts = draw_ui({pos, dur, now(), last_mouse, paused, have_vsr, vsr_on, full, show_info, volume, info, recent,
                                      ui_scale(ImGui::GetIO().DisplaySize.y), notice, s});
-                if (full && ui_controls_hidden()) ImGui::SetMouseCursor(ImGuiMouseCursor_None);  // the SDL3 backend hides the OS cursor at its next NewFrame
+                if (full && ui_controls_hidden() && !ui_has_keyboard()) ImGui::SetMouseCursor(ImGuiMouseCursor_None);  // the SDL3 backend hides the OS cursor at its next NewFrame
                 ImGui::Render();
                 diag.ui.add((SDL_GetTicksNS() - ui0) / 1e6);
                 diag.ui_vtx.add(ImGui::GetDrawData()->TotalVtxCount);

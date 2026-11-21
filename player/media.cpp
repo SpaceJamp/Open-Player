@@ -48,6 +48,14 @@ static AVCodecContext* open_decoder(AVStream* st, AVBufferRef* hw) {
     return c;
 }
 
+bool Media::has_video(const char* path) {
+    AVFormatContext* f = nullptr;
+    bool ok = avformat_open_input(&f, path, nullptr, nullptr) >= 0 && avformat_find_stream_info(f, nullptr) >= 0 &&
+              av_find_best_stream(f, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0) >= 0;
+    avformat_close_input(&f);
+    return ok;
+}
+
 bool Media::open(const char* path, int cuda_device) {
     if (avformat_open_input(&fmt_, path, nullptr, nullptr) < 0 || avformat_find_stream_info(fmt_, nullptr) < 0) {
         fprintf(stderr, "cannot open %s\n", path);

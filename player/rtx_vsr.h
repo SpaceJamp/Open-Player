@@ -11,7 +11,8 @@ public:
     ~RtxVsr();
     // false when this GPU or driver has no RTX VSR (it then stays unused)
     bool open(int w, int h, int out_w, int out_h, cudaStream_t s);
-    // Upscales planar fp16 RGB (3 x h x w) to 3 x out_h x out_w; valid until the next run().
+    // Upscales planar fp16 RGB (3 x h x w) to 3 x out_h x out_w; valid until the next run(). nullptr if NVIDIA's
+    // upscaler failed.
     const __half* run(const __half* in);
     // --check: upscales a test pattern; 0 when the output matches it
     static int selftest();

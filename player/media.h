@@ -24,6 +24,7 @@ class Media {
 public:
     ~Media();
     bool open(const char* path, int cuda_device);
+    static bool has_video(const char* path);  // FFmpeg can open it and it has a video stream
     int width() const { return vctx_->width; }
     int height() const { return vctx_->height; }
     double duration() const { return duration_; }
