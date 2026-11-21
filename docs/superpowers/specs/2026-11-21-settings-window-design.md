@@ -19,6 +19,16 @@ Today the player has no settings: everything is a command-line flag (`--no-rtx`,
 UI; the live ones take effect without interrupting playback; the others reopen the video at the same position;
 choices survive a restart of the player.
 
+## The model's name
+
+The user named our network **Pixel Flow**, short **PXF** (chosen 2026-11-21 to fit the logo, blocky pixels
+flowing into a sharp play shape, and the model's flow network). Wherever the player says "our model/network"
+or "Ours", it says Pixel Flow: the settings card (`[ NVIDIA RTX ][ Pixel Flow ][ Off ]`), the VSR badge
+(`PXF 2x` / `RTX 2x`, so the badge shows which upscaler runs), notices ("Pixel Flow, 2x"), the info overlay,
+`--check`, the log, `--no-rtx`'s help text and the README. Sizes: Pixel Flow, Pixel Flow Fast, Pixel Flow
+Lean. File names (`vsr.onnx`, `vsr.pt`) and `--size standard|fast|lean` stay as they are. Written "Pixel
+Flow" (two words): "PixelFlow" in one word is a registered US trademark of another company.
+
 ## Goals, non-goals, anti-goals
 
 - Goals: the settings in the table below; live where marked; saved between runs; monitors listed with real
