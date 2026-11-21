@@ -941,6 +941,46 @@ int ui_selftest() {
                   about.find("Pixel Flow") != std::string::npos && about.find("Log: C:/u/open-player.log") != std::string::npos);
             io.AddMousePosEvent(5, 5);
         }
+        // side tabs: every tab draws at both scales and on a narrow window (icons-only column), the Training tab in
+        // each state, and a click on the second row selects the Training tab
+        {
+            for (int tab : {0, 1, 2})
+                for (ImVec2 size : {ImVec2{1920, 1080}, ImVec2{3840, 2160}, ImVec2{640, 360}})
+                    for (int state = 0; state < 4; state++) {
+                        if (tab != 1 && state) continue;
+                        io.DisplaySize = size;
+                        UiState cs{12, 600, 90, 90, false, true, true, false, false, 0.8f, "", {}};
+                        cs.scale = size.y > 1080 ? 2.5f : 1, cs.settings_open = true, cs.settings.settings_tab = tab;
+                        cs.now_unix = 1795300100;
+                        cs.training_known = state > 0;  // 0: no training.json yet
+                        cs.training.state = state == 3 ? "finished" : "training";
+                        cs.training.step = 42000, cs.training.steps = 100000, cs.training.loss = 0.03;
+                        cs.training.updated = state == 2 ? 1795290000 : 1795300000;  // 2: stale
+                        cs.training.suggest = "ok", cs.training.out = "D:/Training/vsr.pt";
+                        frames(cs, 2, .1);
+                        ImGuiWindow* w = ImGui::FindWindowByName("settings");
+                        check(w && w->Active && w->DrawList->VtxBuffer.Size > 0);
+                        check(w && w->Pos.y + w->Size.y <= size.y - (14 + 48) * cs.scale + .5f);
+                    }
+            io.DisplaySize = {1920, 1080};
+            UiState cs{12, 600, 95, 95, false, true, true, false, false, 0.8f, "", {}};
+            cs.settings_open = true;
+            frames(cs, 2, .1);
+            if (ImGuiWindow* w = ImGui::FindWindowByName("settings")) {
+                acts.clear();
+                const float x = w->Pos.x + 14 + 20, y = w->Pos.y + 12 + 32 + 6 + 36 + 18;  // the second row
+                io.AddMousePosEvent(x, y);
+                frames(cs, 1, 0);
+                io.AddMouseButtonEvent(0, true);
+                frames(cs, 1, 0);
+                io.AddMouseButtonEvent(0, false);
+                frames(cs, 1, 0);
+                check(std::any_of(acts.begin(), acts.end(), [](const UiAction& a) {
+                    return a.kind == UiAction::SetSettingsTab && a.value == 1;
+                }));
+            }
+            io.AddMousePosEvent(5, 5);
+        }
         // shortcut keys stay with the menu while it's open (Esc closes it instead of quitting); the menu draws
         ImGui::NewFrame();
         check(!ui_has_keyboard());
