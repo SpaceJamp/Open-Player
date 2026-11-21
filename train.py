@@ -355,6 +355,10 @@ def main():
         a.teacher = str(Path(a.teacher).resolve())  # saved with the checkpoint: resuming may start elsewhere
     if a.pairs:
         a.pairs = str(Path(a.pairs).expanduser().resolve())
+    if a.pairs_weight == 0:  # turns pairs off, also on a resumed run (like --distill 0)
+        a.pairs = None
+    if a.pairs_weight is not None and (a.pairs_weight < 0 or (a.pairs_weight and not a.pairs)):
+        raise SystemExit("--pairs-weight needs --pairs and a weight of 0 or more")
     if a.pairs_weight is None:
         a.pairs_weight = 0.5
     if a.distill is not None and not (a.teacher and 0 <= a.distill <= 1):

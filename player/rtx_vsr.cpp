@@ -29,7 +29,7 @@ extern "C" cudaError_t CUDARTAPI cudaGetDeviceProperties(cudaDeviceProp* p, int 
     return cudaSuccess;
 }
 
-static int g_ngx_users = 0;  // NVSDK_NGX_CUDA_Init/Shutdown are per process; playback and --collect both use it
+static int g_ngx_users = 0;  // NVSDK_NGX_CUDA_Init/Shutdown are per process; balanced over every RtxVsr (playback's and selftest()'s)
 
 bool RtxVsr::open(int w, int h, int out_w, int out_h, cudaStream_t s) {
     w_ = w, h_ = h, ow_ = out_w, oh_ = out_h, s_ = s;

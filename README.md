@@ -12,7 +12,7 @@ decode (FFmpeg, NVDEC) -> YUV->RGB (CUDA) -> upscale: RTX VSR or our network (Te
 
 **The network** ([model.py](model.py)) works on one frame at a time and remembers the previous one: a small flow
 net estimates motion, the previous upscaled frame is warped onto the current one, and conv blocks (with pixel
-attention in the standard size) add detail before a pixel-shuffle 2x output. A scene-cut check resets the memory.
+attention, except in `lean`) add detail before a pixel-shuffle 2x output. A scene-cut check resets the memory.
 Three sizes: `standard` (about 317K parameters), `fast` and `lean`.
 
 No trained model ships with the repo: train one on your own videos (step 2).

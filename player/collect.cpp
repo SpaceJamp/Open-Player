@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <thread>
 
 static const char MAGIC[8] = {'O', 'P', 'P', 'A', 'I', 'R', '1', '\0'};
 
@@ -19,7 +20,11 @@ bool write_pair_file(const std::string& path, int T, int lw, int lh, int hw, int
     f.write((const char*)lr, (size_t)T * 3 * lw * lh).write((const char*)hr, (size_t)T * 3 * hw * hh);
     f.close();  // a full disk often shows only here
     std::error_code ec;
-    if (f) std::filesystem::rename(tmp, path, ec);
+    for (int i = 0; f && i < 10; i++) {  // Windows: antivirus or the indexer may still hold the file just closed
+        std::filesystem::rename(tmp, path, ec);
+        if (!ec) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     if (f && !ec) return true;
     std::filesystem::remove(tmp, ec);  // no half-written .tmp left behind
     return false;
@@ -40,17 +45,15 @@ static constexpr int CROP = 128;          // low-res crop; RTX VSR makes it CROP
 static constexpr double EVERY = 10;       // seconds of playback between clips
 static constexpr uint64_t CAP = 2ull << 30;  // the folder stops growing at 2 GB
 
-bool Collector::open(const std::string& dir, int w, int h, int out_w, int out_h, int scale, double fps,
-                     cudaStream_t s) {
+bool Collector::open(const std::string& dir, int w, int h, int out_w, int out_h, int scale, cudaStream_t s) {
     dir_ = dir, w_ = w, h_ = h, s_ = scale, st_ = s;
-    if (fps > 0) gap_ = 1.5 / fps;
     // train.py --pairs trains a 2x model; other scales would be refused there
     if (w < CROP || h < CROP || scale != 2 || out_w != w * scale || out_h != h * scale) return false;
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     if (!std::filesystem::is_directory(dir, ec)) return false;
     for (auto& e : std::filesystem::directory_iterator(dir, ec))
-        if (e.is_regular_file(ec)) bytes_ += e.file_size(ec);
+        if (auto n = e.file_size(ec); !ec && e.is_regular_file(ec)) bytes_ += n;  // a file gone mid-scan: skip it
     if (bytes_ >= CAP) return false;
     lr_.resize((size_t)CLIP * 3 * CROP * CROP), hr_.resize(lr_.size() * scale * scale);
     tmp_.resize(3 * CROP * CROP * (1 + scale * scale));
@@ -66,6 +69,9 @@ void Collector::add(const __half* frame, const __half* up, double pts) {
         static std::mt19937 rng(std::random_device{}());
         x_ = std::uniform_int_distribution<int>(0, w_ - CROP)(rng);
         y_ = std::uniform_int_distribution<int>(0, h_ - CROP)(rng);
+        gap_ = 1;
+    } else if (got_ == 1) {
+        gap_ = 1.5 * (pts - prev_);  // from this clip's own frame time: the file's average is wrong for mixed rates
     }
     prev_ = pts;
     const int H = CROP * s_, n = 3 * CROP * CROP, W = w_ * s_, Hh = h_ * s_;

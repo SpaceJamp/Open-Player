@@ -246,7 +246,7 @@ int main(int argc, char** argv) {
         bool use_rtx = have_vsr && want_rtx && rtx.open(w, h, nw * s, nh * s, st);
         if (have_vsr) fprintf(stderr, "VSR: %s\n", use_rtx ? "NVIDIA RTX Video Super Resolution" : "our model");
         Collector col;
-        bool collecting = collect_dir && use_rtx && col.open(collect_dir, w, h, nw * s, nh * s, s, media.fps(), st);
+        bool collecting = collect_dir && use_rtx && col.open(collect_dir, w, h, nw * s, nh * s, s, st);
         if (collect_dir)
             fprintf(stderr, collecting ? "collect: saving RTX VSR training pairs in %s\n"
                                        : "collect: off (needs RTX VSR at exactly 2x - no shrinking to fit the screen -, "

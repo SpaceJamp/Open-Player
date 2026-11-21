@@ -1,7 +1,7 @@
 @echo off
 rem Build Open Player natively on Windows into build-win\open-player.exe.
 rem Needs: Visual Studio 2022+ with C++ (its CMake and Ninja are used), CUDA, the Vulkan SDK, vcpkg in C:\vcpkg
-rem (or VCPKG_ROOT), and TensorRT unzipped (default C:\TensorRT\TensorRT-11.5.0.63, or pass -DTENSORRT_ROOT=...).
+rem (or set OPEN_PLAYER_VCPKG), and TensorRT unzipped (default C:\TensorRT\TensorRT-11.5.0.63, or pass -DTENSORRT_ROOT=...).
 rem The first run builds SDL3 and FFmpeg with vcpkg, which takes a while.
 setlocal
 for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS=%%i"
