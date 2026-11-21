@@ -1,6 +1,6 @@
 # Windows installer, updater and TensorRT add-on
 
-Date: 2026-11-21. Status: agreed in chat; awaiting the user's review of this document.
+Date: 2026-11-21. Status: approved by the user, 2026-11-21.
 
 ## Intent
 
