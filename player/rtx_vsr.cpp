@@ -29,6 +29,8 @@ extern "C" cudaError_t CUDARTAPI cudaGetDeviceProperties(cudaDeviceProp* p, int 
     return cudaSuccess;
 }
 
+static int g_ngx_users = 0;  // NVSDK_NGX_CUDA_Init/Shutdown are per process; playback and --collect both use it
+
 bool RtxVsr::open(int w, int h, int out_w, int out_h, cudaStream_t s) {
     w_ = w, h_ = h, ow_ = out_w, oh_ = out_h, s_ = s;
     if (out_w <= w || out_h <= h) return false;  // RTX VSR only upscales
@@ -37,9 +39,10 @@ bool RtxVsr::open(int w, int h, int out_w, int out_h, cudaStream_t s) {
     CUcontext ctx = nullptr;
     cuCtxGetCurrent(&ctx);
     // NGX keeps its logs in this folder
-    if (NVSDK_NGX_FAILED(NVSDK_NGX_CUDA_Init(0, std::filesystem::path(exe_path()).parent_path().wstring().c_str())))
+    if (!g_ngx_users &&
+        NVSDK_NGX_FAILED(NVSDK_NGX_CUDA_Init(0, std::filesystem::path(exe_path()).parent_path().wstring().c_str())))
         return false;
-    inited_ = true;
+    inited_ = true, g_ngx_users++;
     int available = 0;
     if (NVSDK_NGX_FAILED(NVSDK_NGX_CUDA_GetCapabilityParameters(&params_)) ||
         NVSDK_NGX_FAILED(params_->Get(NVSDK_NGX_Parameter_VSR_Available, &available)) || !available)
@@ -86,7 +89,7 @@ RtxVsr::~RtxVsr() {
     cudaFree(rgba_in_), cudaFree(rgba_out_), cudaFree(out_[0]), cudaFree(out_[1]);
     if (feature_) NVSDK_NGX_CUDA_ReleaseFeature(feature_);
     if (params_) NVSDK_NGX_CUDA_DestroyParameters(params_);
-    if (inited_) NVSDK_NGX_CUDA_Shutdown();
+    if (inited_ && --g_ngx_users == 0) NVSDK_NGX_CUDA_Shutdown();
 }
 
 int RtxVsr::selftest() {

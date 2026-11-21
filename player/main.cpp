@@ -31,6 +31,7 @@
 #include "theme.h"
 #include "ui.h"
 #include "vsr.h"
+#include "collect.h"
 #ifdef HAVE_RTX_VSR
 #include "rtx_vsr.h"
 #endif
@@ -38,6 +39,7 @@
 static const char* USAGE =
     "usage: open-player <video> [--model vsr.onnx] [--no-vsr] [--no-rtx] [--stats] [--screen N] [--fullscreen]\n"
     "--no-rtx: on Windows, upscale with our model instead of NVIDIA RTX VSR\n"
+    "--collect DIR: on Windows with RTX VSR, save clips and their RTX upscale to DIR for train.py --pairs (2 GB cap)\n"
     "--screen N: play on monitor N (1 = first; --check lists them); upscaling is planned for that monitor\n"
     "       open-player --selftest [vsr.onnx]   compare the TensorRT engine against PyTorch\n"
     "       open-player --check [vsr.onnx]      test each part of the setup on its own\n"
@@ -124,12 +126,13 @@ static int check(const char* model) {
 }
 
 int main(int argc, char** argv) {
-    const char *path = nullptr, *model = "vsr.onnx";
+    const char *path = nullptr, *model = "vsr.onnx", *collect_dir = nullptr;
     bool vsr_on = true, selftest = false, checking = false, stats = false, fullscreen = false, want_rtx = true;
     int screen = 0;  // --screen N, counted from 1; 0 = the primary display
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
         else if (!strcmp(argv[i], "--screen") && i + 1 < argc) screen = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--collect") && i + 1 < argc) collect_dir = argv[++i];
         else if (!strcmp(argv[i], "--no-vsr")) vsr_on = false;
         else if (!strcmp(argv[i], "--no-rtx")) want_rtx = false;
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = true;
@@ -242,9 +245,16 @@ int main(int argc, char** argv) {
         RtxVsr rtx;
         bool use_rtx = have_vsr && want_rtx && rtx.open(w, h, nw * s, nh * s, st);
         if (have_vsr) fprintf(stderr, "VSR: %s\n", use_rtx ? "NVIDIA RTX Video Super Resolution" : "our model");
+        Collector col;
+        bool collecting = collect_dir && use_rtx && col.open(collect_dir, w, h, s, st);
+        if (collect_dir)
+            fprintf(stderr, collecting ? "collect: saving RTX VSR training pairs in %s\n"
+                                       : "collect: off (needs RTX VSR, a video of at least 128x128, and %s under 2 GB)\n",
+                    collect_dir);
 #else
         const bool use_rtx = false;
         (void)want_rtx;
+        if (collect_dir) fprintf(stderr, "collect: needs NVIDIA RTX VSR, which this build doesn't have\n");
 #endif
         __half* plain = nullptr;  // RGB frame when there is no VSR engine to borrow the input buffer from
         if (!have_vsr) cudaMalloc(&plain, 3ull * w * h * 2);
@@ -465,8 +475,10 @@ int main(int argc, char** argv) {
                         fprintf(stderr, "VSR: NVIDIA RTX failed, switching to our model\n");
                         if (shrink) shrink_rgb(full, w, h, vsr.input(), nw, nh, st);
                     }
-                    if (vsr_on && use_rtx) p.w = nw * s, p.h = nh * s;
-                    else
+                    if (vsr_on && use_rtx) {
+                        p.w = nw * s, p.h = nh * s;
+                        if (collecting && !paused) col.add(in, pts);
+                    } else
 #endif
                     if (vsr_on) p.out = vsr.run(reset), p.w = nw * s, p.h = nh * s, reset = false;
                     else p.out = in;
