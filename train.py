@@ -287,6 +287,33 @@ def lr_at(step, steps, peak):
     return peak / 20 + (peak - peak / 20) * (1 + math.cos(math.pi * step / steps)) / 2
 
 
+def status_file():
+    """training.json in the player's settings folder (next to settings.txt): its Settings > Training tab shows it."""
+    import os, sys
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        base = Path(xdg)
+    elif sys.platform == "win32" and os.environ.get("APPDATA"):
+        base = Path(os.environ["APPDATA"])
+    else:
+        base = Path.home() / ".config"
+    return base / "open-player" / "training.json"
+
+
+def write_status(**fields):
+    """Writes training.json whole (temp file + replace) for the player; never stops training on failure."""
+    import os
+    try:
+        f = status_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        clean = {k: (v if not isinstance(v, float) or math.isfinite(v) else None) for k, v in fields.items()}
+        tmp = f.with_name(f.name + ".tmp")
+        tmp.write_text(json.dumps({**clean, "updated": int(time.time())}, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, f)
+    except OSError:
+        pass
+
+
 def ignore_sigint(_):
     """DataLoader workers: let only the main process see Ctrl+C. Otherwise PyTorch's workers quit on it and
     the main process crashes ("worker exited unexpectedly") before it can save."""
@@ -379,6 +406,8 @@ def main():
 
     dg = Diag(out.with_suffix(".diag.jsonl"), fresh=new_set)  # train_diag.py: <out>.diag.jsonl and `suggest:` lines
 
+    status = {"state": "training", "steps": a.steps, "out": str(out.resolve())}  # the player's Training tab
+
     def check(step):
         nonlocal best
         score = validate(model, val_lr, val_hr, s)
@@ -388,7 +417,10 @@ def main():
             save(model, best_path, step=step, val_db=score)
             note = f"  (best so far, saved to {best_path.name})"
         print(f"step {step}  validation {score:+.2f} dB vs bilinear{note}", flush=True)
-        print(dg.validation(model, val_lr, val_hr, s, step, unroll), flush=True)
+        suggest = dg.validation(model, val_lr, val_hr, s, step, unroll)
+        print(suggest, flush=True)
+        status.update(step=step, val_db=score, best_db=best, suggest=suggest.removeprefix("suggest: "))
+        write_status(**status)
 
     check(start)
     data = DataLoader(clips, batch_size=a.batch, num_workers=a.workers,
@@ -442,7 +474,10 @@ def main():
         if step % 100 == 0:
             tl = f"  distill {F.l1_loss(outs[-1].float(), touts[-1].float()).item():.4f}" if teacher else ""
             fl = f"  fft {fft.item() / T:.4f}" if a.fft_loss else ""
-            print(f"step {step}  loss {loss.item():.4f}{tl}{fl}  {(time.time() - t0) / 100:.2f}s/step", flush=True)
+            sps = (time.time() - t0) / 100
+            print(f"step {step}  loss {loss.item():.4f}{tl}{fl}  {sps:.2f}s/step", flush=True)
+            status.update(step=step, loss=loss.item(), s_per_step=sps, eta_s=(a.steps - step) * sps)
+            write_status(**status)
             t0 = time.time()
         if step % 1000 == 0:
             check(step)
@@ -451,6 +486,8 @@ def main():
                  steps=a.steps, lr=a.lr, pairs=a.pairs, pairs_weight=a.pairs_weight)
         if stop:
             break
+    status.update(state="stopped" if stop and step < a.steps else "finished", step=step, eta_s=0)
+    write_status(**status)
     print(f"saved {a.out} at step {step}")
 
 

@@ -1,6 +1,8 @@
 #include "settings.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -160,6 +162,90 @@ std::string positions_file() {
     return (std::filesystem::path(recent_file()).parent_path() / "positions.txt").string();
 }
 
+// training.json: one flat object of strings, numbers and null (nested values are skipped); strict, small
+bool parse_training_status(const std::string& j, TrainingStatus& out) {
+    if (j.size() > (1 << 20)) return false;
+    size_t i = 0;
+    auto ws = [&] { while (i < j.size() && isspace((unsigned char)j[i])) i++; };
+    auto str = [&](std::string& s) {
+        if (i >= j.size() || j[i] != '"') return false;
+        for (i++; i < j.size() && j[i] != '"'; i++) {
+            if (j[i] != '\\') { s += j[i]; continue; }
+            if (++i >= j.size()) return false;
+            char c = j[i];
+            s += c == 'n' ? '\n' : c == 't' ? '\t' : c == 'r' ? '\r' : c;  // \" \\ \/ as themselves; no \u (UTF-8)
+        }
+        return i++ < j.size();
+    };
+    auto skip = [&] {  // a nested array or object, strings included
+        int depth = 0;
+        do {
+            if (i >= j.size()) return false;
+            if (j[i] == '"') {
+                std::string dummy;
+                if (!str(dummy)) return false;
+                continue;
+            }
+            depth += j[i] == '[' || j[i] == '{';
+            depth -= j[i] == ']' || j[i] == '}';
+            i++;
+        } while (depth > 0);
+        return true;
+    };
+    TrainingStatus t;
+    ws();
+    if (i >= j.size() || j[i++] != '{') return false;
+    for (bool first = true;; first = false) {
+        ws();
+        if (i < j.size() && j[i] == '}' && first) { i++; break; }
+        std::string k;
+        if (!str(k)) return false;
+        ws();
+        if (i >= j.size() || j[i++] != ':') return false;
+        ws();
+        if (i >= j.size()) return false;
+        if (j[i] == '"') {
+            std::string v;
+            if (!str(v)) return false;
+            if (k == "state") t.state = v;
+            else if (k == "suggest") t.suggest = v;
+            else if (k == "out") t.out = v;
+        } else if (j[i] == '[' || j[i] == '{') {
+            if (!skip()) return false;
+        } else if (!j.compare(i, 4, "null")) {
+            i += 4;
+        } else if (!j.compare(i, 4, "true") || !j.compare(i, 5, "false")) {
+            i += j[i] == 't' ? 4 : 5;
+        } else {
+            char* end = nullptr;
+            double v = strtod(j.c_str() + i, &end);
+            if (end == j.c_str() + i || !std::isfinite(v)) return false;
+            i = end - j.c_str();
+            if (k == "step") t.step = (long long)v;
+            else if (k == "steps") t.steps = (long long)v;
+            else if (k == "updated") t.updated = (long long)v;
+            else if (k == "loss") t.loss = v;
+            else if (k == "val_db") t.val_db = v, t.has_val = true;
+            else if (k == "best_db") t.best_db = v;
+            else if (k == "s_per_step") t.s_per_step = v;
+            else if (k == "eta_s") t.eta_s = v;
+        }
+        ws();
+        if (i < j.size() && j[i] == ',') { i++; continue; }
+        if (i < j.size() && j[i] == '}') { i++; break; }
+        return false;
+    }
+    if (t.state.empty()) return false;
+    out = t;
+    return true;
+}
+
+bool training_stale(const TrainingStatus& t, long long now) { return t.state == "training" && now - t.updated > 300; }
+
+std::string training_file() {
+    return (std::filesystem::path(recent_file()).parent_path() / "training.json").string();
+}
+
 std::string screen_key(const std::vector<ScreenInfo>& screens, int i) {
     std::string k = name_size(screens[i]);
     int same = 0;  // identical monitors before this one
@@ -305,6 +391,26 @@ int settings_selftest() {
         check(load_positions(f) == r);  // junk lines skipped
         std::filesystem::remove_all(dir);
         check(std::filesystem::path(positions_file()).filename() == "positions.txt");
+    }
+    {  // training.json as train.py writes it
+        TrainingStatus t;
+        check(parse_training_status(
+                  "{\"state\": \"training\", \"steps\": 100000, \"out\": \"D:\\\\Tr\xc3\xa4ning\\\\vsr.pt\", \"step\": 42000, "
+                  "\"loss\": 0.0312, \"s_per_step\": 0.13, \"eta_s\": 7540.0, \"val_db\": 1.84, \"best_db\": 1.91, "
+                  "\"suggest\": \"plateau: try --fft-loss 0.1\", \"updated\": 1795300000, \"extra\": [1, 2]}",
+                  t) &&
+              t.state == "training" && t.step == 42000 && t.steps == 100000 && t.loss == 0.0312 && t.has_val &&
+              t.best_db == 1.91 && t.out == "D:\\Tr\xc3\xa4ning\\vsr.pt" && t.suggest.find("fft") != std::string::npos);
+        TrainingStatus n;
+        check(parse_training_status("{\"state\": \"finished\", \"step\": 5, \"steps\": 5, \"val_db\": null}", n) &&
+              !n.has_val);
+        check(!parse_training_status("", n) && !parse_training_status("{\"state\": \"trai", n) &&
+              !parse_training_status("junk", n) && !parse_training_status("{\"step\": 5}", n));  // no state
+        check(!training_stale(t, 1795300000 + 100) && training_stale(t, 1795300000 + 400) &&
+              !training_stale(t, 1795300000 - 3600));  // updated "in the future" (clock set back): running
+        n.state = "finished";
+        check(!training_stale(n, 1795300000 + 400000));
+        check(std::filesystem::path(training_file()).filename() == "training.json");
     }
     {
         Settings u;

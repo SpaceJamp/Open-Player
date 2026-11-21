@@ -61,4 +61,15 @@ Positions positions_add(Positions p, const std::string& path, double t);  // pat
 double resume_point(const Positions& p, const std::string& path, double dur);
 std::string positions_file();  // positions.txt next to settings.txt
 
+// train.py's progress, from training.json next to settings.txt (the Training tab)
+struct TrainingStatus {
+    std::string state, suggest, out;  // state: "training", "finished" or "stopped"
+    long long step = 0, steps = 0, updated = 0;
+    double loss = -1, val_db = 0, best_db = 0, s_per_step = 0, eta_s = 0;
+    bool has_val = false;
+};
+bool parse_training_status(const std::string& json, TrainingStatus& out);  // false: not a status
+bool training_stale(const TrainingStatus& t, long long now);  // "training" but silent for 5 minutes: not running
+std::string training_file();
+
 int settings_selftest();  // part of --uitest; 0 on pass
