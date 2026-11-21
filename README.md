@@ -10,7 +10,8 @@ trained, exported and played entirely from this repo.
 > **Open Player does not come with a Pixel Flow model, and never will.** Every user trains their own Pixel Flow
 > on their own videos with `train.py` and exports it to `vsr.onnx` (see [2. Train a model](#2-train-a-model)).
 > No trained model is in this repo, in its releases, or in any download. Without a `vsr.onnx` the player still
-> plays video, without upscaling.
+> plays video, but doesn't upscale it: today that includes NVIDIA RTX VSR on Windows, which is sized from the
+> model's plan.
 
 ```
 decode (FFmpeg, NVDEC) -> YUV->RGB (CUDA) -> upscale: RTX VSR or Pixel Flow (TensorRT) -> RGBA (CUDA) -> Vulkan -> window
@@ -147,8 +148,8 @@ Choices are saved in `settings.txt` next to the recent-files list (`%APPDATA%\op
 `~/.config/open-player/` on Linux). `V` and the badge only compare for the moment; they don't change the saved
 upscaler.
 
-**Log file.** Everything the player prints, errors included (also FFmpeg's, SDL's, TensorRT's and NVIDIA's own
-messages), is saved with a timestamp per line to `open-player.log` in the same folder; the run before is kept as
+**Log file.** Everything the player writes to its error output (its messages and errors, plus FFmpeg's, SDL's,
+TensorRT's and NVIDIA's; not the `--stats` lines) is saved with a timestamp per line to `open-player.log` in the same folder; the run before is kept as
 `open-player.old.log`, so a crash's log survives the next start. A crash adds a last `crashed: ...` line. One run's
 log stops at 5 MB. `--check` and Settings > About show the path; attach the file when you report a problem. It
 stays on your PC and is never sent anywhere; it contains the paths of the videos you played, so look it over before

@@ -173,11 +173,6 @@ int main(int argc, char** argv) {
         else if (argv[i][0] != '-') (selftest || checking ? model : path) = argv[i];
         else return fputs(USAGE, stderr), 2;
     }
-    // open-player.log: everything below that goes to stderr is also saved (with the libraries' own messages)
-    if (start_log(log_file())) {
-        atexit(stop_log);
-        fprintf(stderr, "Open Player %s\n", OPEN_PLAYER_BUILD);
-    } else fprintf(stderr, "log: can't write %s, running without a log file\n", log_file().c_str());
     // saved settings, with this run's flags on top; only the settings card and the volume change `saved`
     Settings saved = load_settings(settings_file()), cfg = saved;
     if (!want_rtx && cfg.upscaler == Upscaler::Rtx) cfg.upscaler = Upscaler::PixelFlow;
@@ -198,6 +193,13 @@ int main(int argc, char** argv) {
         }
     if (selftest) return Vsr::selftest(model);
     if (checking) return check(model);
+    // open-player.log, for playback only (a --check must not push the last crash's log out to .old.log): everything
+    // below that goes to stderr is also saved, with the libraries' own messages
+    bool logging = start_log(log_file());
+    if (logging) {
+        atexit(stop_log);
+        fprintf(stderr, "Open Player %s\n", OPEN_PLAYER_BUILD);
+    } else fprintf(stderr, "log: can't write %s, running without a log file\n", log_file().c_str());
     // double-clicked with no video: ask for one, like the Open button (cancel quits)
     struct Pick {
         std::string file;
@@ -488,7 +490,9 @@ int main(int argc, char** argv) {
 #else
             execv("/proc/self/exe", cargs.data());
 #endif
-            fprintf(stderr, "can't open %s: restart failed (%s)\n", video.c_str(), strerror(errno));
+            int err = errno;
+            if (logging) start_log(log_file(), true);  // still this run: carry on in the same log
+            fprintf(stderr, "can't open %s: restart failed (%s)\n", video.c_str(), strerror(err));
         };
         // Opening another file restarts the player on it with the same arguments: every buffer, the engine and
         // the window size depend on the video, so a fresh start is the simple, safe way to switch.
@@ -696,7 +700,7 @@ int main(int argc, char** argv) {
                     us.vsr_unavailable = worth_it ? "no Pixel Flow model (" + std::string(model) + ") found"
                                                   : "the video already fills the screen";
                 us.build = OPEN_PLAYER_BUILD;
-                us.log_path = log_file();
+                if (logging) us.log_path = log_file();
                 auto acts = draw_ui(us);
                 if (full && ui_controls_hidden() && !ui_has_keyboard()) ImGui::SetMouseCursor(ImGuiMouseCursor_None);  // the SDL3 backend hides the OS cursor at its next NewFrame
                 ImGui::Render();

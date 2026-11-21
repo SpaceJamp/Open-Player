@@ -8,9 +8,9 @@
 
 std::string log_file();  // open-player.log in settings_file()'s folder
 
-// Starts copying stderr into path (rotating the old file first); the console still shows everything. Also notes a
-// crash as the log's last line. false: no log (the player runs on without one).
-bool start_log(const std::string& path);
+// Starts copying stderr into path (rotating the old file first, unless append); the console still shows everything.
+// Also notes a crash as the log's last line. false: no log (another player holds it, or it can't be written).
+bool start_log(const std::string& path, bool append = false);
 void stop_log();  // flushes and stops; call before the process is replaced (restart) or exits
 
 // --- the pieces start_log uses, separate so --uitest can check them ---

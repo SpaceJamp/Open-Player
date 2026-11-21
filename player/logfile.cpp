@@ -17,6 +17,7 @@
 #include <io.h>
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -31,21 +32,23 @@ LogWriter::LogWriter(std::function<void(const std::string&)> out, size_t cap, st
 
 void LogWriter::feed(const char* p, size_t n) {
     std::string s;
+    auto flush = [&] {  // also part-lines: output that never ends a line must hit the cap too
+        if (s.empty() || cut_) return;
+        if (written_ + s.size() > cap_)  // the note says why the log ends here
+            s = std::string(line_start_ ? "" : "\n") + "[log cut at " + std::to_string(cap_ >> 20) + " MB]\n", cut_ = true;
+        written_ += s.size();
+        out_(s);
+        s.clear();
+    };
     for (size_t i = 0; i < n && !cut_; i++) {
+        const unsigned char c = (unsigned char)p[i];
+        if (c == '\r' && i + 1 < n && p[i + 1] == '\n') continue;  // CRLF -> LF
         if (line_start_) s += stamp_(), line_start_ = false;
-        s += p[i];
-        if (p[i] == '\n') {
-            line_start_ = true;
-            if (written_ + s.size() > cap_) {  // whole lines only: the note says why the log ends here
-                s = "[log cut at " + std::to_string(cap_ >> 20) + " MB]\n", cut_ = true;
-                if (written_ + s.size() > cap_ + 64) s.clear();
-            }
-            written_ += s.size();
-            out_(s);
-            s.clear();
-        }
+        // control bytes (from a file name, say) can't fake a line or drive a terminal that shows the log
+        s += (c < 0x20 && c != '\n' && c != '\t') || c == 0x7f ? '?' : (char)c;
+        if (c == '\n') line_start_ = true, flush();
     }
-    if (!s.empty() && !cut_) written_ += s.size(), out_(s);  // a line without its end yet
+    flush();
 }
 
 std::string log_stamp() {
@@ -68,7 +71,7 @@ bool rotate_log(const std::string& path) {
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) return true;
     auto old = std::filesystem::path(path).replace_extension(".old.log");
-    std::filesystem::remove(old, ec);
+    // rename replaces .old.log; when another running player holds the log open it fails and nothing is touched
     std::filesystem::rename(path, old, ec);
     return !ec;
 }
@@ -88,6 +91,7 @@ void write_file(const std::string& s) {  // under g_mu
 
 #ifdef _WIN32
 LONG WINAPI on_crash(EXCEPTION_POINTERS* e) {
+    Sleep(200);  // let the reader thread write the last lines still in the pipe (the error before the crash)
     if (std::unique_lock l(g_mu, std::try_to_lock); l && g_writer) {
         char b[96];
         int n = snprintf(b, sizeof b, "crashed: exception 0x%08lX at %p\n", e->ExceptionRecord->ExceptionCode,
@@ -98,6 +102,8 @@ LONG WINAPI on_crash(EXCEPTION_POINTERS* e) {
 }
 #else
 void on_crash(int sig) {  // only async-signal-safe calls: write the note straight to the file
+    timespec wait{0, 200000000};
+    nanosleep(&wait, nullptr);  // let the reader thread write the last lines still in the pipe first
     if (g_file) {
         char b[] = "crashed: signal   \n";
         b[16] = char('0' + sig / 10), b[17] = char('0' + sig % 10);
@@ -109,24 +115,35 @@ void on_crash(int sig) {  // only async-signal-safe calls: write the note straig
 #endif
 }  // namespace
 
-bool start_log(const std::string& path) {
+bool start_log(const std::string& path, bool append) {
+    if (g_thread.joinable()) return true;
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
-    rotate_log(path);
-    if (!(g_file = fopen(path.c_str(), "wb"))) return false;
+    if (!append && !rotate_log(path)) return false;  // another player is writing it: leave its log alone
+    if (!(g_file = fopen(path.c_str(), append ? "ab" : "wb"))) return false;
     g_writer = new LogWriter(write_file, LOG_CAP, log_stamp);
     int fds[2];
 #ifdef _WIN32
-    if (_pipe(fds, 1 << 16, _O_BINARY) != 0) return fclose(g_file), g_file = nullptr, false;
+    if (_get_osfhandle(2) < 0) {  // started without an error output: give fd 2 one, or the console dup fails
+        int nul = _open("NUL", _O_WRONLY);
+        if (nul >= 0) _dup2(nul, 2), _close(nul);
+    }
+    if (_pipe(fds, 1 << 16, _O_BINARY | _O_NOINHERIT) != 0) return fclose(g_file), g_file = nullptr, false;
     fflush(stderr);
     g_console = _dup(2);
     _dup2(fds[1], 2);
     SetStdHandle(STD_ERROR_HANDLE, (HANDLE)_get_osfhandle(2));  // libraries writing through the Win32 handle too
     SetUnhandledExceptionFilter(on_crash);
 #else
+    if (fcntl(2, F_GETFD) == -1) {  // started with 2>&-: otherwise pipe() would take fd 2 itself
+        int nul = open("/dev/null", O_WRONLY);
+        if (nul >= 0 && nul != 2) dup2(nul, 2), close(nul);
+    }
     if (pipe(fds) != 0) return fclose(g_file), g_file = nullptr, false;
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC), fcntl(fds[1], F_SETFD, FD_CLOEXEC);  // not inherited by a restart
     fflush(stderr);
     g_console = dup(2);
+    if (g_console >= 0) fcntl(g_console, F_SETFD, FD_CLOEXEC);
     dup2(fds[1], 2);
     for (int s : {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT}) signal(s, on_crash);
 #endif
@@ -161,15 +178,24 @@ void stop_log() {
     if (!g_thread.joinable()) return;
     fflush(stderr);
     // put the console back on fd 2 and close every write end of the pipe, so the thread reads to the end
+    // (no console copy: just close fd 2, which is the pipe's other write end)
 #ifdef _WIN32
-    _dup2(g_console, 2);
+    if (g_console >= 0) _dup2(g_console, 2);
+    else _close(2);
     SetStdHandle(STD_ERROR_HANDLE, (HANDLE)_get_osfhandle(2));
     _close(g_pipe_w);
 #else
-    dup2(g_console, 2);
+    if (g_console >= 0) dup2(g_console, 2);
+    else close(2);
     close(g_pipe_w);
 #endif
-    g_thread.join();
+    g_thread.join();  // the reader still copies to g_console until here
+#ifdef _WIN32
+    if (g_console >= 0) _close(g_console);
+#else
+    if (g_console >= 0) close(g_console);
+#endif
+    g_console = -1;
     std::lock_guard l(g_mu);
     fclose(g_file), g_file = nullptr;
     delete g_writer, g_writer = nullptr;
@@ -198,6 +224,19 @@ int log_selftest() {
         size_t before = got.size();
         w.feed("more\n", 5);
         check(got.size() == before);
+    }
+    {  // output that never ends a line is capped too (a progress counter must not fill the disk)
+        std::string got;
+        LogWriter w([&](const std::string& s) { got += s; }, 20, [] { return std::string(""); });
+        for (int i = 0; i < 50; i++) w.feed("0123456789", 10);
+        check(got.size() < 120 && got.find("log cut at") != std::string::npos);
+    }
+    {  // control bytes from file names or metadata can't fake lines or reach a terminal; CRLF becomes LF
+        std::string got;
+        LogWriter w([&](const std::string& s) { got += s; }, 1000, [] { return std::string("T "); });
+        const char evil[] = "a\x1b[31mb\rc\r\nd\x7f\te\n";
+        w.feed(evil, sizeof evil - 1);
+        check(got == "T a?[31mb?c\nT d?\te\n");
     }
     check(log_stamp().size() == 24 && log_stamp()[4] == '-' && log_stamp()[10] == ' ');
     {  // the previous run is kept as .old.log, replacing an older one
