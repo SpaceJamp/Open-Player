@@ -59,6 +59,10 @@ struct UiState {
     std::string build;            // "build 214 (4a30cf8)"
     std::string log_path;         // open-player.log, shown in About
     std::vector<std::string> versions;  // TensorRT, RTX VSR and driver lines, shown in About
+    // the TensorRT add-on (Pixel Flow needs TensorRT): its status line, and the download's progress (< 0: none)
+    std::string trt_status;
+    bool trt_addon = false;  // loaded from the add-on (so Remove applies)
+    float addon_progress = -1;
 };
 std::string vsr_badge_text(bool available, bool on, bool rtx, int factor);  // "PXF 2x", "RTX 2x", "VSR off"; "" without VSR
 std::string about_text(const std::string& build, const std::string& log, const std::vector<std::string>& versions);  // About
@@ -67,7 +71,7 @@ struct UiAction {
         TogglePause, Seek, SetVolume, ToggleVsr, ToggleFullscreen, ToggleInfo, Open, OpenPath, Quit,
         // the settings card; value: an Upscaler, a screen index, seconds, or 0/1
         ToggleSettings, SetUpscaler, SetDecoder, SetScreen, SetStartFullscreen, SetRememberVolume, SetHideAfter,
-        SetInfoAtStart
+        SetInfoAtStart, DownloadTensorRT, CancelTensorRT, RemoveTensorRT, ChooseTensorRTFolder
     } kind;
     double value = 0;  // Seek: seconds; SetVolume: 0..2
     std::string path;  // OpenPath

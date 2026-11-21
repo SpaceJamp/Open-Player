@@ -2,6 +2,7 @@
 // decode (NVDEC) -> YUV->RGB (CUDA) -> VSR (TensorRT) -> RGBA (CUDA) -> Vulkan blit to the window
 #include <SDL3/SDL.h>
 #include <atomic>
+#include <thread>
 #include <cuda.h>
 #ifdef _WIN32
 #define NOMINMAX
@@ -37,6 +38,7 @@
 #include "build_info.h"  // generated: OPEN_PLAYER_BUILD
 #include "logfile.h"
 #include "trt_loader.h"
+#include "addon.h"
 #ifdef HAVE_RTX_VSR
 #include "rtx_vsr.h"
 #endif
@@ -199,6 +201,7 @@ int main(int argc, char** argv) {
     }
     // TensorRT, for Pixel Flow: loaded now from known folders only, so the player runs without it
     std::string trt_ver, trt_why;
+    finish_pending_addon_removal();  // "Remove" while its DLLs were in use
     TrtFrom trt_from = load_tensorrt(saved.trt_folder, trt_ver, trt_why);
     if (selftest)
         return trt_from == TrtFrom::None ? fprintf(stderr, "%s\n", trt_line(trt_from, trt_ver, trt_why).c_str()), 1
@@ -551,6 +554,25 @@ int main(int argc, char** argv) {
                 },
                 nullptr, win, VIDEO_FILTERS, 2, nullptr, false);
         };
+        auto show_folder_dialog = [&] {  // your own TensorRT 11.x; arrives as SDL_EVENT_USER with code 1
+            SDL_ShowOpenFolderDialog(
+                [](void*, const char* const* dirs, int) {
+                    if (!dirs || !dirs[0]) return;
+                    SDL_Event ev{SDL_EVENT_USER};
+                    ev.user.code = 1, ev.user.data1 = SDL_strdup(dirs[0]);
+                    SDL_PushEvent(&ev);
+                },
+                nullptr, win, nullptr, false);
+        };
+        // the TensorRT add-on download runs on its own thread; the card shows its progress
+        std::thread addon_thread;
+        std::atomic<bool> addon_running{false}, addon_done{false}, addon_cancel{false};
+        std::atomic<uint64_t> addon_got{0};
+        bool addon_ok = false;
+        std::string addon_error;
+        auto stop_addon = [&] {
+            if (addon_thread.joinable()) addon_cancel = true, addon_thread.join();
+        };
         SDL_SetWindowTitle(win, std::filesystem::path(path).filename().string().c_str());
         if (start_at >= 0) seek(start_position(start_at, dur));  // reopened after a settings change
         if (start_paused) set_paused(true), step = true;         // ... while paused: show that frame, stay paused
@@ -587,6 +609,12 @@ int main(int argc, char** argv) {
         while (running) {
             if (volume_unsaved && now() - volume_saved_at >= 1)
                 save_settings(settings_file(), saved), volume_unsaved = false, volume_saved_at = now();
+            if (addon_done) {  // the add-on download finished: load it by reopening, or say what went wrong
+                addon_thread.join(), addon_running = false, addon_done = false;
+                if (addon_ok) reopen("TensorRT installed: reopening...", true);
+                else if (!addon_cancel) post(ICON_X, "TensorRT: " + addon_error, -1, 4);
+            }
+            if (addon_running && settings_open) dirty = true;  // the progress bar moves
             if (!pending_restart.empty() && now() >= restart_at) {
                 restart_with(pending_restart, video_path);  // returns only if it failed
                 pending_restart.clear();
@@ -597,10 +625,14 @@ int main(int argc, char** argv) {
                 if (ui) ImGui_ImplSDL3_ProcessEvent(&e), ui_redraw = 2;
                 if (e.type == SDL_EVENT_QUIT) running = false;
                 else if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) open_video(e.drop.data);
-                else if (e.type == SDL_EVENT_USER) {  // a file picked in the open dialog
+                else if (e.type == SDL_EVENT_USER) {  // a file picked in the open dialog, or (code 1) a TensorRT folder
                     std::string p = (char*)e.user.data1;
                     SDL_free(e.user.data1);
-                    open_video(p);
+                    std::error_code ec;
+                    if (e.user.code != 1) open_video(p);
+                    else if (!std::filesystem::exists(std::filesystem::u8path(p) / "nvinfer_11.dll", ec))
+                        post(ICON_X, "No TensorRT 11 in that folder (nvinfer_11.dll)", -1, 3);
+                    else saved.trt_folder = cfg.trt_folder = p, save_prefs(), reopen("Loading your TensorRT...", true);
                 }
                 else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) disp.resized(), dirty = true;
                 else if (e.type == SDL_EVENT_WINDOW_EXPOSED || e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED) dirty = true;
@@ -735,6 +767,13 @@ int main(int argc, char** argv) {
                     us.vsr_unavailable = "NVIDIA RTX VSR isn't available here, and " + us.pxf_why;
                 us.build = OPEN_PLAYER_BUILD;
                 us.versions = {trt_line(trt_from, trt_ver, trt_why), rtx_vsr_line(rtx_tried, rtx_ok), driver_line()};
+                us.trt_addon = trt_from == TrtFrom::AddOn;
+                us.trt_status = trt_line(trt_from, trt_ver, trt_why);
+                if (addon_running) {
+                    us.addon_progress = (float)((double)addon_got / TRT_WHEEL_SIZE);
+                    us.trt_status = "Downloading TensorRT from NVIDIA: " + std::to_string(addon_got / (1 << 20)) + " of " +
+                                    std::to_string(TRT_WHEEL_SIZE >> 20) + " MB";
+                }
                 if (logging) us.log_path = log_file();
                 auto acts = draw_ui(us);
                 if (full && ui_controls_hidden() && !ui_has_keyboard()) ImGui::SetMouseCursor(ImGuiMouseCursor_None);  // the SDL3 backend hides the OS cursor at its next NewFrame
@@ -774,6 +813,22 @@ int main(int argc, char** argv) {
                         break;
                     case UiAction::SetHideAfter: saved.hide_after = cfg.hide_after = (int)a.value, save_prefs(); break;
                     case UiAction::SetInfoAtStart: saved.info_at_start = cfg.info_at_start = a.value != 0, save_prefs(); break;
+                    case UiAction::DownloadTensorRT:
+                        if (addon_running) break;
+                        stop_addon();
+                        addon_running = true, addon_done = false, addon_cancel = false, addon_got = 0;
+                        addon_thread = std::thread([&] {
+                            addon_ok = install_tensorrt_addon([&](uint64_t got, uint64_t) { addon_got = got; },
+                                                              addon_cancel, addon_error);
+                            addon_done = true;
+                        });
+                        break;
+                    case UiAction::CancelTensorRT: addon_cancel = true; break;
+                    case UiAction::ChooseTensorRTFolder: show_folder_dialog(); break;
+                    case UiAction::RemoveTensorRT:
+                        remove_tensorrt_addon();  // in use now: removed when the player reopens
+                        if (saved.trt_folder.empty()) reopen("Removing TensorRT...", true);
+                        break;
                     }
                 bool vis = paused || settings_open || now() - last_mouse < cfg.hide_after;
                 bool ui_dirty = !acts.empty() || vis != last_vis || ui_redraw > 0 || ImGui::IsAnyItemActive() ||
@@ -836,6 +891,7 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        stop_addon();  // a download in progress is cancelled (its partial file is deleted)
         if (volume_unsaved) save_settings(settings_file(), saved);
         drop_ahead();
         for (auto& e : rgba_ev) cudaEventDestroy(e);

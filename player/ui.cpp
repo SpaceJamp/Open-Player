@@ -368,6 +368,34 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
         if (i >= 0) out.push_back({UiAction::SetUpscaler, (double)(i + base)});
         card_row_end(row, rh + 4 * sc);
     }
+#ifdef _WIN32
+    {  // TensorRT for Pixel Flow: status, then download (with progress and cancel), remove, or your own folder
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_DIM);
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextUnformatted(s.trt_status.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+        if (s.addon_progress >= 0) {
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const float aw = ImGui::GetContentRegionAvail().x, cw = segmented_w({{"Cancel", true, nullptr}}, sc);
+            const float bw = aw - cw - 12 * sc, y = p.y + 14 * sc;
+            dl->AddRectFilled({p.x, y - 2 * sc}, {p.x + bw, y + 2 * sc}, col(COL_TRACK), 2 * sc);
+            dl->AddRectFilled({p.x, y - 2 * sc}, {p.x + bw * std::clamp(s.addon_progress, 0.f, 1.f), y + 2 * sc},
+                              col(COL_PLAYED), 2 * sc);
+            if (segmented("cancel", {p.x + aw - cw, p.y}, {{"Cancel", true, nullptr}}, -1, sc) == 0)
+                out.push_back({UiAction::CancelTensorRT});
+            card_row_end(p, 32 * sc);
+        } else {
+            std::vector<Seg> b = {{s.trt_addon ? "Remove" : "Download (1.9 GB)", true, nullptr},
+                                  {"Choose folder...", true, nullptr}};
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            int i = segmented("trt", {p.x + ImGui::GetContentRegionAvail().x - segmented_w(b, sc), p.y}, b, -1, sc);
+            if (i == 0) out.push_back({s.trt_addon ? UiAction::RemoveTensorRT : UiAction::DownloadTensorRT});
+            if (i == 1) out.push_back({UiAction::ChooseTensorRTFolder});
+            card_row_end(p, 32 * sc);
+        }
+    }
+#endif
 
     card_heading(ICON_CPU, "DECODING", sc);
     {
