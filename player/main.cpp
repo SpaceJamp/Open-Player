@@ -41,6 +41,7 @@ static const char* USAGE =
     "usage: open-player [video] [--model vsr.onnx] [--no-vsr] [--no-rtx] [--stats] [--screen N] [--fullscreen]\n"
     "no video (or double-clicked): pick one in a file dialog; cancel quits\n"
     "--no-rtx: on Windows, upscale with our model instead of NVIDIA RTX VSR\n"
+    "--cpu-decode: decode on the CPU instead of NVDEC (upscaling stays on the GPU)\n"
     "--collect DIR: on Windows with RTX VSR, save clips and their RTX upscale to DIR for train.py --pairs (2 GB cap)\n"
     "--screen N: play on monitor N (1 = first; --check lists them); upscaling is planned for that monitor\n"
     "       open-player --selftest [vsr.onnx]   compare the TensorRT engine against PyTorch\n"
@@ -132,7 +133,8 @@ static const SDL_DialogFileFilter VIDEO_FILTERS[] = {{"Videos", "mp4;mkv;webm;mo
 
 int main(int argc, char** argv) {
     const char *path = nullptr, *model = "vsr.onnx", *collect_dir = nullptr;
-    bool vsr_on = true, selftest = false, checking = false, stats = false, fullscreen = false, want_rtx = true;
+    bool vsr_on = true, selftest = false, checking = false, stats = false, fullscreen = false, want_rtx = true,
+         cpu_decode = false;
     int screen = 0;  // --screen N, counted from 1; 0 = the primary display
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
@@ -140,6 +142,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--collect") && i + 1 < argc) collect_dir = argv[++i];
         else if (!strcmp(argv[i], "--no-vsr")) vsr_on = false;
         else if (!strcmp(argv[i], "--no-rtx")) want_rtx = false;
+        else if (!strcmp(argv[i], "--cpu-decode")) cpu_decode = true;
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = true;
         else if (!strcmp(argv[i], "--stats")) stats = true;
         else if (!strcmp(argv[i], "--selftest")) selftest = true;
@@ -214,7 +217,7 @@ int main(int argc, char** argv) {
         cudaStreamCreate(&st);
 
         Media media;
-        if (!media.open(path, disp.cuda_device())) return 1;
+        if (!media.open(path, disp.cuda_device(), !cpu_decode)) return 1;
         int w = media.width(), h = media.height();
         // Like RTX VSR: only upscale video smaller than the screen in both directions. A 4K video on a 4K screen,
         // including 3840x1608 widescreen, would be blown up to 8K (7 fps on an RTX 5080) just to be shrunk back.
