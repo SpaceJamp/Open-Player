@@ -1,0 +1,2 @@
+Installed by the Open Player installer. The player checks for updates and keeps your Pixel Flow model in
+%LOCALAPPDATA%\Open Player because this file is here.

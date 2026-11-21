@@ -40,7 +40,7 @@ find_library(NVINFER NAMES nvinfer nvinfer_11 HINTS ${TENSORRT_ROOT}/lib REQUIRE
 find_library(NVONNXPARSER NAMES nvonnxparser nvonnxparser_11 HINTS ${TENSORRT_ROOT}/lib REQUIRED)
 
 set(IMGUI third_party/imgui)
-add_executable(open-player main.cpp media.cpp vsr.cpp display.cpp ui.cpp theme.cpp collect.cpp settings.cpp logfile.cpp kernels.cu
+add_executable(open-player main.cpp media.cpp vsr.cpp display.cpp ui.cpp theme.cpp collect.cpp settings.cpp logfile.cpp update.cpp trt_loader.cpp addon.cpp kernels.cu
   ${IMGUI}/imgui.cpp ${IMGUI}/imgui_draw.cpp ${IMGUI}/imgui_tables.cpp ${IMGUI}/imgui_widgets.cpp
   ${IMGUI}/backends/imgui_impl_sdl3.cpp ${IMGUI}/backends/imgui_impl_vulkan.cpp)
 target_include_directories(open-player SYSTEM PRIVATE ${IMGUI} ${IMGUI}/backends)  # SYSTEM: no warnings from it
@@ -55,8 +55,16 @@ target_include_directories(open-player PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(open-player PRIVATE ${CMAKE_DL_LIBS} CUDA::cuda_driver Vulkan::Vulkan SDL3::SDL3 ffmpeg ${NVINFER} ${NVONNXPARSER})
 if(WIN32)
   target_link_libraries(open-player PRIVATE CUDA::cudart_static)  # one DLL less to ship
+  target_link_libraries(open-player PRIVATE bcrypt crypt32 winhttp)  # update checks and downloads
+  target_link_libraries(open-player PRIVATE delayimp version shell32 ole32)
+  # TensorRT is loaded only when needed and from known folders (trt_loader.cpp), so the player starts without it
+  target_link_options(open-player PRIVATE /DELAYLOAD:nvinfer_11.dll /DELAYLOAD:nvonnxparser_11.dll)
   target_compile_definitions(open-player PRIVATE _CRT_SECURE_NO_WARNINGS)  # getenv, strerror: fine here
   target_sources(open-player PRIVATE open-player.manifest)  # UTF-8 code page for file names
+  target_sources(open-player PRIVATE open-player.rc)  # the program's icon
+  # a windowed program: no console window on double-click (main() still the entry; see the top of main)
+  set_target_properties(open-player PROPERTIES WIN32_EXECUTABLE TRUE)
+  target_link_options(open-player PRIVATE /ENTRY:mainCRTStartup)
   # TensorRT's DLLs (incl. the builder resources it loads when making an engine) next to the exe; vcpkg copies its own
   file(GLOB TENSORRT_DLLS ${TENSORRT_ROOT}/bin/nvinfer*.dll ${TENSORRT_ROOT}/bin/nvonnxparser*.dll)
   add_custom_command(TARGET open-player POST_BUILD

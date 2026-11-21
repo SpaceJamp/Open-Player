@@ -34,6 +34,13 @@ Settings settings_parse(const std::string& text) {
         else if (k == "start_fullscreen") flag(s.start_fullscreen);
         else if (k == "remember_volume") flag(s.remember_volume);
         else if (k == "info_at_start") flag(s.info_at_start);
+        else if (k == "trt_folder") s.trt_folder = v;
+        else if (k == "check_updates") flag(s.check_updates);
+        else if (k == "last_update_check") {
+            char* end = nullptr;
+            long long t = strtoll(v.c_str(), &end, 10);
+            if (!v.empty() && *end == 0 && t >= 0) s.last_update_check = t;
+        }
         else if (k == "volume") {
             char* end = nullptr;
             float f = strtof(v.c_str(), &end);
@@ -51,10 +58,13 @@ std::string settings_format(const Settings& s) {
     snprintf(vol, sizeof vol, "%g", s.volume);
     std::string screen = trim(s.screen);  // a monitor name comes from the OS: no line break may add a line
     std::replace_if(screen.begin(), screen.end(), [](char c) { return c == '\n' || c == '\r'; }, ' ');
+    std::string trt = trim(s.trt_folder);  // a folder name with a line break can't add lines either
+    std::replace_if(trt.begin(), trt.end(), [](char c) { return c == '\n' || c == '\r'; }, ' ');
     return std::string("upscaler=") + up + "\ndecoder=" + (s.cpu_decode ? "cpu" : "gpu") + "\nscreen=" + screen +
            "\nstart_fullscreen=" + (s.start_fullscreen ? "1" : "0") + "\nremember_volume=" +
            (s.remember_volume ? "1" : "0") + "\nvolume=" + vol + "\nhide_after=" + std::to_string(s.hide_after) +
-           "\ninfo_at_start=" + (s.info_at_start ? "1" : "0") + "\n";
+           "\ninfo_at_start=" + (s.info_at_start ? "1" : "0") + "\ntrt_folder=" + trt + "\ncheck_updates=" + (s.check_updates ? "1" : "0") +
+           "\nlast_update_check=" + std::to_string(s.last_update_check) + "\n";
 }
 
 Settings load_settings(const std::string& file) {
@@ -207,6 +217,13 @@ int settings_selftest() {
 
     check(start_position(5, .5) == 0 && start_position(5, 0) == 5);  // a clip of 1 s or less starts at 0
     check(settings_parse("\xEF\xBB\xBFupscaler=off\n").upscaler == Upscaler::Off);  // Notepad's UTF-8 BOM
+    {
+        Settings u;
+        u.check_updates = false, u.last_update_check = 1795270000;
+        Settings b = settings_parse(settings_format(u));
+        check(!b.check_updates && b.last_update_check == 1795270000);
+        check(settings_parse("last_update_check=-5\n").last_update_check == 0 && settings_parse("").check_updates);
+    }
     check(start_position(-3, 100) == 0 && start_position(500, 100) == 99 && start_position(42, 100) == 42 &&
           start_position(42, 0) == 42);
 #undef check

@@ -90,6 +90,9 @@ Step "Visual Studio Build Tools with C++" { [bool](VS-Path) } { Install-VS }
 Step "CUDA Toolkit" { $env:CUDA_PATH -and (Test-Path "$env:CUDA_PATH\bin\nvcc.exe") } { Winget Nvidia.CUDA }
 Step "Vulkan SDK" { $env:VULKAN_SDK -and (Test-Path "$env:VULKAN_SDK\Include\vulkan\vulkan.h") } { Winget KhronosGroup.VulkanSDK }
 Step "Git" { Have git } { Winget Git.Git }
+Step "Inno Setup 6 (for installer\build-installer.bat)" {
+    (Test-Path "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") -or (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")
+} { Winget JRSoftware.InnoSetup }
 Step "vcpkg in $Vcpkg" { Test-Path "$Vcpkg\vcpkg.exe" } {
     if (-not (Test-Path "$Vcpkg\bootstrap-vcpkg.bat")) {
         if (Test-Path $Vcpkg) { Write-Host "  $Vcpkg is incomplete (an interrupted clone?): delete it and run this again"; return }

@@ -1,0 +1,21 @@
+Open Player is licensed under the GNU Affero General Public License v3.0 (LICENSE), with an additional
+permission to link NVIDIA's CUDA, TensorRT and RTX Video SDK libraries (LICENSE-EXCEPTION).
+Source code: https://github.com/SpaceJamp/Open-Player
+
+No Pixel Flow model is included: every user trains their own.
+
+This installation also contains:
+
+- NVIDIA RTX Video Super Resolution runtime (nvngx_vsr.dll), redistributed under the NVIDIA RTX Video SDK
+  License. This software uses the NVIDIA RTX Video SDK. NVIDIA, GeForce RTX and NVIDIA RTX are trademarks of
+  NVIDIA Corporation.
+- FFmpeg (avcodec, avformat, avutil, swresample, swscale), LGPL 2.1 or later, built without GPL parts.
+  https://ffmpeg.org
+- dav1d, BSD 2-Clause. https://code.videolan.org/videolan/dav1d
+- SDL 3, zlib License. https://libsdl.org
+- Dear ImGui, MIT License (built into open-player.exe). https://github.com/ocornut/imgui
+- Inter font, SIL Open Font License 1.1 (assets\fonts\Inter-LICENSE.txt).
+- Tabler Icons, MIT License (assets\fonts\tabler-icons-LICENSE.txt).
+- Microsoft Visual C++ runtime DLLs, redistributed under the Visual Studio license terms.
+
+The optional TensorRT add-on (downloaded from NVIDIA in Settings) comes with NVIDIA's licence in its folder.

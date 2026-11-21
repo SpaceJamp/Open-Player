@@ -13,6 +13,9 @@
 #include "collect.h"
 #include "settings.h"
 #include "logfile.h"
+#include "update.h"
+#include "trt_loader.h"
+#include "addon.h"
 #include "imgui.h"
 #include "imgui_internal.h"  // the self-test finds the volume panel's window
 #include "theme.h"
@@ -350,7 +353,7 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
         ImGui::PopStyleColor();
     } else {
         std::vector<Seg> segs = {{"NVIDIA RTX", s.rtx_available, "Not available on this GPU or driver"},
-                                 {"Pixel Flow", s.pxf_available, "No Pixel Flow model (vsr.onnx) loaded"},
+                                 {"Pixel Flow", s.pxf_available, s.pxf_why.empty() ? "No Pixel Flow model (vsr.onnx)" : s.pxf_why.c_str()},
                                  {"Off", true, nullptr}};
 #ifndef HAVE_RTX_VSR
         segs.erase(segs.begin());  // this build has no RTX VSR
@@ -365,6 +368,34 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
         if (i >= 0) out.push_back({UiAction::SetUpscaler, (double)(i + base)});
         card_row_end(row, rh + 4 * sc);
     }
+#ifdef _WIN32
+    {  // TensorRT for Pixel Flow: status, then download (with progress and cancel), remove, or your own folder
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_DIM);
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextUnformatted(s.trt_status.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+        if (s.addon_progress >= 0) {
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const float aw = ImGui::GetContentRegionAvail().x, cw = segmented_w({{"Cancel", true, nullptr}}, sc);
+            const float bw = aw - cw - 12 * sc, y = p.y + 14 * sc;
+            dl->AddRectFilled({p.x, y - 2 * sc}, {p.x + bw, y + 2 * sc}, col(COL_TRACK), 2 * sc);
+            dl->AddRectFilled({p.x, y - 2 * sc}, {p.x + bw * std::clamp(s.addon_progress, 0.f, 1.f), y + 2 * sc},
+                              col(COL_PLAYED), 2 * sc);
+            if (segmented("cancel", {p.x + aw - cw, p.y}, {{"Cancel", true, nullptr}}, -1, sc) == 0)
+                out.push_back({UiAction::CancelTensorRT});
+            card_row_end(p, 32 * sc);
+        } else {
+            std::vector<Seg> b = {{s.trt_addon ? "Remove" : "Download (1.9 GB)", true, nullptr},
+                                  {"Choose folder...", true, nullptr}};
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            int i = segmented("trt", {p.x + ImGui::GetContentRegionAvail().x - segmented_w(b, sc), p.y}, b, -1, sc);
+            if (i == 0) out.push_back({s.trt_addon ? UiAction::RemoveTensorRT : UiAction::DownloadTensorRT});
+            if (i == 1) out.push_back({UiAction::ChooseTensorRTFolder});
+            card_row_end(p, 32 * sc);
+        }
+    }
+#endif
 
     card_heading(ICON_CPU, "DECODING", sc);
     {
@@ -455,9 +486,38 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
     card_heading(ICON_INFO, "ABOUT", sc);
     ImGui::PushStyleColor(ImGuiCol_Text, COL_DIM);
     ImGui::PushTextWrapPos(0);
-    ImGui::TextUnformatted(about_text(s.build, s.log_path).c_str());
+    ImGui::TextUnformatted(about_text(s.build, s.log_path, s.versions).c_str());
     ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
+#ifdef _WIN32
+    {  // updates: the switch, then what the last check found, an Update button or the download's progress
+        float rh = 0;
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Check for updates", 22 * sc, 40 * sc, sc, rh);
+        if (toggle("##upd", c, s.settings.check_updates, sc))
+            out.push_back({UiAction::SetCheckUpdates, s.settings.check_updates ? 0.0 : 1.0});
+        card_row_end(row, rh + 4 * sc);
+        if (!s.update_status.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, s.update_build ? COL_PLAYED : COL_DIM);
+            ImGui::PushTextWrapPos(0);
+            ImGui::TextUnformatted(s.update_status.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::PopStyleColor();
+        }
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float aw = ImGui::GetContentRegionAvail().x;
+        if (s.update_progress >= 0) {
+            dl->AddRectFilled({p.x, p.y + 6 * sc}, {p.x + aw, p.y + 10 * sc}, col(COL_TRACK), 2 * sc);
+            dl->AddRectFilled({p.x, p.y + 6 * sc}, {p.x + aw * std::clamp(s.update_progress, 0.f, 1.f), p.y + 10 * sc},
+                              col(COL_PLAYED), 2 * sc);
+            card_row_end(p, 16 * sc);
+        } else if (s.update_build) {
+            std::vector<Seg> b = {{"Update now", true, nullptr}};
+            if (segmented("update", {p.x + aw - segmented_w(b, sc), p.y}, b, -1, sc) == 0)
+                out.push_back({UiAction::InstallUpdate});
+            card_row_end(p, 32 * sc);
+        }
+    }
+#endif
 
     ImGui::End();
     ImGui::PopStyleColor();
@@ -471,9 +531,10 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
 }
 }  // namespace
 
-std::string about_text(const std::string& build, const std::string& log) {
-    std::string t = "Open Player " + (build.empty() ? std::string("build unknown") : build) +
-                    "\nPixel Flow (PXF): Open Player's own upscaler.";
+std::string about_text(const std::string& build, const std::string& log, const std::vector<std::string>& versions) {
+    std::string t = "Open Player " + (build.empty() ? std::string("build unknown") : build);
+    for (const auto& v : versions) t += "\n" + v;  // TensorRT, NVIDIA RTX VSR, driver
+    t += "\nPixel Flow (PXF): Open Player's own upscaler.";
 #ifdef HAVE_RTX_VSR
     t += "\nThis software uses the NVIDIA RTX Video SDK. NVIDIA, GeForce RTX and NVIDIA RTX are trademarks of "
          "NVIDIA Corporation.";
@@ -875,7 +936,7 @@ int ui_selftest() {
                 check(click(20, 20) == 1);                                              // outside: closes
                 check(click(w->Pos.x + w->Size.x - 14 - 16, w->Pos.y + 12 + 16) == 1);  // the X
             }
-            std::string about = about_text("build 7 (abc1234)", "C:/u/open-player.log");  // what the card's About section shows
+            std::string about = about_text("build 7 (abc1234)", "C:/u/open-player.log", {});  // what the card's About section shows
             check(about.find("Open Player build 7 (abc1234)") != std::string::npos &&
                   about.find("Pixel Flow") != std::string::npos && about.find("Log: C:/u/open-player.log") != std::string::npos);
             io.AddMousePosEvent(5, 5);
@@ -921,6 +982,9 @@ int ui_selftest() {
 #undef check
     fails += settings_selftest();
     fails += log_selftest();
+    fails += update_selftest();
+    fails += trt_loader_selftest();
+    fails += addon_selftest();
     if (!fails) printf("ui checks passed\n");
     return fails ? 1 : 0;
 }
