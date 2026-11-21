@@ -9,9 +9,11 @@ where they left off in each video (a switch in General), and for a tab showing a
 
 ## Design
 
-- **Tabs** at the top of the card, drawn with the card's existing segmented control (matches the UI design):
+- **Tabs on the left side of the card** (the user asked for the side, not the top): a column of rows, each an
+  icon and a label, the selected row filled violet like the segments, hover in the card's hover colour.
   General (Upscaling, Decoding, Display, Playback & controls + "Remember where I left off"), Training, About
-  (build, versions, updates, log, licences). The last tab is remembered (`settings_tab=`).
+  (build, versions, updates, log, licences). The card grows about 130 px wider for the column; when the window is
+  too narrow the column shows icons only. The last tab is remembered (`settings_tab=`).
 - **Resume:** `positions.txt` next to `settings.txt`: `<seconds>\t<absolute path>` per line, newest first, at most
   200 videos. Saved every 10 s while playing, on quit, and before any open/reopen. On open, when the switch is on
   (`remember_position=1`, default) and the saved time is at least 10 s in and more than 30 s before the end, the
