@@ -18,6 +18,8 @@ struct Settings {
     std::string trt_folder;  // the user's own TensorRT 11.x folder; empty: the add-on or next to the program
     bool check_updates = true;      // installed copies ask GitHub for a newer release, at most once a day
     long long last_update_check = 0;  // unix time
+    bool remember_position = true;    // resume each video where you left off
+    int settings_tab = 0;             // the settings card's tab: 0 General, 1 Training, 2 About
 };
 
 // One "key=value" per line; unknown keys, bad values, blank lines and \r are ignored (defaults kept).
@@ -48,5 +50,15 @@ std::vector<std::string> reopen_args(const std::vector<std::string>& argv, const
 std::vector<std::string> live_flags(bool fullscreen, bool vsr_off, bool pixel_flow, int screen);
 // Where --start T lands: within [0, max(0, dur - 1)] when the length is known (dur > 0), else max(0, T).
 double start_position(double start, double dur);
+
+// Where you left off in each video: newest first, one entry per path, at most 200.
+using Positions = std::vector<std::pair<double, std::string>>;
+Positions load_positions(const std::string& file);                // missing or junk lines: skipped
+bool save_positions(const std::string& file, const Positions& p);  // atomic, like save_settings
+Positions positions_add(Positions p, const std::string& path, double t);  // paths with tabs/line breaks refused
+// Where to resume path: its saved time if it's at least 10 s in and more than 30 s before the end (dur <= 0:
+// unknown, then only the 10 s rule); -1: start from the beginning.
+double resume_point(const Positions& p, const std::string& path, double dur);
+std::string positions_file();  // positions.txt next to settings.txt
 
 int settings_selftest();  // part of --uitest; 0 on pass

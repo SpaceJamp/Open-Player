@@ -36,6 +36,10 @@ Settings settings_parse(const std::string& text) {
         else if (k == "info_at_start") flag(s.info_at_start);
         else if (k == "trt_folder") s.trt_folder = v;
         else if (k == "check_updates") flag(s.check_updates);
+        else if (k == "remember_position") flag(s.remember_position);
+        else if (k == "settings_tab") {
+            if (v == "0" || v == "1" || v == "2") s.settings_tab = v[0] - '0';
+        }
         else if (k == "last_update_check") {
             char* end = nullptr;
             long long t = strtoll(v.c_str(), &end, 10);
@@ -64,7 +68,9 @@ std::string settings_format(const Settings& s) {
            "\nstart_fullscreen=" + (s.start_fullscreen ? "1" : "0") + "\nremember_volume=" +
            (s.remember_volume ? "1" : "0") + "\nvolume=" + vol + "\nhide_after=" + std::to_string(s.hide_after) +
            "\ninfo_at_start=" + (s.info_at_start ? "1" : "0") + "\ntrt_folder=" + trt + "\ncheck_updates=" + (s.check_updates ? "1" : "0") +
-           "\nlast_update_check=" + std::to_string(s.last_update_check) + "\n";
+           "\nlast_update_check=" + std::to_string(s.last_update_check) +
+           "\nremember_position=" + (s.remember_position ? "1" : "0") + "\nsettings_tab=" +
+           std::to_string(s.settings_tab) + "\n";
 }
 
 Settings load_settings(const std::string& file) {
@@ -96,6 +102,63 @@ std::string settings_file() {
 }
 
 static std::string name_size(const ScreenInfo& s) { return s.name + " " + std::to_string(s.w) + "x" + std::to_string(s.h); }
+
+static constexpr size_t POSITIONS_MAX = 200;
+
+Positions load_positions(const std::string& file) {
+    std::ifstream f(std::filesystem::u8path(file), std::ios::binary);
+    Positions p;
+    std::string line;
+    size_t read = 0;
+    while (p.size() < POSITIONS_MAX && read < (1 << 20) && std::getline(f, line)) {  // a huge file is cut, not loaded
+        read += line.size() + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        size_t tab = line.find('\t');
+        if (tab == std::string::npos || tab + 1 >= line.size()) continue;
+        char* end = nullptr;
+        double t = strtod(line.c_str(), &end);
+        if (end != line.c_str() + tab || !(t >= 0 && t < 1e7)) continue;  // also rejects NaN
+        p.emplace_back(t, line.substr(tab + 1));
+    }
+    return p;
+}
+
+bool save_positions(const std::string& file, const Positions& p) {
+    std::string text;
+    char t[32];
+    for (auto& [s, path] : p) snprintf(t, sizeof t, "%.1f\t", s), text += t + path + "\n";
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::u8path(file).parent_path(), ec);
+    std::string tmp = file + ".tmp";
+    {
+        std::ofstream f(std::filesystem::u8path(tmp), std::ios::binary);
+        f << text;
+        f.close();
+        if (!f) return std::filesystem::remove(std::filesystem::u8path(tmp), ec), false;
+    }
+    std::error_code moved;
+    std::filesystem::rename(std::filesystem::u8path(tmp), std::filesystem::u8path(file), moved);
+    if (moved) std::filesystem::remove(std::filesystem::u8path(tmp), ec);
+    return !moved;
+}
+
+Positions positions_add(Positions p, const std::string& path, double t) {
+    if (path.empty() || path.find_first_of("\t\r\n") != std::string::npos || !(t >= 0)) return p;
+    p.erase(std::remove_if(p.begin(), p.end(), [&](auto& e) { return e.second == path; }), p.end());
+    p.insert(p.begin(), {t, path});
+    if (p.size() > POSITIONS_MAX) p.resize(POSITIONS_MAX);
+    return p;
+}
+
+double resume_point(const Positions& p, const std::string& path, double dur) {
+    for (auto& [t, f] : p)
+        if (f == path) return t >= 10 && (dur <= 0 || t < dur - 30) ? t : -1;
+    return -1;
+}
+
+std::string positions_file() {
+    return (std::filesystem::path(recent_file()).parent_path() / "positions.txt").string();
+}
 
 std::string screen_key(const std::vector<ScreenInfo>& screens, int i) {
     std::string k = name_size(screens[i]);
@@ -217,6 +280,32 @@ int settings_selftest() {
 
     check(start_position(5, .5) == 0 && start_position(5, 0) == 5);  // a clip of 1 s or less starts at 0
     check(settings_parse("\xEF\xBB\xBFupscaler=off\n").upscaler == Upscaler::Off);  // Notepad's UTF-8 BOM
+    {  // resume positions
+        Settings t;
+        t.remember_position = false, t.settings_tab = 2;
+        Settings b = settings_parse(settings_format(t));
+        check(!b.remember_position && b.settings_tab == 2 && settings_parse("settings_tab=7\n").settings_tab == 0);
+        Positions p;
+        for (int i = 0; i < 205; i++) p = positions_add(p, "/v/" + std::to_string(i) + ".mkv", i);
+        check(p.size() == 200 && p.front().second == "/v/204.mkv");  // newest first, cap 200
+        p = positions_add(p, "/v/10.mkv", 77);
+        check(p.front() == (std::pair<double, std::string>{77, "/v/10.mkv"}) &&
+              std::count_if(p.begin(), p.end(), [](auto& e) { return e.second == "/v/10.mkv"; }) == 1);
+        check(positions_add({}, "a\tb.mkv", 50).empty() && positions_add({}, "a\nb.mkv", 50).empty());
+        Positions r = {{120, "/a.mkv"}, {5, "/b.mkv"}, {3590, "/c.mkv"}, {20, "/d.mkv"}, {15, "/e.mkv"}};
+        check(resume_point(r, "/a.mkv", 3600) == 120 && resume_point(r, "/b.mkv", 3600) == -1 &&
+              resume_point(r, "/c.mkv", 3600) == -1 && resume_point(r, "/d.mkv", 35) == -1 &&
+              resume_point(r, "/e.mkv", 0) == 15 && resume_point(r, "/nope.mkv", 3600) == -1);
+        auto dir = std::filesystem::temp_directory_path() / "open-player-positions-test";
+        std::filesystem::remove_all(dir);
+        std::string f = (dir / "positions.txt").string();
+        check(load_positions(f).empty() && save_positions(f, r) && !std::filesystem::exists(f + ".tmp"));
+        check(load_positions(f) == r);
+        std::ofstream(f, std::ios::app) << "junk\nnan\t/x.mkv\n-5\t/y.mkv\n12\t\n";
+        check(load_positions(f) == r);  // junk lines skipped
+        std::filesystem::remove_all(dir);
+        check(std::filesystem::path(positions_file()).filename() == "positions.txt");
+    }
     {
         Settings u;
         u.check_updates = false, u.last_update_check = 1795270000;

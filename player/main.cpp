@@ -535,9 +535,16 @@ int main(int argc, char** argv) {
         };
         auto toggle_fullscreen = [&] { SDL_SetWindowFullscreen(win, !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN)); };
         // replaces this process with the player run with args (open another video, reopen after a settings change)
+        double position_saved_at = now();
+        auto save_position = [&] {  // this video's spot, for "Remember where I left off"
+            position_saved_at = now();
+            if (!frames_shown) return;  // quit before the first frame: pos is still 0, keep the saved spot
+            save_positions(positions_file(), positions_add(load_positions(positions_file()), video_path, pos));
+        };
         std::function<void()> stop_downloads;  // set below, once the downloads exist
         auto restart_with = [&](std::vector<std::string> args, const std::string& video) {
             if (stop_downloads) stop_downloads();  // cancelled (partial files deleted), not cut off by the restart
+            if (cfg.remember_position) save_position();
             if (volume_unsaved) save_settings(settings_file(), saved);
             fprintf(stderr, "reopening: %s\n", video.c_str());
             stop_log();  // the new process starts its own log; this one's last lines must reach the file first
@@ -606,6 +613,10 @@ int main(int argc, char** argv) {
         };
         SDL_SetWindowTitle(win, std::filesystem::path(path).filename().string().c_str());
         if (start_at >= 0) seek(start_position(start_at, dur));  // reopened after a settings change
+        else if (cfg.remember_position) {  // where you left off last time
+            double t = resume_point(load_positions(positions_file()), video_path, dur);
+            if (t >= 0) seek(t), post(ICON_CLOCK, "Resumed at " + clock_text(t), -1, 2);
+        }
         if (start_paused) set_paused(true), step = true;         // ... while paused: show that frame, stay paused
         else media.set_paused(false), wall_t0 = SDL_GetTicksNS();  // ready: play from the start, not from mid-setup
 
@@ -674,6 +685,7 @@ int main(int argc, char** argv) {
                 else post(ICON_X, "Update failed: couldn't start the installer", -1, 4);
             }
             if (upd_running && settings_open) dirty = true;
+            if (cfg.remember_position && !paused && now() - position_saved_at >= 10) save_position();
             if (volume_unsaved && now() - volume_saved_at >= 1)
                 save_settings(settings_file(), saved), volume_unsaved = false, volume_saved_at = now();
             if (addon_done) {  // the add-on download finished: load it by reopening, or say what went wrong
@@ -979,6 +991,7 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        if (cfg.remember_position) save_position();
         stop_addon();  // a download in progress is cancelled (its partial file is deleted)
         if (upd_dl.joinable()) upd_cancel = true, upd_dl.join();
         if (upd_check.joinable()) upd_check.detach();  // owns its shared state; may still be waiting on the network
