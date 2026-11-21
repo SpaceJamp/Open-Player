@@ -41,7 +41,7 @@
 static const char* USAGE =
     "usage: open-player [video] [--model vsr.onnx] [--no-vsr] [--no-rtx] [--stats] [--screen N] [--fullscreen]\n"
     "no video (or double-clicked): pick one in a file dialog; cancel quits\n"
-    "--no-rtx: on Windows, upscale with our model instead of NVIDIA RTX VSR\n"
+    "--no-rtx: on Windows, upscale with Pixel Flow (our model) instead of NVIDIA RTX VSR\n"
     "--cpu-decode: decode on the CPU instead of NVDEC (upscaling stays on the GPU)\n"
     "--start T [--paused]: start T seconds in (paused); the player reopens itself this way after a settings change\n"
     "--collect DIR: on Windows with RTX VSR, save clips and their RTX upscale to DIR for train.py --pairs (2 GB cap)\n"
@@ -135,7 +135,7 @@ static int check(const char* model) {
 #ifdef HAVE_RTX_VSR
     bool rtx = RtxVsr::selftest() == 0;
     line(rtx ? "PASS" : "WARN", "RTX VSR", rtx ? "NVIDIA RTX Video Super Resolution works"
-                                              : "unavailable (GPU or driver): our model upscales instead");
+                                              : "unavailable (GPU or driver): Pixel Flow upscales instead");
 #endif
     if (!std::filesystem::exists(model)) line("FAIL", "Model", std::string(model) + " not found: train, then export");
     else line(Vsr::selftest(model) == 0 ? "PASS" : "FAIL", "Model", model);
@@ -300,12 +300,14 @@ int main(int argc, char** argv) {
         else if (!have_vsr) fprintf(stderr, "VSR unavailable (no %s?), playing without upscaling\n", model);
         vsr_on &= have_vsr;
         int s = have_vsr ? vsr.scale() : 1;
-        // NVIDIA RTX VSR goes first on Windows; our network when the GPU or driver lacks it, with --no-rtx, and on Linux.
+        // NVIDIA RTX VSR goes first on Windows; Pixel Flow when the GPU or driver lacks it, when chosen, and on Linux.
         // shortcut: sized from our model's factor and screen plan, so it needs the model too; RTX can scale freely
 #ifdef HAVE_RTX_VSR
         RtxVsr rtx;
-        bool use_rtx = have_vsr && want_rtx && rtx.open(w, h, nw * s, nh * s, st);
-        if (have_vsr) fprintf(stderr, "VSR: %s\n", use_rtx ? "NVIDIA RTX Video Super Resolution" : "our model");
+        bool rtx_tried = have_vsr && want_rtx;  // otherwise opened on first use (settings card, V after --no-vsr)
+        bool rtx_ok = rtx_tried && rtx.open(w, h, nw * s, nh * s, st);
+        bool use_rtx = rtx_ok;
+        if (have_vsr) fprintf(stderr, "VSR: %s\n", use_rtx ? "NVIDIA RTX Video Super Resolution" : "Pixel Flow");
         Collector col;
         bool collecting = collect_dir && use_rtx && col.open(collect_dir, w, h, nw * s, nh * s, s, st);
         if (collect_dir)
@@ -314,7 +316,7 @@ int main(int argc, char** argv) {
                                          "a video of at least 128x128, and %s writable and under 2 GB)\n",
                     collect_dir);
 #else
-        const bool use_rtx = false;
+        bool use_rtx = false, rtx_ok = false;
         (void)want_rtx;
         if (collect_dir) fprintf(stderr, "collect: needs NVIDIA RTX VSR, which this build doesn't have\n");
 #endif
@@ -413,11 +415,39 @@ int main(int argc, char** argv) {
             post(volume > 0 ? ICON_VOLUME : ICON_VOLUME_OFF, "Volume " + std::to_string((int)std::lround(volume * 100)) + "%",
                  notice_level(volume));
         };
-        auto toggle_vsr = [&] {  // paused: show the change now
-            if (!have_vsr) return;
-            vsr_on = !vsr_on, reset = true, step |= paused, drop_ahead();
-            post(ICON_SPARKLES, vsr_on ? "VSR on, " + std::to_string(s) + "x" : "VSR off");
+        auto dims = [](int a, int b) { return std::to_string(a) + "x" + std::to_string(b); };
+        auto describe_vsr = [&] {  // the info overlay's upscaler line
+            return !have_vsr ? std::string(worth_it ? "none" : "off (fills screen)")
+                   : use_rtx ? "NVIDIA RTX, " + dims(w, h) + " -> " + dims(nw * s, nh * s)  // full-size in
+                             : "Pixel Flow " + std::to_string(s) + "x, " + dims(nw, nh) + " -> " + dims(nw * s, nh * s) +
+                                   (shrink ? " (shrunk from " + dims(w, h) + ")" : "");
         };
+        std::string vsr_desc = describe_vsr();
+        // the upscaler V and the badge turn back on: the last one chosen in settings (or the default)
+        Upscaler chosen = cfg.upscaler != Upscaler::Off ? cfg.upscaler
+                          : saved.upscaler != Upscaler::Off ? saved.upscaler : Upscaler::Rtx;
+        // live switch; false when that upscaler can't run here (no model, or no RTX VSR on this GPU/driver)
+        auto set_upscaler = [&](Upscaler u) {
+            if (!have_vsr) return false;
+            bool ok = true;
+            if (u == Upscaler::Rtx) {
+#ifdef HAVE_RTX_VSR
+                if (!rtx_tried) rtx_tried = true, rtx_ok = rtx.open(w, h, nw * s, nh * s, st);
+#endif
+                if (!rtx_ok) u = Upscaler::PixelFlow, ok = false;
+            }
+            if (u != Upscaler::Off) chosen = u;
+            vsr_on = u != Upscaler::Off, use_rtx = u == Upscaler::Rtx;
+            reset = true, step |= paused, drop_ahead();  // paused: show the change now
+            vsr_desc = describe_vsr();
+            post(ICON_SPARKLES, !ok          ? std::string("NVIDIA RTX isn't available on this GPU or driver")
+                                : !vsr_on   ? std::string("VSR off")
+                                : use_rtx   ? "NVIDIA RTX, " + std::to_string(s) + "x"
+                                            : "Pixel Flow, " + std::to_string(s) + "x",
+                 -1, ok ? 1 : 2);
+            return ok;
+        };
+        auto toggle_vsr = [&] { set_upscaler(vsr_on ? Upscaler::Off : chosen); };  // V, the badge: not saved
         double seek_to = NAN;  // a key seek whose frame isn't shown yet: the next key seek builds on it
         auto key_seek = [&](double dt) {  // the seek bar shows its own position, so only keys post a notice
             double t = std::fmax(0, (std::isnan(seek_to) ? pos : seek_to) + dt);
@@ -472,11 +502,6 @@ int main(int argc, char** argv) {
                 },
                 nullptr, win, VIDEO_FILTERS, 2, nullptr, false);
         };
-        auto dims = [](int a, int b) { return std::to_string(a) + "x" + std::to_string(b); };
-        const std::string vsr_desc = !have_vsr ? (worth_it ? "none" : "off (fills screen)")
-                                     : use_rtx ? "NVIDIA RTX, " + dims(w, h) + " -> " + dims(nw * s, nh * s)  // full-size in
-                                               : std::to_string(s) + "x, " + dims(nw, nh) + " -> " + dims(nw * s, nh * s) +
-                                                     (shrink ? " (shrunk from " + dims(w, h) + ")" : "");
         SDL_SetWindowTitle(win, std::filesystem::path(path).filename().string().c_str());
         if (start_at >= 0) seek(start_position(start_at, dur));  // reopened after a settings change
         if (start_paused) set_paused(true), step = true;         // ... while paused: show that frame, stay paused
@@ -550,8 +575,9 @@ int main(int argc, char** argv) {
                     cudaEventRecord(p.ev[1], st);
 #ifdef HAVE_RTX_VSR
                     if (vsr_on && use_rtx && !(p.out = rtx.run(in))) {  // full-size input
-                        use_rtx = false;  // NVIDIA's upscaler failed: our model from here on
-                        fprintf(stderr, "VSR: NVIDIA RTX failed, switching to our model\n");
+                        use_rtx = rtx_ok = false;  // NVIDIA's upscaler failed: Pixel Flow from here on
+                        fprintf(stderr, "VSR: NVIDIA RTX failed, switching to Pixel Flow\n");
+                        vsr_desc = describe_vsr();
                         if (shrink) shrink_rgb(full, w, h, vsr.input(), nw, nh, st);
                     }
                     if (vsr_on && use_rtx) {
@@ -595,7 +621,7 @@ int main(int argc, char** argv) {
                 bool full = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN;
                 if (shown && !named) named = true, post(nullptr, std::filesystem::path(path).filename().string(), -1, 2);
                 auto acts = draw_ui({pos, dur, now(), last_mouse, paused, have_vsr, vsr_on, full, show_info, volume, info, recent,
-                                     ui_scale(ImGui::GetIO().DisplaySize.y), notice, s});
+                                     ui_scale(ImGui::GetIO().DisplaySize.y), notice, s, use_rtx});
                 if (full && ui_controls_hidden() && !ui_has_keyboard()) ImGui::SetMouseCursor(ImGuiMouseCursor_None);  // the SDL3 backend hides the OS cursor at its next NewFrame
                 ImGui::Render();
                 diag.ui.add((SDL_GetTicksNS() - ui0) / 1e6);

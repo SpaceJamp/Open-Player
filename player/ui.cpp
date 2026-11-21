@@ -234,8 +234,8 @@ void draw_notice(const UiNotice& n, float sc, float a) {
 }
 }  // namespace
 
-std::string vsr_badge_text(bool available, bool on, int factor) {
-    return !available ? "" : on ? "VSR " + std::to_string(factor) + "x" : "VSR off";
+std::string vsr_badge_text(bool available, bool on, bool rtx, int factor) {
+    return !available ? "" : on ? (rtx ? "RTX " : "PXF ") + std::to_string(factor) + "x" : "VSR off";
 }
 
 bool ui_animating(double now) {
@@ -290,7 +290,7 @@ std::vector<UiAction> draw_ui(const UiState& s) {
         const char* play_l = s.paused ? "Play" : "Pause";
         const char* vol_l = "Volume";
         const char* fs_l = s.fullscreen ? "Window" : "Fullscreen";
-        const std::string vsr_s = vsr_badge_text(s.vsr_available, s.vsr_on, s.vsr_factor);
+        const std::string vsr_s = vsr_badge_text(s.vsr_available, s.vsr_on, s.vsr_rtx, s.vsr_factor);
         const char* vsr_l = vsr_s.c_str();
         const float badge_px = 14 * sc, badge_w = text_size(badge_px, vsr_l).x + 20 * sc, badge_h = 24 * sc;
         float x = c0.x + pad;
@@ -494,7 +494,8 @@ int ui_selftest() {
     check(notice_alpha(4, n) == 0 && notice_alpha(5.5, n) == 1 && std::fabs(notice_alpha(6.15, n) - .5f) < 1e-3 && notice_alpha(6.4, n) == 0);
     n.shown_at = 6.2;  // a new notice replaces the fading one: full again
     check(notice_alpha(6.25, n) == 1);
-    check(vsr_badge_text(true, true, 4) == "VSR 4x" && vsr_badge_text(true, false, 4) == "VSR off" && vsr_badge_text(false, true, 4).empty());
+    check(vsr_badge_text(true, true, false, 2) == "PXF 2x" && vsr_badge_text(true, true, true, 2) == "RTX 2x" &&
+          vsr_badge_text(true, false, true, 2) == "VSR off" && vsr_badge_text(false, false, false, 2).empty());
     check(notice_level(0.8f) == 0.4f && notice_level(2.0f) == 1.0f && notice_level(-1) == 0);
     // headless ImGui: frames without any backend or present must not assert, themed or not, at every scale
     for (bool themed : {false, true}) {

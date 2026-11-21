@@ -44,8 +44,9 @@ struct UiState {
     float scale = 1;
     UiNotice notice;
     int vsr_factor = 2;
+    bool vsr_rtx = false;  // NVIDIA RTX VSR upscales (else Pixel Flow)
 };
-std::string vsr_badge_text(bool available, bool on, int factor);  // "VSR 2x", "VSR off"; "" without VSR
+std::string vsr_badge_text(bool available, bool on, bool rtx, int factor);  // "PXF 2x", "RTX 2x", "VSR off"; "" without VSR
 struct UiAction {
     enum Kind { TogglePause, Seek, SetVolume, ToggleVsr, ToggleFullscreen, ToggleInfo, Open, OpenPath, Quit } kind;
     double value = 0;  // Seek: seconds; SetVolume: 0..2
