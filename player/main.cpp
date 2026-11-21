@@ -35,6 +35,7 @@
 #include "collect.h"
 #include "settings.h"
 #include "build_info.h"  // generated: OPEN_PLAYER_BUILD
+#include "logfile.h"
 #ifdef HAVE_RTX_VSR
 #include "rtx_vsr.h"
 #endif
@@ -78,7 +79,7 @@ static std::vector<ScreenInfo> list_screens(std::vector<SDL_DisplayID>* ids = nu
 }
 
 static int check(const char* model) {
-    printf("Open Player %s\n", OPEN_PLAYER_BUILD);
+    printf("Open Player %s\nLog: %s\n", OPEN_PLAYER_BUILD, log_file().c_str());
     int fails = 0;
     auto line = [&](const char* verdict, const char* what, const std::string& detail) {
         printf("%-4s  %-16s %s\n", verdict, what, detail.c_str());
@@ -172,6 +173,11 @@ int main(int argc, char** argv) {
         else if (argv[i][0] != '-') (selftest || checking ? model : path) = argv[i];
         else return fputs(USAGE, stderr), 2;
     }
+    // open-player.log: everything below that goes to stderr is also saved (with the libraries' own messages)
+    if (start_log(log_file())) {
+        atexit(stop_log);
+        fprintf(stderr, "Open Player %s\n", OPEN_PLAYER_BUILD);
+    } else fprintf(stderr, "log: can't write %s, running without a log file\n", log_file().c_str());
     // saved settings, with this run's flags on top; only the settings card and the volume change `saved`
     Settings saved = load_settings(settings_file()), cfg = saved;
     if (!want_rtx && cfg.upscaler == Upscaler::Rtx) cfg.upscaler = Upscaler::PixelFlow;
@@ -469,6 +475,8 @@ int main(int argc, char** argv) {
         // replaces this process with the player run with args (open another video, reopen after a settings change)
         auto restart_with = [&](std::vector<std::string> args, const std::string& video) {
             if (volume_unsaved) save_settings(settings_file(), saved);
+            fprintf(stderr, "reopening: %s\n", video.c_str());
+            stop_log();  // the new process starts its own log; this one's last lines must reach the file first
 #ifdef _WIN32
             for (auto& a : args) a = quote_arg(a);  // _execv joins the arguments with spaces and doesn't quote them
 #endif
@@ -688,6 +696,7 @@ int main(int argc, char** argv) {
                     us.vsr_unavailable = worth_it ? "no Pixel Flow model (" + std::string(model) + ") found"
                                                   : "the video already fills the screen";
                 us.build = OPEN_PLAYER_BUILD;
+                us.log_path = log_file();
                 auto acts = draw_ui(us);
                 if (full && ui_controls_hidden() && !ui_has_keyboard()) ImGui::SetMouseCursor(ImGuiMouseCursor_None);  // the SDL3 backend hides the OS cursor at its next NewFrame
                 ImGui::Render();
