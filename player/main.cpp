@@ -33,6 +33,7 @@
 #include "ui.h"
 #include "vsr.h"
 #include "collect.h"
+#include "settings.h"
 #ifdef HAVE_RTX_VSR
 #include "rtx_vsr.h"
 #endif
@@ -42,6 +43,7 @@ static const char* USAGE =
     "no video (or double-clicked): pick one in a file dialog; cancel quits\n"
     "--no-rtx: on Windows, upscale with our model instead of NVIDIA RTX VSR\n"
     "--cpu-decode: decode on the CPU instead of NVDEC (upscaling stays on the GPU)\n"
+    "--start T [--paused]: start T seconds in (paused); the player reopens itself this way after a settings change\n"
     "--collect DIR: on Windows with RTX VSR, save clips and their RTX upscale to DIR for train.py --pairs (2 GB cap)\n"
     "--screen N: play on monitor N (1 = first; --check lists them); upscaling is planned for that monitor\n"
     "       open-player --selftest [vsr.onnx]   compare the TensorRT engine against PyTorch\n"
@@ -56,6 +58,24 @@ static std::string trt_version() {
 }
 
 // --check: tries each part of the pipeline on its own and says which one is broken.
+// The connected monitors in SDL's order (index + 1 = --screen N); ids, when given, gets their SDL ids.
+static std::vector<ScreenInfo> list_screens(std::vector<SDL_DisplayID>* ids = nullptr) {
+    std::vector<ScreenInfo> out;
+    if (ids) ids->clear();
+    int n = 0;
+    SDL_DisplayID* d = SDL_GetDisplays(&n);
+    for (int i = 0; i < n; i++) {
+        const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(d[i]);
+        const char* name = SDL_GetDisplayName(d[i]);
+        out.push_back({name ? name : "?", m ? (int)std::lround(m->w * m->pixel_density) : 0,
+                       m ? (int)std::lround(m->h * m->pixel_density) : 0, m ? m->refresh_rate : 0,
+                       d[i] == SDL_GetPrimaryDisplay()});
+        if (ids) ids->push_back(d[i]);
+    }
+    SDL_free(d);
+    return out;
+}
+
 static int check(const char* model) {
     int fails = 0;
     auto line = [&](const char* verdict, const char* what, const std::string& detail) {
@@ -98,18 +118,13 @@ static int check(const char* model) {
                                                                      : ", frames copied through the CPU (slower)"));
             } else line("FAIL", "Vulkan", "no Vulkan GPU for the window (on WSL install vulkan-dzn)");
         } else line("FAIL", "Window", SDL_GetError());
-        int nd = 0;
-        SDL_DisplayID* ids = SDL_GetDisplays(&nd);
-        for (int i = 0; i < nd; i++)
-            if (const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(ids[i])) {
-                const char* name = SDL_GetDisplayName(ids[i]);
-                char d[160];
-                snprintf(d, sizeof d, "%s, %ldx%ld @ %.0f Hz%s (--screen %d)", name ? name : "?",
-                         std::lround(m->w * m->pixel_density), std::lround(m->h * m->pixel_density), m->refresh_rate,
-                         ids[i] == SDL_GetPrimaryDisplay() ? ", primary" : "", i + 1);
-                line("INFO", ("Screen " + std::to_string(i + 1)).c_str(), d);
-            }
-        SDL_free(ids);
+        auto screens = list_screens();
+        for (size_t i = 0; i < screens.size(); i++) {
+            char d[160];
+            snprintf(d, sizeof d, "%s, %dx%d @ %.0f Hz%s (--screen %d)", screens[i].name.c_str(), screens[i].w,
+                     screens[i].h, screens[i].hz, screens[i].primary ? ", primary" : "", (int)i + 1);
+            line("INFO", ("Screen " + std::to_string(i + 1)).c_str(), d);
+        }
         SDL_AudioDeviceID dev = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, nullptr);
         line(dev ? "PASS" : "WARN", "Audio", dev ? SDL_GetAudioDeviceName(dev) : "no audio output: video plays silent");
         if (dev) SDL_CloseAudioDevice(dev);
@@ -134,10 +149,13 @@ static const SDL_DialogFileFilter VIDEO_FILTERS[] = {{"Videos", "mp4;mkv;webm;mo
 int main(int argc, char** argv) {
     const char *path = nullptr, *model = "vsr.onnx", *collect_dir = nullptr;
     bool vsr_on = true, selftest = false, checking = false, stats = false, fullscreen = false, want_rtx = true,
-         cpu_decode = false;
+         cpu_decode = false, start_paused = false;
     int screen = 0;  // --screen N, counted from 1; 0 = the primary display
+    double start_at = -1;  // --start T: seconds; < 0: from the beginning
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
+        else if (!strcmp(argv[i], "--start") && i + 1 < argc) start_at = std::max(0.0, atof(argv[++i]));
+        else if (!strcmp(argv[i], "--paused")) start_paused = true;
         else if (!strcmp(argv[i], "--screen") && i + 1 < argc) screen = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--collect") && i + 1 < argc) collect_dir = argv[++i];
         else if (!strcmp(argv[i], "--no-vsr")) vsr_on = false;
@@ -151,6 +169,14 @@ int main(int argc, char** argv) {
         else if (argv[i][0] != '-') (selftest || checking ? model : path) = argv[i];
         else return fputs(USAGE, stderr), 2;
     }
+    // saved settings, with this run's flags on top; only the settings card and the volume change `saved`
+    Settings saved = load_settings(settings_file()), cfg = saved;
+    if (!want_rtx && cfg.upscaler == Upscaler::Rtx) cfg.upscaler = Upscaler::PixelFlow;
+    if (!vsr_on) cfg.upscaler = Upscaler::Off;
+    cfg.cpu_decode |= cpu_decode;
+    cfg.start_fullscreen |= fullscreen;
+    vsr_on = cfg.upscaler != Upscaler::Off, want_rtx = cfg.upscaler == Upscaler::Rtx;
+    cpu_decode = cfg.cpu_decode, fullscreen = cfg.start_fullscreen;
     // double-clicked or "Open with": the working folder is anywhere, so also look next to the program
     std::string near_exe;
     if (!std::filesystem::exists(model) && std::filesystem::path(model).is_relative())
@@ -189,12 +215,16 @@ int main(int argc, char** argv) {
     }
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) return fprintf(stderr, "SDL: %s\n", SDL_GetError()), 1;
-    int n_disp = 0;
-    SDL_DisplayID* ids = SDL_GetDisplays(&n_disp);
+    std::vector<SDL_DisplayID> ids;
+    std::vector<ScreenInfo> screens = list_screens(&ids);
+    int n_disp = (int)ids.size();
+    if (!screen && !cfg.screen.empty()) {  // the saved monitor, found by name and size; gone: the primary
+        int i = match_screen(screens, cfg.screen);
+        if (i < n_disp && !screens[i].primary) screen = i + 1;
+    }
     if (screen > n_disp) fprintf(stderr, "no screen %d: this machine has %d, playing on the primary one\n", screen, n_disp),
                          screen = 0;
     SDL_DisplayID screen_id = !screen ? SDL_GetPrimaryDisplay() : screen > 0 && screen <= n_disp ? ids[screen - 1] : 0;
-    SDL_free(ids);
     if (!screen_id) return fprintf(stderr, "no screen %d: this machine has %d (see --check)\n", screen, n_disp), 2;
     // hidden until we know the video size; Vulkan needs the window first to choose the GPU
     SDL_Window* win = SDL_CreateWindow("Open Player", 1280, 720,
@@ -296,7 +326,7 @@ int main(int argc, char** argv) {
         bool running = true, paused = false, reset = true, step = false, size_warned = false;
         bool dirty = true;   // redraw only when the picture or the UI changed
         bool fresh = false;  // a new frame is waiting to be converted and copied (redraws of the UI alone skip that)
-        bool show_info = false, last_vis = false, named = false;
+        bool show_info = cfg.info_at_start, last_vis = false, named = false;
         int ui_redraw = 0;  // a few redraws after input, so ImGui's hover and click states catch up
         std::string info;   // info overlay, refreshed once a second
         std::error_code ec;
@@ -305,7 +335,10 @@ int main(int argc, char** argv) {
         save_recent(recent_file(), recent);
         recent = existing_only(recent);  // once: on WSL each check of a /mnt/c path is slow
         int serial = media.serial(), sw = 0, sh = 0, frames_shown = 0;
-        float volume = 1;
+        float volume = cfg.remember_volume ? cfg.volume : 1;
+        media.set_volume(volume);
+        bool volume_unsaved = false;  // saved at most once a second while it changes, and on quit
+        double volume_saved_at = 0;
         const __half* shown = nullptr;
         double pos = 0, wall_base = 0, last_mouse = -10, last_report = 0;
         Diag diag;
@@ -376,6 +409,7 @@ int main(int argc, char** argv) {
         };
         auto set_volume = [&](float v) {
             media.set_volume(volume = std::clamp(v, 0.f, 2.f));
+            if (saved.remember_volume) saved.volume = volume, volume_unsaved = true;
             post(volume > 0 ? ICON_VOLUME : ICON_VOLUME_OFF, "Volume " + std::to_string((int)std::lround(volume * 100)) + "%",
                  notice_level(volume));
         };
@@ -393,6 +427,22 @@ int main(int argc, char** argv) {
             post(dt > 0 ? ICON_FORWARD_5 : ICON_BACKWARD_5, seek_notice_text(dt, t, dur));
         };
         auto toggle_fullscreen = [&] { SDL_SetWindowFullscreen(win, !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN)); };
+        // replaces this process with the player run with args (open another video, reopen after a settings change)
+        auto restart_with = [&](std::vector<std::string> args, const std::string& video) {
+            if (volume_unsaved) save_settings(settings_file(), saved);
+#ifdef _WIN32
+            for (auto& a : args) a = quote_arg(a);  // _execv joins the arguments with spaces and doesn't quote them
+#endif
+            std::vector<char*> cargs;
+            for (auto& a : args) cargs.push_back(a.data());
+            cargs.push_back(nullptr);
+#ifdef _WIN32
+            _execv(exe_path().c_str(), cargs.data());
+#else
+            execv("/proc/self/exe", cargs.data());
+#endif
+            fprintf(stderr, "can't open %s: restart failed (%s)\n", video.c_str(), strerror(errno));
+        };
         // Opening another file restarts the player on it with the same arguments: every buffer, the engine and
         // the window size depend on the video, so a fresh start is the simple, safe way to switch.
         auto open_video = [&](const std::string& p) {
@@ -409,18 +459,7 @@ int main(int argc, char** argv) {
                        args.end());
             if (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) args.push_back("--fullscreen");
             if (have_vsr && !vsr_on) args.push_back("--no-vsr");
-#ifdef _WIN32
-            for (auto& a : args) a = quote_arg(a);  // _execv joins the arguments with spaces and doesn't quote them
-#endif
-            std::vector<char*> cargs;
-            for (auto& a : args) cargs.push_back(a.data());
-            cargs.push_back(nullptr);
-#ifdef _WIN32
-            _execv(exe_path().c_str(), cargs.data());
-#else
-            execv("/proc/self/exe", cargs.data());
-#endif
-            fprintf(stderr, "can't open %s: restart failed (%s)\n", p.c_str(), strerror(errno));
+            restart_with(args, p);
         };
         // the dialog answers from another thread: hand the path to the main loop as an event
         auto show_open_dialog = [&] {
@@ -439,8 +478,12 @@ int main(int argc, char** argv) {
                                                : std::to_string(s) + "x, " + dims(nw, nh) + " -> " + dims(nw * s, nh * s) +
                                                      (shrink ? " (shrunk from " + dims(w, h) + ")" : "");
         SDL_SetWindowTitle(win, std::filesystem::path(path).filename().string().c_str());
+        if (start_at >= 0) seek(start_position(start_at, dur));  // reopened after a settings change
+        if (start_paused) set_paused(true), step = true;         // ... while paused: show that frame, stay paused
 
         while (running) {
+            if (volume_unsaved && now() - volume_saved_at >= 1)
+                save_settings(settings_file(), saved), volume_unsaved = false, volume_saved_at = now();
             SDL_Event e;
             while (SDL_PollEvent(&e)) {
                 if (ui) ImGui_ImplSDL3_ProcessEvent(&e), ui_redraw = 2;
@@ -629,6 +672,7 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        if (volume_unsaved) save_settings(settings_file(), saved);
         drop_ahead();
         for (auto& e : rgba_ev) cudaEventDestroy(e);
         cudaStreamDestroy(ds);

@@ -122,6 +122,16 @@ volume slider would duplicate the capsule's.
   card has focus go to the card (the existing `ui_has_keyboard` rule).
 - Scales with the UI scale like the rest (sharp at 4K fullscreen).
 
+### About (added by the user during the build, 2026-11-21)
+
+- The last section of the card: "Open Player", the build number, and the upscaler names (Pixel Flow; NVIDIA
+  RTX VSR with NVIDIA's credit line when the build has it). The user asked that the build number be shown
+  "going forward", so every build carries one.
+- Build number (builder's call): `build <commits> (<short hash>)`, from `git rev-list --count HEAD` and
+  `git rev-parse --short HEAD`, plus `-modified` when the working tree has uncommitted changes; stamped at every
+  build (not only at configure time) into a generated header. Without git (a source zip): `build unknown`.
+- The same text in `--check` (first line) and a new `--version` flag.
+
 ## Saving
 
 - `settings.txt` next to `recent.txt` (`$XDG_CONFIG_HOME/open-player/`, `%APPDATA%\open-player\` on Windows,
