@@ -12,6 +12,7 @@
 
 #include "collect.h"
 #include "settings.h"
+#include "logfile.h"
 #include "imgui.h"
 #include "imgui_internal.h"  // the self-test finds the volume panel's window
 #include "theme.h"
@@ -454,7 +455,7 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
     card_heading(ICON_INFO, "ABOUT", sc);
     ImGui::PushStyleColor(ImGuiCol_Text, COL_DIM);
     ImGui::PushTextWrapPos(0);
-    ImGui::TextUnformatted(about_text(s.build).c_str());
+    ImGui::TextUnformatted(about_text(s.build, s.log_path).c_str());
     ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
 
@@ -470,14 +471,14 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
 }
 }  // namespace
 
-std::string about_text(const std::string& build) {
+std::string about_text(const std::string& build, const std::string& log) {
     std::string t = "Open Player " + (build.empty() ? std::string("build unknown") : build) +
                     "\nPixel Flow (PXF): Open Player's own upscaler.";
 #ifdef HAVE_RTX_VSR
     t += "\nThis software uses the NVIDIA RTX Video SDK. NVIDIA, GeForce RTX and NVIDIA RTX are trademarks of "
          "NVIDIA Corporation.";
 #endif
-    return t + "\nLicensed under the GNU AGPL v3.";
+    return t + "\nLicensed under the GNU AGPL v3." + (log.empty() ? "" : "\nLog: " + log);
 }
 
 std::string vsr_badge_text(bool available, bool on, bool rtx, int factor) {
@@ -874,9 +875,9 @@ int ui_selftest() {
                 check(click(20, 20) == 1);                                              // outside: closes
                 check(click(w->Pos.x + w->Size.x - 14 - 16, w->Pos.y + 12 + 16) == 1);  // the X
             }
-            std::string about = about_text("build 7 (abc1234)");  // what the card's About section shows
+            std::string about = about_text("build 7 (abc1234)", "C:/u/open-player.log");  // what the card's About section shows
             check(about.find("Open Player build 7 (abc1234)") != std::string::npos &&
-                  about.find("Pixel Flow") != std::string::npos);
+                  about.find("Pixel Flow") != std::string::npos && about.find("Log: C:/u/open-player.log") != std::string::npos);
             io.AddMousePosEvent(5, 5);
         }
         // shortcut keys stay with the menu while it's open (Esc closes it instead of quitting); the menu draws
@@ -919,6 +920,7 @@ int ui_selftest() {
 
 #undef check
     fails += settings_selftest();
+    fails += log_selftest();
     if (!fails) printf("ui checks passed\n");
     return fails ? 1 : 0;
 }

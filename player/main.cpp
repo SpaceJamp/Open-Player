@@ -35,6 +35,7 @@
 #include "collect.h"
 #include "settings.h"
 #include "build_info.h"  // generated: OPEN_PLAYER_BUILD
+#include "logfile.h"
 #ifdef HAVE_RTX_VSR
 #include "rtx_vsr.h"
 #endif
@@ -78,7 +79,7 @@ static std::vector<ScreenInfo> list_screens(std::vector<SDL_DisplayID>* ids = nu
 }
 
 static int check(const char* model) {
-    printf("Open Player %s\n", OPEN_PLAYER_BUILD);
+    printf("Open Player %s\nLog: %s\n", OPEN_PLAYER_BUILD, log_file().c_str());
     int fails = 0;
     auto line = [&](const char* verdict, const char* what, const std::string& detail) {
         printf("%-4s  %-16s %s\n", verdict, what, detail.c_str());
@@ -192,6 +193,13 @@ int main(int argc, char** argv) {
         }
     if (selftest) return Vsr::selftest(model);
     if (checking) return check(model);
+    // open-player.log, for playback only (a --check must not push the last crash's log out to .old.log): everything
+    // below that goes to stderr is also saved, with the libraries' own messages
+    bool logging = start_log(log_file());
+    if (logging) {
+        atexit(stop_log);
+        fprintf(stderr, "Open Player %s\n", OPEN_PLAYER_BUILD);
+    } else fprintf(stderr, "log: can't write %s, running without a log file\n", log_file().c_str());
     // double-clicked with no video: ask for one, like the Open button (cancel quits)
     struct Pick {
         std::string file;
@@ -469,6 +477,8 @@ int main(int argc, char** argv) {
         // replaces this process with the player run with args (open another video, reopen after a settings change)
         auto restart_with = [&](std::vector<std::string> args, const std::string& video) {
             if (volume_unsaved) save_settings(settings_file(), saved);
+            fprintf(stderr, "reopening: %s\n", video.c_str());
+            stop_log();  // the new process starts its own log; this one's last lines must reach the file first
 #ifdef _WIN32
             for (auto& a : args) a = quote_arg(a);  // _execv joins the arguments with spaces and doesn't quote them
 #endif
@@ -480,7 +490,9 @@ int main(int argc, char** argv) {
 #else
             execv("/proc/self/exe", cargs.data());
 #endif
-            fprintf(stderr, "can't open %s: restart failed (%s)\n", video.c_str(), strerror(errno));
+            int err = errno;
+            if (logging) start_log(log_file(), true);  // still this run: carry on in the same log
+            fprintf(stderr, "can't open %s: restart failed (%s)\n", video.c_str(), strerror(err));
         };
         // Opening another file restarts the player on it with the same arguments: every buffer, the engine and
         // the window size depend on the video, so a fresh start is the simple, safe way to switch.
@@ -688,6 +700,7 @@ int main(int argc, char** argv) {
                     us.vsr_unavailable = worth_it ? "no Pixel Flow model (" + std::string(model) + ") found"
                                                   : "the video already fills the screen";
                 us.build = OPEN_PLAYER_BUILD;
+                if (logging) us.log_path = log_file();
                 auto acts = draw_ui(us);
                 if (full && ui_controls_hidden() && !ui_has_keyboard()) ImGui::SetMouseCursor(ImGuiMouseCursor_None);  // the SDL3 backend hides the OS cursor at its next NewFrame
                 ImGui::Render();

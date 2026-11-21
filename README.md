@@ -6,6 +6,13 @@ An open video player for Linux and Windows that upscales video on NVIDIA GPUs. O
 Video Super Resolution; everywhere it can use its own video super-resolution network, **Pixel Flow** (PXF), which is
 trained, exported and played entirely from this repo.
 
+> [!IMPORTANT]
+> **Open Player does not come with a Pixel Flow model, and never will.** Every user trains their own Pixel Flow
+> on their own videos with `train.py` and exports it to `vsr.onnx` (see [2. Train a model](#2-train-a-model)).
+> No trained model is in this repo, in its releases, or in any download. Without a `vsr.onnx` the player still
+> plays video, but doesn't upscale it: today that includes NVIDIA RTX VSR on Windows, which is sized from the
+> model's plan.
+
 ```
 decode (FFmpeg, NVDEC) -> YUV->RGB (CUDA) -> upscale: RTX VSR or Pixel Flow (TensorRT) -> RGBA (CUDA) -> Vulkan -> window
 ```
@@ -16,7 +23,8 @@ attention, except in `lean`) add detail before a pixel-shuffle 2x output. A scen
 Three sizes: Pixel Flow (`standard`, about 317K parameters), Pixel Flow Fast (`fast`) and Pixel Flow Lean
 (`lean`).
 
-No trained model ships with the repo: train one on your own videos (step 2).
+Again: **no trained model ships.** You train your own Pixel Flow (step 2); the quality depends on your videos and
+how long you train.
 
 ## 1. Setup
 
@@ -47,6 +55,9 @@ login, so it only checks for them:
   (its license keeps it out of this repo; without it the player builds with Pixel Flow only)
 
 ## 2. Train a model
+
+This step is not optional if you want Pixel Flow: **there is no ready-made model to download.** Your Pixel Flow is
+the one you train here.
 
 Put videos in `videos/` next to `train.py` (subfolders are fine), or pass their folder:
 
@@ -136,6 +147,13 @@ on the window, or use Open, to switch videos.
 Choices are saved in `settings.txt` next to the recent-files list (`%APPDATA%\open-player\` on Windows,
 `~/.config/open-player/` on Linux). `V` and the badge only compare for the moment; they don't change the saved
 upscaler.
+
+**Log file.** Everything the player writes to its error output (its messages and errors, plus FFmpeg's, SDL's,
+TensorRT's and NVIDIA's; not the `--stats` lines) is saved with a timestamp per line to `open-player.log` in the same folder; the run before is kept as
+`open-player.old.log`, so a crash's log survives the next start. A crash adds a last `crashed: ...` line. One run's
+log stops at 5 MB. `--check` and Settings > About show the path; attach the file when you report a problem. It
+stays on your PC and is never sent anywhere; it contains the paths of the videos you played, so look it over before
+you post it publicly.
 
 | Key | Action |
 |---|---|
