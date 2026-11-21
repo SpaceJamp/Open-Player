@@ -1,6 +1,7 @@
 // Open Player: video player that upscales with our VSR network on the GPU.
 // decode (NVDEC) -> YUV->RGB (CUDA) -> VSR (TensorRT) -> RGBA (CUDA) -> Vulkan blit to the window
 #include <SDL3/SDL.h>
+#include <atomic>
 #include <cuda.h>
 #ifdef _WIN32
 #define NOMINMAX
@@ -37,7 +38,8 @@
 #endif
 
 static const char* USAGE =
-    "usage: open-player <video> [--model vsr.onnx] [--no-vsr] [--no-rtx] [--stats] [--screen N] [--fullscreen]\n"
+    "usage: open-player [video] [--model vsr.onnx] [--no-vsr] [--no-rtx] [--stats] [--screen N] [--fullscreen]\n"
+    "no video (or double-clicked): pick one in a file dialog; cancel quits\n"
     "--no-rtx: on Windows, upscale with our model instead of NVIDIA RTX VSR\n"
     "--collect DIR: on Windows with RTX VSR, save clips and their RTX upscale to DIR for train.py --pairs (2 GB cap)\n"
     "--screen N: play on monitor N (1 = first; --check lists them); upscaling is planned for that monitor\n"
@@ -125,6 +127,9 @@ static int check(const char* model) {
     return fails ? 1 : 0;
 }
 
+static const SDL_DialogFileFilter VIDEO_FILTERS[] = {{"Videos", "mp4;mkv;webm;mov;avi;m4v;ts;h264;hevc;wmv;ogv"},
+                                                      {"All files", "*"}};
+
 int main(int argc, char** argv) {
     const char *path = nullptr, *model = "vsr.onnx", *collect_dir = nullptr;
     bool vsr_on = true, selftest = false, checking = false, stats = false, fullscreen = false, want_rtx = true;
@@ -155,7 +160,30 @@ int main(int argc, char** argv) {
         }
     if (selftest) return Vsr::selftest(model);
     if (checking) return check(model);
-    if (!path) return fputs(USAGE, stderr), 2;
+    // double-clicked with no video: ask for one, like the Open button (cancel quits)
+    struct Pick {
+        std::string file;
+        std::atomic<bool> done{false};
+        bool failed = false;
+    } pick;
+    if (!path && (stats || getenv("SSH_CONNECTION"))) return fputs(USAGE, stderr), 2;  // never wait on a dialog
+    if (!path) {
+        if (!SDL_Init(SDL_INIT_VIDEO)) return fprintf(stderr, "SDL: %s\n%s", SDL_GetError(), USAGE), 2;
+        const char* drv = SDL_GetCurrentVideoDriver();  // headless (tests): no one to answer a dialog
+        if (drv && (!strcmp(drv, "offscreen") || !strcmp(drv, "dummy"))) return fputs(USAGE, stderr), 2;
+        SDL_ShowOpenFileDialog(
+            [](void* u, const char* const* files, int) {  // may answer from another thread
+                auto* p = (Pick*)u;
+                if (files && files[0]) p->file = files[0];
+                if (!files) p->failed = true, fprintf(stderr, "no file dialog (%s)\n%s", SDL_GetError(), USAGE);
+                p->done = true;
+            },
+            &pick, nullptr, VIDEO_FILTERS, 2, nullptr, false);
+        for (SDL_Event e; !pick.done;)  // Linux's portal answers through events
+            if (SDL_WaitEventTimeout(&e, 50) && e.type == SDL_EVENT_QUIT) return 0;  // Ctrl+C
+        if (pick.file.empty()) return pick.failed ? 2 : 0;
+        path = pick.file.c_str();
+    }
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) return fprintf(stderr, "SDL: %s\n", SDL_GetError()), 1;
     int n_disp = 0;
@@ -393,8 +421,6 @@ int main(int argc, char** argv) {
         };
         // the dialog answers from another thread: hand the path to the main loop as an event
         auto show_open_dialog = [&] {
-            static const SDL_DialogFileFilter filters[] = {
-                {"Videos", "mp4;mkv;webm;mov;avi;m4v;ts;h264;hevc;wmv;ogv"}, {"All files", "*"}};
             SDL_ShowOpenFileDialog(
                 [](void*, const char* const* files, int) {
                     if (!files || !files[0]) return;  // cancelled or failed
@@ -402,7 +428,7 @@ int main(int argc, char** argv) {
                     ev.user.data1 = SDL_strdup(files[0]);
                     SDL_PushEvent(&ev);
                 },
-                nullptr, win, filters, 2, nullptr, false);
+                nullptr, win, VIDEO_FILTERS, 2, nullptr, false);
         };
         auto dims = [](int a, int b) { return std::to_string(a) + "x" + std::to_string(b); };
         const std::string vsr_desc = !have_vsr ? (worth_it ? "none" : "off (fills screen)")

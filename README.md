@@ -87,6 +87,7 @@ build-windows.bat                                         # Windows; the first r
 
 ```bash
 open-player movie.mkv                    # finds vsr.onnx in the current folder or next to the program
+open-player                              # no video (or double-clicked): asks for one in a file dialog
 open-player --check vsr.onnx             # PASS/WARN/FAIL for CUDA, NVDEC, Vulkan, audio, TensorRT, RTX VSR, the model
 open-player --selftest vsr.onnx          # TensorRT output vs PyTorch
 ```
