@@ -88,6 +88,11 @@ int build_number(const std::string& b) {
 bool should_offer(int current, const UpdateInfo& u) { return current > 0 && u.build > current; }
 
 bool host_allowed(const std::string& url) {
+    return host_in(url, {"api.github.com", "github.com", "release-assets.githubusercontent.com",
+                         "objects.githubusercontent.com"});
+}
+
+bool host_in(const std::string& url, const std::vector<std::string>& hosts) {
     const std::string p = "https://";
     if (url.compare(0, p.size(), p)) return false;
     size_t e = url.find_first_of("/?#", p.size());
@@ -98,10 +103,7 @@ bool host_allowed(const std::string& url) {
         if (host.substr(c) != ":443") return false;
         host.resize(c);
     }
-    for (const char* ok : {"api.github.com", "github.com", "release-assets.githubusercontent.com",
-                           "objects.githubusercontent.com"})
-        if (host == ok) return true;
-    return false;
+    return std::find(hosts.begin(), hosts.end(), host) != hosts.end();
 }
 
 #ifdef _WIN32
@@ -161,7 +163,123 @@ bool verify_file_sha256(const std::string& path, const std::string& want) {
     BCryptDestroyHash(hh);
     return ok && hex(h, 32) == want;
 }
+#include <winhttp.h>
+
+static std::wstring wide(const std::string& s) {
+    std::wstring w(MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), w.data(), (int)w.size());
+    return w;
+}
+
+// One GET with redirects followed by hand, each target checked against hosts before it is contacted.
+static bool fetch(std::string url, uint64_t cap, const std::vector<std::string>& hosts,
+                  const std::function<bool(const char*, DWORD)>& sink,
+                  const std::function<void(uint64_t, uint64_t)>& progress, const std::atomic<bool>* cancel,
+                  std::string& error) {
+    HINTERNET ses = WinHttpOpen(L"Open-Player-Updater", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
+                                WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!ses) return error = "no network access", false;
+    bool ok = false;
+    for (int hop = 0; hop < 6 && !ok; hop++) {
+        if (!host_in(url, hosts)) {
+            error = "refused a download from an unexpected place";
+            break;
+        }
+        std::wstring wurl = wide(url);
+        URL_COMPONENTS uc{sizeof uc};
+        wchar_t host[256] = {}, path[4096] = {};
+        uc.lpszHostName = host, uc.dwHostNameLength = 255, uc.lpszUrlPath = path, uc.dwUrlPathLength = 4095;
+        if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &uc)) {
+            error = "bad address";
+            break;
+        }
+        HINTERNET con = WinHttpConnect(ses, host, uc.nPort, 0);
+        HINTERNET req = con ? WinHttpOpenRequest(con, L"GET", path, nullptr, WINHTTP_NO_REFERER,
+                                                 WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)
+                            : nullptr;
+        DWORD no_redirects = WINHTTP_DISABLE_REDIRECTS, status = 0, sz = sizeof status;
+        bool sent = req && WinHttpSetOption(req, WINHTTP_OPTION_DISABLE_FEATURE, &no_redirects, sizeof no_redirects) &&
+                    WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+                    WinHttpReceiveResponse(req, nullptr) &&
+                    WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                        WINHTTP_HEADER_NAME_BY_INDEX, &status, &sz, WINHTTP_NO_HEADER_INDEX);
+        if (!sent) error = "couldn't connect";
+        else if (status >= 300 && status < 400) {  // follow it only after checking where it goes
+            wchar_t loc[4096] = {};
+            DWORD n = sizeof loc;
+            if (WinHttpQueryHeaders(req, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX, loc, &n,
+                                    WINHTTP_NO_HEADER_INDEX)) {
+                char u8[8192];
+                int m = WideCharToMultiByte(CP_UTF8, 0, loc, -1, u8, sizeof u8, nullptr, nullptr);
+                url = m > 0 ? u8 : "";
+            } else url.clear();
+        } else if (status != 200) error = "the server answered " + std::to_string(status);
+        else {
+            DWORD64 total = 0;
+            wchar_t len[32] = {};
+            DWORD n = sizeof len;
+            if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_HEADER_NAME_BY_INDEX, len, &n,
+                                    WINHTTP_NO_HEADER_INDEX))
+                total = _wcstoui64(len, nullptr, 10);
+            if (total > cap) error = "the download is larger than expected";
+            else {
+                std::vector<char> buf(1 << 16);
+                uint64_t got = 0;
+                DWORD r = 0;
+                for (ok = true; ok;) {
+                    if (cancel && *cancel) { error = "cancelled", ok = false; break; }
+                    if (!WinHttpReadData(req, buf.data(), (DWORD)buf.size(), &r)) { error = "the download broke off", ok = false; break; }
+                    if (!r) break;
+                    if ((got += r) > cap) { error = "the download is larger than expected", ok = false; break; }
+                    if (!sink(buf.data(), r)) { error = "couldn't write the download (disk full?)", ok = false; break; }
+                    if (progress) progress(got, total);
+                }
+                if (ok && total && got != total) error = "the download broke off", ok = false;
+                hop = 99;  // a 200 ends the redirect chain either way
+            }
+        }
+        if (req) WinHttpCloseHandle(req);
+        if (con) WinHttpCloseHandle(con);
+        if (!error.empty()) break;
+    }
+    if (!ok && error.empty()) error = "too many redirects";
+    WinHttpCloseHandle(ses);
+    return ok;
+}
+
+bool https_download(const std::string& url, const std::string& to, uint64_t cap, const std::vector<std::string>& hosts,
+                    const std::function<void(uint64_t, uint64_t)>& progress, const std::atomic<bool>& cancel,
+                    std::string& error) {
+    auto part = std::filesystem::u8path(to + ".part");
+    std::error_code ec;
+    bool ok;
+    {
+        std::ofstream f(part, std::ios::binary | std::ios::trunc);
+        if (!f) return error = "couldn't write the download", false;
+        ok = fetch(url, cap, hosts, [&](const char* p, DWORD n) { return (bool)f.write(p, n); }, progress, &cancel,
+                   error);
+        f.close();
+        if (ok && !f) ok = false, error = "couldn't write the download (disk full?)";
+    }
+    if (ok) std::filesystem::rename(part, std::filesystem::u8path(to), ec), ok = !ec;
+    if (!ok) std::filesystem::remove(part, ec);
+    return ok;
+}
+
+bool https_get(const std::string& url, uint64_t cap, const std::vector<std::string>& hosts, std::string& body,
+               std::string& error) {
+    body.clear();
+    return fetch(url, cap, hosts, [&](const char* p, DWORD n) { return body.append(p, n), true; }, nullptr, nullptr,
+                 error);
+}
 #else
+bool https_download(const std::string&, const std::string&, uint64_t, const std::vector<std::string>&,
+                    const std::function<void(uint64_t, uint64_t)>&, const std::atomic<bool>&, std::string& error) {
+    return error = "downloads are Windows-only", false;
+}
+bool https_get(const std::string&, uint64_t, const std::vector<std::string>&, std::string&, std::string& error) {
+    return error = "downloads are Windows-only", false;
+}
 bool verify_signature(const unsigned char*, const std::string&, const std::string&) { return false; }
 std::string sha256_hex(const std::string&) { return ""; }
 bool verify_file_sha256(const std::string&, const std::string&) { return false; }

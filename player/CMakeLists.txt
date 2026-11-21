@@ -55,7 +55,7 @@ target_include_directories(open-player PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(open-player PRIVATE ${CMAKE_DL_LIBS} CUDA::cuda_driver Vulkan::Vulkan SDL3::SDL3 ffmpeg ${NVINFER} ${NVONNXPARSER})
 if(WIN32)
   target_link_libraries(open-player PRIVATE CUDA::cudart_static)  # one DLL less to ship
-  target_link_libraries(open-player PRIVATE bcrypt crypt32)  # SHA-256, ECDSA and base64 for update checks
+  target_link_libraries(open-player PRIVATE bcrypt crypt32 winhttp)  # update checks and downloads
   target_link_libraries(open-player PRIVATE delayimp version)
   # TensorRT is loaded only when needed and from known folders (trt_loader.cpp), so the player starts without it
   target_link_options(open-player PRIVATE /DELAYLOAD:nvinfer_11.dll /DELAYLOAD:nvonnxparser_11.dll)

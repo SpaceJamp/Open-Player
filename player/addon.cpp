@@ -5,9 +5,96 @@
 #include <fstream>
 #include <vector>
 
+#include "trt_loader.h"
 #include "update.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace fs = std::filesystem;
+
+#ifdef _WIN32
+// Windows' own tar.exe (never one from PATH or the current folder); it refuses ".." and absolute entry names.
+static bool run_tar(const fs::path& wheel, const fs::path& into) {
+    wchar_t sys[MAX_PATH];
+    if (!GetSystemDirectoryW(sys, MAX_PATH)) return false;
+    std::wstring exe = std::wstring(sys) + L"\\tar.exe";
+    std::wstring cmd = L"\"" + exe + L"\" -xf \"" + wheel.wstring() + L"\" -C \"" + into.wstring() +
+                       L"\" \"tensorrt_libs/*.dll\" \"*.dist-info/LICENSE.txt\"";
+    STARTUPINFOW si{sizeof si};
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
+        return false;
+    WaitForSingleObject(pi.hProcess, INFINITE);  // its exit code is ignored: refused entries make it non-zero
+    CloseHandle(pi.hThread), CloseHandle(pi.hProcess);
+    return true;
+}
+#endif
+
+bool extract_tensorrt(const std::string& wheel, const std::string& dir, std::string& error) {
+#ifdef _WIN32
+    fs::path d = fs::u8path(dir), stage = d, raw;
+    stage += ".new";
+    raw = stage / "raw";
+    std::error_code ec;
+    fs::remove_all(stage, ec);
+    auto fail = [&](const std::string& why) {
+        fs::remove_all(stage, ec);
+        return error = why, false;
+    };
+    if (!fs::create_directories(raw, ec) || ec) return fail("can't create " + stage.u8string());
+    if (!run_tar(fs::u8path(wheel), raw)) return fail("couldn't run Windows' tar.exe");
+    // keep only what we asked for, flattened; anything else that appeared is dropped with raw/
+    int dlls = 0;
+    for (auto& e : fs::directory_iterator(raw / "tensorrt_libs", ec))
+        if (e.is_regular_file(ec) && e.path().extension() == ".dll")
+            fs::rename(e.path(), stage / e.path().filename(), ec), dlls += !ec;
+    for (auto& e : fs::directory_iterator(raw, ec))
+        if (e.path().extension() == ".dist-info") fs::rename(e.path() / "LICENSE.txt", stage / "LICENSE.txt", ec);
+    fs::remove_all(raw, ec);
+    if (!dlls) return fail("no TensorRT DLLs in the download");
+    fs::remove_all(d, ec);  // the old add-on: fails while its DLLs are loaded
+    if (ec) return fail("close and reopen the player first: the current TensorRT is in use");
+    fs::rename(stage, d, ec);
+    return ec ? fail("can't move the add-on into place") : true;
+#else
+    (void)wheel, (void)dir;
+    return error = "the add-on is Windows-only", false;
+#endif
+}
+
+bool install_tensorrt_addon(const std::function<void(uint64_t, uint64_t)>& progress, const std::atomic<bool>& cancel,
+                            std::string& error) {
+    fs::path base = fs::u8path(user_data_dir()), wheel = base / "tensorrt-download.whl";
+    std::error_code ec;
+    fs::create_directories(base, ec);
+    // the download (2 GB) and the unpacked DLLs (2.3 GB) are both on disk for a moment
+    if (fs::space(base, ec).available < 4700ull << 20 && !ec) return error = "needs 4.7 GB of free disk space", false;
+    bool ok = https_download(TRT_WHEEL_URL, wheel.u8string(), TRT_WHEEL_SIZE, {"pypi.nvidia.com"}, progress, cancel,
+                             error);
+    if (ok && !verify_file_sha256(wheel.u8string(), TRT_WHEEL_SHA256))
+        ok = false, error = "the download doesn't match NVIDIA's published file";
+    if (ok) ok = extract_tensorrt(wheel.u8string(), addon_dir(), error);
+    if (ok && !fs::exists(fs::u8path(addon_dir()) / "nvinfer_11.dll", ec))
+        ok = false, error = "the add-on is incomplete";
+    fs::remove(wheel, ec);
+    return ok;
+}
+
+void remove_tensorrt_addon() {
+    std::error_code ec;
+    fs::remove_all(fs::u8path(addon_dir()), ec);
+    if (ec) std::ofstream(fs::u8path(user_data_dir()) / "remove-tensorrt.txt") << "remove at next start\n";
+}
+
+void finish_pending_addon_removal() {
+    std::error_code ec;
+    fs::path marker = fs::u8path(user_data_dir()) / "remove-tensorrt.txt";
+    if (!fs::exists(marker, ec)) return;
+    fs::remove_all(fs::u8path(addon_dir()), ec);
+    if (!ec) fs::remove(marker, ec);
+}
 
 // --- test helper: a stored (uncompressed) zip with any entry names, including hostile ones ---
 static uint32_t crc32(const std::string& s) {

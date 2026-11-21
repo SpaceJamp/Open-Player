@@ -3,6 +3,9 @@
 // update.json = {"build": N, "file": "OpenPlayer-Setup-N.exe", "sha256": "<64 hex>", "notes": "..."}, signed with
 // the maintainer's key (ECDSA P-256 over SHA-256 of update.json's exact bytes, raw r||s, base64). Nothing is
 // downloaded from or run off anything that fails these checks.
+#include <atomic>
+#include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -20,4 +23,11 @@ bool host_in(const std::string& url, const std::vector<std::string>& hosts);  //
 bool verify_signature(const unsigned char pubkey[64], const std::string& msg, const std::string& sig_b64);
 std::string sha256_hex(const std::string& data);  // lowercase hex; "" where unavailable (not Windows)
 bool verify_file_sha256(const std::string& path, const std::string& hex);
+// HTTPS GET (Windows: WinHTTP). Every hop, redirects included, must be HTTPS to one of hosts; more than cap bytes
+// fails. https_download writes to `to` via `to`.part (deleted on failure); https_get returns the body.
+bool https_download(const std::string& url, const std::string& to, uint64_t cap, const std::vector<std::string>& hosts,
+                    const std::function<void(uint64_t, uint64_t)>& progress, const std::atomic<bool>& cancel,
+                    std::string& error);
+bool https_get(const std::string& url, uint64_t cap, const std::vector<std::string>& hosts, std::string& body,
+               std::string& error);
 int update_selftest();  // part of --uitest; 0 on pass
