@@ -1,6 +1,6 @@
 #pragma once
 // NVIDIA RTX Video Super Resolution through the RTX Video SDK (Windows only): the driver's own upscaler. The player
-// uses it before our network when the GPU and driver support it.
+// uses it before Pixel Flow (our network) when the GPU and driver support it.
 #include "kernels.h"
 
 struct NVSDK_NGX_Handle;
