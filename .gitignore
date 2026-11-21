@@ -10,3 +10,4 @@ __pycache__/
 *.diag.jsonl
 build-win/
 build-dev/
+*.pem
