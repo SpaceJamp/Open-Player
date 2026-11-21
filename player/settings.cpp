@@ -16,7 +16,7 @@ static std::string trim(const std::string& s) {
 
 Settings settings_parse(const std::string& text) {
     Settings s;
-    std::istringstream in(text);
+    std::istringstream in(text.compare(0, 3, "\xEF\xBB\xBF") ? text : text.substr(3));  // Notepad's UTF-8 BOM
     for (std::string line; std::getline(in, line);) {
         size_t eq = line.find('=');
         if (eq == std::string::npos) continue;
@@ -49,7 +49,9 @@ std::string settings_format(const Settings& s) {
     const char* up = s.upscaler == Upscaler::Rtx ? "rtx" : s.upscaler == Upscaler::PixelFlow ? "pixelflow" : "off";
     char vol[32];
     snprintf(vol, sizeof vol, "%g", s.volume);
-    return std::string("upscaler=") + up + "\ndecoder=" + (s.cpu_decode ? "cpu" : "gpu") + "\nscreen=" + s.screen +
+    std::string screen = trim(s.screen);  // a monitor name comes from the OS: no line break may add a line
+    std::replace_if(screen.begin(), screen.end(), [](char c) { return c == '\n' || c == '\r'; }, ' ');
+    return std::string("upscaler=") + up + "\ndecoder=" + (s.cpu_decode ? "cpu" : "gpu") + "\nscreen=" + screen +
            "\nstart_fullscreen=" + (s.start_fullscreen ? "1" : "0") + "\nremember_volume=" +
            (s.remember_volume ? "1" : "0") + "\nvolume=" + vol + "\nhide_after=" + std::to_string(s.hide_after) +
            "\ninfo_at_start=" + (s.info_at_start ? "1" : "0") + "\n";
@@ -57,9 +59,10 @@ std::string settings_format(const Settings& s) {
 
 Settings load_settings(const std::string& file) {
     std::ifstream f(file, std::ios::binary);
-    std::stringstream ss;
-    ss << f.rdbuf();
-    return settings_parse(f ? ss.str() : "");
+    std::string text(64 * 1024, '\0');  // a few hundred bytes in practice; a huge file is cut, not loaded whole
+    f.read(text.data(), (std::streamsize)text.size());
+    text.resize((size_t)f.gcount());
+    return settings_parse(text);
 }
 
 bool save_settings(const std::string& file, const Settings& s) {
@@ -72,23 +75,33 @@ bool save_settings(const std::string& file, const Settings& s) {
         f.close();
         if (!f) return std::filesystem::remove(tmp, ec), false;
     }
-    std::filesystem::rename(tmp, file, ec);
-    if (ec) std::filesystem::remove(tmp, ec);
-    return !std::filesystem::exists(tmp) && std::filesystem::exists(file) && !ec;
+    std::error_code moved;
+    std::filesystem::rename(tmp, file, moved);
+    if (moved) std::filesystem::remove(tmp, ec);  // its own error code: this one must not clear the rename's
+    return !moved;
 }
 
 std::string settings_file() {
     return (std::filesystem::path(recent_file()).parent_path() / "settings.txt").string();
 }
 
-std::string screen_key(const ScreenInfo& s) {
-    return s.name + " " + std::to_string(s.w) + "x" + std::to_string(s.h);
+static std::string name_size(const ScreenInfo& s) { return s.name + " " + std::to_string(s.w) + "x" + std::to_string(s.h); }
+
+std::string screen_key(const std::vector<ScreenInfo>& screens, int i) {
+    std::string k = name_size(screens[i]);
+    int same = 0;  // identical monitors before this one
+    for (int j = 0; j < i; j++) same += name_size(screens[j]) == k;
+    return same ? k + " #" + std::to_string(same + 1) : k;
 }
 
 int match_screen(const std::vector<ScreenInfo>& screens, const std::string& key) {
     for (size_t i = 0; i < screens.size(); i++)
-        if (screen_key(screens[i]) == key) return (int)i;
-    std::string name = key.substr(0, key.rfind(' '));  // "LG ULTRAGEAR 2560x1440" -> "LG ULTRAGEAR"
+        if (screen_key(screens, (int)i) == key) return (int)i;
+    std::string base = key;  // "LG 2560x1440 #3" whose twin is gone -> the first "LG 2560x1440"
+    if (size_t h = base.rfind(" #"); h != std::string::npos) base.resize(h);
+    for (size_t i = 0; i < screens.size(); i++)
+        if (name_size(screens[i]) == base) return (int)i;
+    std::string name = base.substr(0, base.rfind(' '));  // "LG ULTRAGEAR 2560x1440" -> "LG ULTRAGEAR"
     for (size_t i = 0; i < screens.size() && !key.empty(); i++)
         if (screens[i].name == name) return (int)i;
     for (size_t i = 0; i < screens.size(); i++)
@@ -106,14 +119,23 @@ std::vector<std::string> reopen_args(const std::vector<std::string>& argv, const
     }
     std::vector<std::string> args = restart_args(kept, video);  // also drops an earlier --start/--paused
     char t[32];
-    snprintf(t, sizeof t, "%g", start);
+    snprintf(t, sizeof t, "%.3f", start);  // ms: %g would round to whole seconds after 2.8 h
     args.insert(args.end(), {"--start", t});
     if (paused) args.push_back("--paused");
     return args;
 }
 
+std::vector<std::string> live_flags(bool fullscreen, bool vsr_off, bool pixel_flow, int screen) {
+    std::vector<std::string> f;
+    if (fullscreen) f.push_back("--fullscreen");
+    if (vsr_off) f.push_back("--no-vsr");
+    else if (pixel_flow) f.push_back("--no-rtx");
+    if (screen > 0) f.insert(f.end(), {"--screen", std::to_string(screen)});
+    return f;
+}
+
 double start_position(double start, double dur) {
-    return dur > 1 ? std::clamp(start, 0.0, dur - 1) : std::max(0.0, start);
+    return dur > 0 ? std::clamp(start, 0.0, std::max(0.0, dur - 1)) : std::max(0.0, start);
 }
 
 int settings_selftest() {
@@ -129,6 +151,12 @@ int settings_selftest() {
     check(s.upscaler == Upscaler::PixelFlow && s.cpu_decode && s.hide_after == 2 && s.volume == 1 &&
           s.screen == "LG ULTRAGEAR 2560x1440" && s.info_at_start);
     s.hide_after = 5, s.volume = 0.5f, s.upscaler = Upscaler::Off, s.remember_volume = false;
+    {  // a monitor name with a line break can't smuggle in other settings
+        Settings n;
+        n.screen = "Evil\nupscaler=off\r";
+        Settings b = settings_parse(settings_format(n));
+        check(b.upscaler == Upscaler::Rtx && b.screen == "Evil upscaler=off");
+    }
     Settings r = settings_parse(settings_format(s));
     check(r.screen == s.screen && r.upscaler == Upscaler::Off && r.hide_after == 5 && r.volume == 0.5f &&
           !r.remember_volume && r.cpu_decode && r.info_at_start);
@@ -142,6 +170,11 @@ int settings_selftest() {
         check(save_settings((dir / "new" / "settings.txt").string(), s));  // first run: the folder is made
         std::ofstream((dir / "blocker").string()) << "x";                  // a file where the folder should be
         check(!save_settings((dir / "blocker" / "settings.txt").string(), s));
+        std::filesystem::create_directories(dir / "taken");  // the target can't be replaced: report it, no .tmp left
+        check(!save_settings((dir / "taken").string(), s) && !std::filesystem::exists(dir / "taken.tmp"));
+        // a huge or hostile file: only the first 64 KB are read
+        std::ofstream((dir / "big.txt").string()) << std::string(70000, 'x') << "\nupscaler=off\n";
+        check(load_settings((dir / "big.txt").string()).upscaler == Upscaler::Rtx);
         std::filesystem::remove_all(dir);
     }
     check(std::filesystem::path(settings_file()).filename() == "settings.txt" &&
@@ -149,7 +182,11 @@ int settings_selftest() {
 
     std::vector<ScreenInfo> mon = {{"PG27UCDM", 3840, 2160, 240, true}, {"LG ULTRAGEAR", 2560, 1440, 60, false},
                                    {"LG ULTRAGEAR", 1920, 1080, 60, false}};
-    check(screen_key(mon[1]) == "LG ULTRAGEAR 2560x1440");
+    check(screen_key(mon, 1) == "LG ULTRAGEAR 2560x1440");
+    std::vector<ScreenInfo> twins = {{"LG", 2560, 1440, 60, true}, {"LG", 2560, 1440, 60, false}};  // identical monitors
+    check(screen_key(twins, 0) == "LG 2560x1440" && screen_key(twins, 1) == "LG 2560x1440 #2");
+    check(match_screen(twins, "LG 2560x1440 #2") == 1 && match_screen(twins, "LG 2560x1440") == 0 &&
+          match_screen(twins, "LG 2560x1440 #3") == 0);  // the third is gone: the first of that kind
     check(match_screen(mon, "LG ULTRAGEAR 1920x1080") == 2 && match_screen(mon, "LG ULTRAGEAR 3840x2160") == 1);
     check(match_screen(mon, "Gone 1x1") == 0 && match_screen(mon, "") == 0 && match_screen({}, "x") == 0);
     std::vector<ScreenInfo> mon2 = {{"A", 1, 1, 60, false}, {"B", 2, 2, 60, true}};
@@ -157,12 +194,19 @@ int settings_selftest() {
 
     check(reopen_args({"open-player", "--screen", "2", "--no-rtx", "a.mkv", "--start", "3", "--paused"},
                       "/x/My Movie (2012) \xc3\xa9.mkv", 61.5, false) ==
-          (std::vector<std::string>{"open-player", "/x/My Movie (2012) \xc3\xa9.mkv", "--start", "61.5"}));
+          (std::vector<std::string>{"open-player", "/x/My Movie (2012) \xc3\xa9.mkv", "--start", "61.500"}));
     check(reopen_args({"open-player", "--fullscreen", "a.mkv"}, "a.mkv", 0, true) ==
-          (std::vector<std::string>{"open-player", "--fullscreen", "a.mkv", "--start", "0", "--paused"}));
+          (std::vector<std::string>{"open-player", "--fullscreen", "a.mkv", "--start", "0.000", "--paused"}));
     check(reopen_args({"open-player", "--model", "m.onnx", "--cpu-decode", "--no-vsr", "a.mkv"}, "a.mkv", 1, false) ==
-          (std::vector<std::string>{"open-player", "--model", "m.onnx", "a.mkv", "--start", "1"}));
+          (std::vector<std::string>{"open-player", "--model", "m.onnx", "a.mkv", "--start", "1.000"}));
 
+    // what a reopen keeps of this run without saving it: fullscreen, VSR off or Pixel Flow, the monitor (0: none)
+    check(live_flags(true, false, true, 2) == (std::vector<std::string>{"--fullscreen", "--no-rtx", "--screen", "2"}));
+    check(live_flags(false, true, true, 0) == (std::vector<std::string>{"--no-vsr"}));  // off wins over the upscaler
+    check(live_flags(false, false, false, 0).empty());
+
+    check(start_position(5, .5) == 0 && start_position(5, 0) == 5);  // a clip of 1 s or less starts at 0
+    check(settings_parse("\xEF\xBB\xBFupscaler=off\n").upscaler == Upscaler::Off);  // Notepad's UTF-8 BOM
     check(start_position(-3, 100) == 0 && start_position(500, 100) == 99 && start_position(42, 100) == 42 &&
           start_position(42, 0) == 42);
 #undef check

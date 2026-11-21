@@ -246,14 +246,16 @@ void card_heading(const char* icon, const char* text, float sc) {
     ImGui::Dummy({1, px + 4 * sc});
 }
 
-// A row: its label on the left (and a dimmer note under it), the control right-aligned by the caller at the
-// returned position. h: the control's height.
-ImVec2 card_row(const char* label, float h, float control_w, float sc) {
+// A row: its label on the left, the control right-aligned by the caller at the returned position; when both don't
+// fit side by side (a narrow card) the control goes under the label. h: the control's height; row_h gets the row's.
+ImVec2 card_row(const char* label, float h, float control_w, float sc, float& row_h) {
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const float w = ImGui::GetContentRegionAvail().x, px = 15 * sc;
-    ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), px, {p.x, std::round(p.y + (h - px) / 2)}, col(COL_TEXT),
-                                        label);
-    return {p.x + w - control_w, p.y};
+    const bool stack = text_size(px, label).x + 12 * sc + control_w > w;
+    ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), px, {p.x, std::round(stack ? p.y : p.y + (h - px) / 2)},
+                                        col(COL_TEXT), label);
+    row_h = stack ? px + 6 * sc + h : h;
+    return stack ? ImVec2{p.x, p.y + px + 6 * sc} : ImVec2{p.x + w - control_w, p.y};
 }
 void card_row_end(ImVec2 row_start, float h) {
     ImGui::SetCursorScreenPos(row_start);
@@ -310,14 +312,16 @@ bool toggle(const char* id, ImVec2 p, bool on, float sc) {
     return pressed;
 }
 
-void draw_settings(const UiState& s, std::vector<UiAction>& out) {
+// capsule_top: the card stays above the control capsule, which stays visible and clickable while it's open
+void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_top) {
     const ImGuiIO& io = ImGui::GetIO();
     const float sc = s.scale, W = std::fmin(520 * sc, io.DisplaySize.x - 32 * sc);
+    const float top = 8 * sc, bottom = std::fmax(capsule_top - 8 * sc, top + 40 * sc);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {14 * sc, 12 * sc});
     ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 8 * sc);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(20, 22, 30, 235));  // opaque enough to read over video
-    ImGui::SetNextWindowPos({io.DisplaySize.x / 2, io.DisplaySize.y / 2}, ImGuiCond_Always, {.5f, .5f});
-    ImGui::SetNextWindowSizeConstraints({W, 0}, {W, io.DisplaySize.y * .8f});
+    ImGui::SetNextWindowPos({io.DisplaySize.x / 2, (top + bottom) / 2}, ImGuiCond_Always, {.5f, .5f});
+    ImGui::SetNextWindowSizeConstraints({W, 0}, {W, std::fmin(io.DisplaySize.y * .8f, bottom - top)});
     ImGui::Begin("settings", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse |
@@ -354,10 +358,11 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out) {
         const int base = 0;
 #endif
         const float sw = segmented_w(segs, sc);
-        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Upscaler", 28 * sc, sw, sc);
+        float rh = 0;
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Upscaler", 28 * sc, sw, sc, rh);
         int i = segmented("up", c, segs, (int)s.settings.upscaler - base, sc);
         if (i >= 0) out.push_back({UiAction::SetUpscaler, (double)(i + base)});
-        card_row_end(row, 28 * sc);
+        card_row_end(row, rh + 4 * sc);
     }
 
     card_heading(ICON_CPU, "DECODING", sc);
@@ -365,10 +370,11 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out) {
         std::vector<Seg> segs = {{"GPU (NVDEC)", s.nvdec_available, "NVDEC isn't available on this GPU or driver"},
                                  {"CPU", true, nullptr}};
         const float sw = segmented_w(segs, sc);
-        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Decoder", 28 * sc, sw, sc);
+        float rh = 0;
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Decoder", 28 * sc, sw, sc, rh);
         int i = segmented("dec", c, segs, s.settings.cpu_decode ? 1 : 0, sc);
         if (i >= 0) out.push_back({UiAction::SetDecoder, (double)i});
-        card_row_end(row, 28 * sc);
+        card_row_end(row, rh + 4 * sc);
         ImGui::PushStyleColor(ImGuiCol_Text, COL_DIM);
         ImGui::TextUnformatted("Changing it reopens the video where it is.");
         ImGui::PopStyleColor();
@@ -397,29 +403,33 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out) {
         snprintf(mode, sizeof mode, "%dx%d @ %.0f Hz", m.w, m.h, m.hz);
         std::string tags = std::string(m.primary ? "primary" : "") + (m.primary && i == s.playing_on ? " · " : "") +
                            (i == s.playing_on ? "playing here" : "");
-        const float tags_w = text_size(tpx, tags.c_str()).x, mode_w = text_size(px, mode).x;
-        const float x_num = p.x + 10 * sc + 2 * r + 10 * sc, x_name = x_num + 20 * sc;
-        const float x_tags = p.x + aw - 8 * sc - tags_w, x_mode = x_tags - 14 * sc - mode_w;
+        const float mode_w = text_size(px, mode).x, x_num = p.x + 10 * sc + 2 * r + 10 * sc, x_name = x_num + 20 * sc;
+        float tags_w = text_size(tpx, tags.c_str()).x;
+        if (p.x + aw - 8 * sc - tags_w - 14 * sc - mode_w < x_name + 60 * sc) tags.clear(), tags_w = 0;  // narrow card
+        const float x_tags = p.x + aw - 8 * sc - tags_w, x_mode = std::fmax(x_tags - 14 * sc - mode_w, x_name);
         const ImVec4 clip{x_name, p.y, x_mode - 10 * sc, p.y + rh};  // long names are cut, not overlapped
         dl->AddText(ImGui::GetFont(), px, {x_num, std::round(cy - px / 2)}, col(COL_DIM), std::to_string(i + 1).c_str());
-        dl->AddText(ImGui::GetFont(), px, {x_name, std::round(cy - px / 2)}, col(COL_TEXT), m.name.c_str(), nullptr, 0,
-                    &clip);
+        if (clip.z > clip.x + 20 * sc)  // no room for the name: the number and the mode say which it is
+            dl->AddText(ImGui::GetFont(), px, {x_name, std::round(cy - px / 2)}, col(COL_TEXT), m.name.c_str(), nullptr,
+                        0, &clip);
         dl->AddText(ImGui::GetFont(), px, {x_mode, std::round(cy - px / 2)}, col(COL_TEXT), mode);
         dl->AddText(ImGui::GetFont(), tpx, {x_tags, std::round(cy - tpx / 2)}, col(COL_PLAYED), tags.c_str());
     }
     {
-        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Start fullscreen", 22 * sc, 40 * sc, sc);
+        float rh = 0;
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Start fullscreen", 22 * sc, 40 * sc, sc, rh);
         if (toggle("##fs", c, s.settings.start_fullscreen, sc))
             out.push_back({UiAction::SetStartFullscreen, s.settings.start_fullscreen ? 0.0 : 1.0});
-        card_row_end(row, 26 * sc);
+        card_row_end(row, rh + 4 * sc);
     }
 
     card_heading(ICON_ADJUSTMENTS, "PLAYBACK & CONTROLS", sc);
     {
-        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Remember volume", 22 * sc, 40 * sc, sc);
+        float rh = 0;
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Remember volume", 22 * sc, 40 * sc, sc, rh);
         if (toggle("##vol", c, s.settings.remember_volume, sc))
             out.push_back({UiAction::SetRememberVolume, s.settings.remember_volume ? 0.0 : 1.0});
-        card_row_end(row, 26 * sc);
+        card_row_end(row, rh + 4 * sc);
     }
     {
         static const int secs[] = {1, 2, 3, 5};
@@ -427,16 +437,18 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out) {
                                  {"5 s", true, nullptr}};
         int sel = int(std::find(std::begin(secs), std::end(secs), s.settings.hide_after) - std::begin(secs));
         const float sw = segmented_w(segs, sc);
-        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Hide controls after", 28 * sc, sw, sc);
+        float rh = 0;
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Hide controls after", 28 * sc, sw, sc, rh);
         int i = segmented("hide", c, segs, sel, sc);
         if (i >= 0) out.push_back({UiAction::SetHideAfter, (double)secs[i]});
-        card_row_end(row, 32 * sc);
+        card_row_end(row, rh + 4 * sc);
     }
     {
-        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Show info overlay at start", 22 * sc, 40 * sc, sc);
+        float rh = 0;
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Show info overlay at start", 22 * sc, 40 * sc, sc, rh);
         if (toggle("##info", c, s.settings.info_at_start, sc))
             out.push_back({UiAction::SetInfoAtStart, s.settings.info_at_start ? 0.0 : 1.0});
-        card_row_end(row, 26 * sc);
+        card_row_end(row, rh + 4 * sc);
     }
 
     card_heading(ICON_INFO, "ABOUT", sc);
@@ -638,7 +650,7 @@ std::vector<UiAction> draw_ui(const UiState& s) {
         ImGui::TextUnformatted(s.info.c_str());
         ImGui::End();
     }
-    if (s.settings_open) draw_settings(s, out);
+    if (s.settings_open) draw_settings(s, out, c0.y);
 
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow))
         ImGui::OpenPopup("menu");
@@ -821,10 +833,11 @@ int ui_selftest() {
         {
             std::vector<ScreenInfo> mons = {{"PG27UCDM", 3840, 2160, 240, true}, {"LG ULTRAGEAR", 2560, 1440, 60, false},
                                             {"Very Long Monitor Name That Goes On And On", 1920, 1080, 60, false}};
-            for (float scale : {1.f, 2.5f})
+            for (ImVec2 size : {ImVec2{1920, 1080}, ImVec2{3840, 2160}, ImVec2{640, 360}, ImVec2{320, 180}})
                 for (size_t n : {0, 1, 3})
                     for (bool avail : {true, false}) {
-                        io.DisplaySize = scale > 1 ? ImVec2{3840, 2160} : ImVec2{1920, 1080};
+                        const float scale = size.y > 1080 ? 2.5f : 1;
+                        io.DisplaySize = size;
                         UiState cs{12, 600, 70, 70, false, avail, avail, false, false, 0.8f, "", {}};
                         cs.scale = scale, cs.settings_open = true, cs.build = "build 7 (abc1234)";
                         cs.screens.assign(mons.begin(), mons.begin() + n);
@@ -836,6 +849,8 @@ int ui_selftest() {
                         ImGuiWindow* w = ImGui::FindWindowByName("settings");
                         check(w && w->Active && w->DrawList->VtxBuffer.Size > 0 && !ui_has_keyboard());
                         check(w && w->Size.y <= io.DisplaySize.y * .8f + 1);  // scrolls rather than overflowing
+                        // never over the capsule, which stays visible (and clickable) while the card is open
+                        check(w && w->Pos.y >= 0 && w->Pos.y + w->Size.y <= size.y - (14 + 48) * scale + .5f);
                     }
             io.DisplaySize = {1920, 1080};
             UiState cs{12, 600, 80, 80, false, true, true, false, false, 0.8f, "", {}};

@@ -30,15 +30,20 @@ struct ScreenInfo {
     float hz = 0;
     bool primary = false;
 };
-std::string screen_key(const ScreenInfo& s);  // "PG27UCDM 3840x2160"
-// Index of the monitor saved as key: same name and size, else the first with that name, else the primary, else 0.
+// "PG27UCDM 3840x2160"; a second identical monitor (same name and size) is "... #2", and so on
+std::string screen_key(const std::vector<ScreenInfo>& screens, int i);
+// Index of the monitor saved as key: that exact one, else the first with its name and size, else the first with
+// its name, else the primary, else 0.
 int match_screen(const std::vector<ScreenInfo>& screens, const std::string& key);
 
 // restart_args() for the same video, minus the flags a settings change overrides (--screen N, --no-rtx,
 // --no-vsr, --cpu-decode) and any earlier --start/--paused, plus --start <start> and --paused when paused.
 std::vector<std::string> reopen_args(const std::vector<std::string>& argv, const std::string& video, double start,
                                      bool paused);
-// Where --start T lands: within [0, dur - 1] when the length is known (dur > 1), else max(0, T).
+// The flags that keep this run's state across a reopen without saving it: --fullscreen, then --no-vsr when
+// upscaling is off or --no-rtx when Pixel Flow runs, then --screen N when screen > 0.
+std::vector<std::string> live_flags(bool fullscreen, bool vsr_off, bool pixel_flow, int screen);
+// Where --start T lands: within [0, max(0, dur - 1)] when the length is known (dur > 0), else max(0, T).
 double start_position(double start, double dur);
 
 int settings_selftest();  // part of --uitest; 0 on pass

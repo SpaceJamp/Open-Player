@@ -428,8 +428,12 @@ int main(int argc, char** argv) {
         };
         std::string vsr_desc = describe_vsr();
         // the upscaler V and the badge turn back on: the last one chosen in settings (or the default)
-        Upscaler chosen = cfg.upscaler != Upscaler::Off ? cfg.upscaler
+        Upscaler chosen = vsr_on ? (use_rtx ? Upscaler::Rtx : Upscaler::PixelFlow)  // what actually runs
+                          : cfg.upscaler != Upscaler::Off ? cfg.upscaler
                           : saved.upscaler != Upscaler::Off ? saved.upscaler : Upscaler::Rtx;
+#ifndef HAVE_RTX_VSR
+        if (chosen == Upscaler::Rtx) chosen = Upscaler::PixelFlow;  // this build has no RTX VSR: no false warning
+#endif
         // live switch; false when that upscaler can't run here (no model, or no RTX VSR on this GPU/driver)
         auto set_upscaler = [&](Upscaler u) {
             if (!have_vsr) return false;
@@ -443,6 +447,7 @@ int main(int argc, char** argv) {
             if (u != Upscaler::Off) chosen = u;
             vsr_on = u != Upscaler::Off, use_rtx = u == Upscaler::Rtx;
             reset = true, step |= paused, drop_ahead();  // paused: show the change now
+            if (paused && media.finished()) seek(pos);   // at the end no frame is queued: decode the last one again
             vsr_desc = describe_vsr();
             post(ICON_SPARKLES, !ok          ? std::string("NVIDIA RTX isn't available on this GPU or driver")
                                 : !vsr_on   ? std::string("VSR off")
@@ -521,10 +526,17 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "settings: can't save %s\n", settings_file().c_str());
             volume_unsaved = false;
         };
-        auto reopen = [&](const std::string& why) {
+        // keep_screen: a decoder change stays on this monitor; a monitor change goes to the saved one
+        auto reopen = [&](const std::string& why, bool keep_screen) {
             post(ICON_SETTINGS, why, -1, 2);
             dirty = true;
             pending_restart = reopen_args(std::vector<std::string>(argv, argv + argc), video_path, pos, paused);
+            int here = 0;
+            for (size_t i = 0; keep_screen && i < screen_ids.size(); i++)
+                if (screen_ids[i] == screen_id) here = (int)i + 1;
+            for (auto& f : live_flags(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN, have_vsr && !vsr_on,
+                                      vsr_on && !use_rtx, here))
+                pending_restart.push_back(f);
             restart_at = now() + 0.25;
         };
         auto toggle_settings = [&] {
@@ -611,6 +623,7 @@ int main(int argc, char** argv) {
 #ifdef HAVE_RTX_VSR
                     if (vsr_on && use_rtx && !(p.out = rtx.run(in))) {  // full-size input
                         use_rtx = rtx_ok = false;  // NVIDIA's upscaler failed: Pixel Flow from here on
+                        chosen = Upscaler::PixelFlow;
                         fprintf(stderr, "VSR: NVIDIA RTX failed, switching to Pixel Flow\n");
                         vsr_desc = describe_vsr();
                         if (shrink) shrink_rgb(full, w, h, vsr.input(), nw, nh, st);
@@ -697,12 +710,12 @@ int main(int argc, char** argv) {
                         break;
                     case UiAction::SetDecoder:
                         saved.cpu_decode = cfg.cpu_decode = a.value != 0, save_prefs();
-                        reopen(a.value != 0 ? "Switching to CPU decoding..." : "Switching to GPU decoding...");
+                        reopen(a.value != 0 ? "Switching to CPU decoding..." : "Switching to GPU decoding...", true);
                         break;
                     case UiAction::SetScreen:
                         if (a.value >= 0 && a.value < monitors.size()) {
-                            saved.screen = cfg.screen = screen_key(monitors[(size_t)a.value]), save_prefs();
-                            reopen("Reopening on screen " + std::to_string((int)a.value + 1) + "...");
+                            saved.screen = cfg.screen = screen_key(monitors, (int)a.value), save_prefs();
+                            reopen("Reopening on screen " + std::to_string((int)a.value + 1) + "...", false);
                         }
                         break;
                     case UiAction::SetStartFullscreen: saved.start_fullscreen = cfg.start_fullscreen = a.value != 0, save_prefs(); break;
