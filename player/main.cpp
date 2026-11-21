@@ -336,6 +336,7 @@ int main(int argc, char** argv) {
         std::string info;   // info overlay, refreshed once a second
         std::error_code ec;
         std::string abs_path = std::filesystem::absolute(path, ec).string();
+        const std::string video_path = ec ? std::string(path) : abs_path;  // what a reopen plays again
         std::vector<std::string> recent = add_recent(load_recent(recent_file()), ec ? path : abs_path);
         save_recent(recent_file(), recent);
         recent = existing_only(recent);  // once: on WSL each check of a /mnt/c path is slow
@@ -509,9 +510,36 @@ int main(int argc, char** argv) {
         if (start_at >= 0) seek(start_position(start_at, dur));  // reopened after a settings change
         if (start_paused) set_paused(true), step = true;         // ... while paused: show that frame, stay paused
 
+        // the settings card (S, the gear, the menu); OPEN_PLAYER_SHOW_SETTINGS=1 opens it at start (timing tests)
+        bool settings_open = getenv("OPEN_PLAYER_SHOW_SETTINGS") != nullptr;
+        std::vector<SDL_DisplayID> screen_ids;
+        std::vector<ScreenInfo> monitors = list_screens(&screen_ids);
+        std::vector<std::string> pending_restart;  // a reopen waits a moment so its notice gets drawn
+        double restart_at = 0;
+        auto save_prefs = [&] {
+            if (!save_settings(settings_file(), saved))
+                fprintf(stderr, "settings: can't save %s\n", settings_file().c_str());
+            volume_unsaved = false;
+        };
+        auto reopen = [&](const std::string& why) {
+            post(ICON_SETTINGS, why, -1, 2);
+            dirty = true;
+            pending_restart = reopen_args(std::vector<std::string>(argv, argv + argc), video_path, pos, paused);
+            restart_at = now() + 0.25;
+        };
+        auto toggle_settings = [&] {
+            settings_open = !settings_open, dirty = true;
+            if (settings_open) monitors = list_screens(&screen_ids);
+        };
+
         while (running) {
             if (volume_unsaved && now() - volume_saved_at >= 1)
                 save_settings(settings_file(), saved), volume_unsaved = false, volume_saved_at = now();
+            if (!pending_restart.empty() && now() >= restart_at) {
+                restart_with(pending_restart, video_path);  // returns only if it failed
+                pending_restart.clear();
+                post(ICON_X, "Couldn't reopen the video", -1, 2);
+            }
             SDL_Event e;
             while (SDL_PollEvent(&e)) {
                 if (ui) ImGui_ImplSDL3_ProcessEvent(&e), ui_redraw = 2;
@@ -523,7 +551,9 @@ int main(int argc, char** argv) {
                     open_video(p);
                 }
                 else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) disp.resized(), dirty = true;
-                else if (e.type == SDL_EVENT_WINDOW_EXPOSED) dirty = true;
+                else if (e.type == SDL_EVENT_WINDOW_EXPOSED || e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED) dirty = true;
+                else if (e.type >= SDL_EVENT_DISPLAY_FIRST && e.type <= SDL_EVENT_DISPLAY_LAST)
+                    monitors = list_screens(&screen_ids), dirty = true;  // plugged in or out, moved, mode changed
                 else if (e.type == SDL_EVENT_MOUSE_MOTION) last_mouse = now();
                 else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT &&
                          e.button.clicks == 2 && !(ui && ImGui::GetIO().WantCaptureMouse))
@@ -542,7 +572,9 @@ int main(int argc, char** argv) {
                     case SDLK_V: toggle_vsr(); break;
                     case SDLK_F: toggle_fullscreen(); break;
                     case SDLK_I: show_info = !show_info, dirty = true; break;
+                    case SDLK_S: toggle_settings(); break;
                     case SDLK_ESCAPE:
+                        if (settings_open) { toggle_settings(); break; }  // the card first, then fullscreen, then quit
                         if (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) { toggle_fullscreen(); break; }
                         [[fallthrough]];
                     case SDLK_Q: running = false; break;
@@ -623,8 +655,27 @@ int main(int argc, char** argv) {
                 ImGui::NewFrame();
                 bool full = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN;
                 if (shown && !named) named = true, post(nullptr, std::filesystem::path(path).filename().string(), -1, 2);
-                auto acts = draw_ui({pos, dur, now(), last_mouse, paused, have_vsr, vsr_on, full, show_info, volume, info, recent,
-                                     ui_scale(ImGui::GetIO().DisplaySize.y), notice, s, use_rtx});
+                UiState us{pos, dur, now(), last_mouse, paused, have_vsr, vsr_on, full, show_info, volume, info, recent,
+                           ui_scale(ImGui::GetIO().DisplaySize.y), notice, s, use_rtx};
+                us.settings_open = settings_open;
+                us.settings = cfg;
+                us.settings.upscaler = !vsr_on ? Upscaler::Off : use_rtx ? Upscaler::Rtx : Upscaler::PixelFlow;
+                us.settings.cpu_decode = cfg.cpu_decode || !media.nvdec();
+                us.screens = monitors;
+                for (size_t i = 0; i < screen_ids.size(); i++) {
+                    if (screen_ids[i] == screen_id) us.screen_index = (int)i;
+                    if (screen_ids[i] == SDL_GetDisplayForWindow(win)) us.playing_on = (int)i;
+                }
+#ifdef HAVE_RTX_VSR
+                us.rtx_available = have_vsr && (!rtx_tried || rtx_ok);  // not tried yet: offered, opened on first use
+#endif
+                us.pxf_available = have_vsr;
+                us.nvdec_available = media.nvdec() || cfg.cpu_decode;  // CPU chosen: NVDEC wasn't even tried
+                if (!have_vsr)
+                    us.vsr_unavailable = worth_it ? "no Pixel Flow model (" + std::string(model) + ") found"
+                                                  : "the video already fills the screen";
+                us.build = OPEN_PLAYER_BUILD;
+                auto acts = draw_ui(us);
                 if (full && ui_controls_hidden() && !ui_has_keyboard()) ImGui::SetMouseCursor(ImGuiMouseCursor_None);  // the SDL3 backend hides the OS cursor at its next NewFrame
                 ImGui::Render();
                 diag.ui.add((SDL_GetTicksNS() - ui0) / 1e6);
@@ -639,8 +690,31 @@ int main(int argc, char** argv) {
                     case UiAction::Quit: running = false; break;
                     case UiAction::Open: show_open_dialog(); break;
                     case UiAction::OpenPath: open_video(a.path); break;
+                    case UiAction::ToggleSettings: toggle_settings(); break;
+                    case UiAction::SetUpscaler:  // live; saved only when that upscaler can run here
+                        if (set_upscaler((Upscaler)(int)a.value))
+                            saved.upscaler = cfg.upscaler = (Upscaler)(int)a.value, save_prefs();
+                        break;
+                    case UiAction::SetDecoder:
+                        saved.cpu_decode = cfg.cpu_decode = a.value != 0, save_prefs();
+                        reopen(a.value != 0 ? "Switching to CPU decoding..." : "Switching to GPU decoding...");
+                        break;
+                    case UiAction::SetScreen:
+                        if (a.value >= 0 && a.value < monitors.size()) {
+                            saved.screen = cfg.screen = screen_key(monitors[(size_t)a.value]), save_prefs();
+                            reopen("Reopening on screen " + std::to_string((int)a.value + 1) + "...");
+                        }
+                        break;
+                    case UiAction::SetStartFullscreen: saved.start_fullscreen = cfg.start_fullscreen = a.value != 0, save_prefs(); break;
+                    case UiAction::SetRememberVolume:
+                        saved.remember_volume = cfg.remember_volume = a.value != 0;
+                        if (saved.remember_volume) saved.volume = volume;
+                        save_prefs();
+                        break;
+                    case UiAction::SetHideAfter: saved.hide_after = cfg.hide_after = (int)a.value, save_prefs(); break;
+                    case UiAction::SetInfoAtStart: saved.info_at_start = cfg.info_at_start = a.value != 0, save_prefs(); break;
                     }
-                bool vis = paused || now() - last_mouse < 2;
+                bool vis = paused || settings_open || now() - last_mouse < cfg.hide_after;
                 bool ui_dirty = !acts.empty() || vis != last_vis || ui_redraw > 0 || ImGui::IsAnyItemActive() ||
                                 ImGui::IsAnyItemHovered() || ui_animating(now()) || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
                 last_vis = vis, ui_redraw = std::max(ui_redraw - 1, 0);
