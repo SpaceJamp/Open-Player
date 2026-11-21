@@ -9,3 +9,4 @@ __pycache__/
 .superpowers/
 *.diag.jsonl
 build-win/
+build-dev/

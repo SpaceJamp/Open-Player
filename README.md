@@ -3,17 +3,18 @@
 # Open Player
 
 An open video player for Linux and Windows that upscales video on NVIDIA GPUs. On Windows it uses NVIDIA RTX
-Video Super Resolution; everywhere it can use its own video super-resolution network, which is trained, exported and
-played entirely from this repo.
+Video Super Resolution; everywhere it can use its own video super-resolution network, **Pixel Flow** (PXF), which is
+trained, exported and played entirely from this repo.
 
 ```
-decode (FFmpeg, NVDEC) -> YUV->RGB (CUDA) -> upscale: RTX VSR or our network (TensorRT) -> RGBA (CUDA) -> Vulkan -> window
+decode (FFmpeg, NVDEC) -> YUV->RGB (CUDA) -> upscale: RTX VSR or Pixel Flow (TensorRT) -> RGBA (CUDA) -> Vulkan -> window
 ```
 
-**The network** ([model.py](model.py)) works on one frame at a time and remembers the previous one: a small flow
+**Pixel Flow** ([model.py](model.py)) works on one frame at a time and remembers the previous one: a small flow
 net estimates motion, the previous upscaled frame is warped onto the current one, and conv blocks (with pixel
 attention, except in `lean`) add detail before a pixel-shuffle 2x output. A scene-cut check resets the memory.
-Three sizes: `standard` (about 317K parameters), `fast` and `lean`.
+Three sizes: Pixel Flow (`standard`, about 317K parameters), Pixel Flow Fast (`fast`) and Pixel Flow Lean
+(`lean`).
 
 No trained model ships with the repo: train one on your own videos (step 2).
 
@@ -43,7 +44,7 @@ login, so it only checks for them:
 - TensorRT for Windows, unzipped to `C:\TensorRT\TensorRT-11.5.0.63` (other versions: pass `-DTENSORRT_ROOT=...`
   to build-windows.bat; the script checks only this path)
 - for RTX VSR: the [NVIDIA RTX Video SDK](https://developer.nvidia.com/rtx-video-sdk) unzipped to `C:\rtx_video_sdk`
-  (its license keeps it out of this repo; without it the player builds with our network only)
+  (its license keeps it out of this repo; without it the player builds with Pixel Flow only)
 
 ## 2. Train a model
 
@@ -90,15 +91,18 @@ open-player movie.mkv                    # finds vsr.onnx in the current folder 
 open-player                              # no video (or double-clicked): asks for one in a file dialog
 open-player --check vsr.onnx             # PASS/WARN/FAIL for CUDA, NVDEC, Vulkan, audio, TensorRT, RTX VSR, the model
 open-player --selftest vsr.onnx          # TensorRT output vs PyTorch
+open-player --version                    # the build number, e.g. "Open Player build 69 (11d35c8)"
 ```
 
-Options: `--model FILE`, `--no-vsr`, `--no-rtx` (Windows: our network instead of RTX VSR), `--screen N`,
-`--fullscreen`, `--stats` (one JSON line of timings per second), `--collect DIR` (see Windows below).
+Options: `--model FILE`, `--no-vsr`, `--no-rtx` (Windows: Pixel Flow instead of RTX VSR), `--cpu-decode` (decode on
+the CPU; upscaling stays on the GPU), `--screen N`, `--fullscreen`, `--start T` and `--paused` (start T seconds in,
+paused), `--stats` (one JSON line of timings per second), `--collect DIR` (see Windows below). Flags win over the
+saved settings for that run and aren't saved.
 
-The first time our network plays a resolution, TensorRT builds an engine for it (up to a minute) and caches it next
+The first time Pixel Flow plays a resolution, TensorRT builds an engine for it (up to a minute) and caches it next
 to the model (`.win.engine` on Windows, so a shared folder works for both).
 
-**How much it upscales.** The network upscales 2x and the window stretches the result to fit. It's planned for the
+**How much it upscales.** Pixel Flow upscales 2x and the window stretches the result to fit. It's planned for the
 screen given with `--screen N` (default: the primary; `--check` lists them):
 - video at least as large as the screen in either direction: no upscaling (a 4K video on a 4K screen plays as is);
 - video whose 2x would overshoot the screen: shrunk first so 2x lands exactly on it (on a 4K screen, 1440p becomes
@@ -117,9 +121,21 @@ The player prepares the next frame's upscale while the current one is shown.
 ### Controls
 
 Move the mouse to show the floating control bar: play/pause, time, seek bar, volume (hover the speaker for a slider),
-upscaling badge, open and fullscreen. It fades out 2 s after the mouse stops (the cursor hides in fullscreen) and
-stays while paused. Volume, seek keys, pause and upscaling changes show a short notice. Right-click for a menu with
-the same actions, recent files and the info overlay. Drop a video on the window, or use Open, to switch videos.
+upscaling badge (`RTX 2x`, `PXF 2x` or `VSR off`), settings, open and fullscreen. It fades out 2 s after the mouse
+stops (the cursor hides in fullscreen) and stays while paused. Volume, seek keys, pause and upscaling changes show a
+short notice. Right-click for a menu with the same actions, recent files, the info overlay and settings. Drop a video
+on the window, or use Open, to switch videos.
+
+**Settings** (`S`, the gear, or the menu) open a card over the video, which keeps playing:
+- Upscaler (NVIDIA RTX / Pixel Flow / Off) and how long the controls stay after the mouse stops change at once.
+- Decoder (GPU or CPU) and the monitor (every connected one is listed with its resolution and refresh rate) reopen
+  the video where it is, on that monitor.
+- Start fullscreen, remember the volume, and show the info overlay at start.
+- About: the build number and credits.
+
+Choices are saved in `settings.txt` next to the recent-files list (`%APPDATA%\open-player\` on Windows,
+`~/.config/open-player/` on Linux). `V` and the badge only compare for the moment; they don't change the saved
+upscaler.
 
 | Key | Action |
 |---|---|
@@ -129,15 +145,16 @@ the same actions, recent files and the info overlay. Drop a video on the window,
 | V | upscaling on/off (compare) |
 | F, double-click | fullscreen |
 | I | info overlay: GPU, decoder, upscaler, frame rate, dropped frames |
-| Q, Esc | quit (Esc leaves fullscreen first) |
+| S | settings |
+| Q, Esc | quit (Esc closes settings, then leaves fullscreen, first) |
 
 ### Windows and NVIDIA RTX VSR
 
 On Windows the player upscales with **NVIDIA RTX Video Super Resolution** when the GPU and driver support it, and
-falls back to our network otherwise (`--no-rtx` forces our network). CUDA and Vulkan share memory there, so frames
-never pass through the CPU.
+falls back to Pixel Flow otherwise (choose it in settings, or `--no-rtx` for one run). CUDA and Vulkan share memory
+there, so frames never pass through the CPU.
 
-RTX VSR runs only on Windows, but our network can learn to imitate it, and then upscales that way on Linux too:
+RTX VSR runs only on Windows, but Pixel Flow can learn to imitate it, and then upscales that way on Linux too:
 1. Play videos with `--collect pairs`. About every 10 s of playback it saves 8 consecutive frames of a 128 px crop
    next to RTX VSR's 2x upscale of the same region (only while RTX upscales exactly 2x; the folder stops at 2 GB).
 2. Train with `--pairs pairs` (weight `--pairs-weight`, default 0.5), next to your usual videos.

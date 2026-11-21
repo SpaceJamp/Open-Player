@@ -56,7 +56,7 @@ bool Media::has_video(const char* path) {
     return ok;
 }
 
-bool Media::open(const char* path, int cuda_device) {
+bool Media::open(const char* path, int cuda_device, bool nvdec) {
     if (avformat_open_input(&fmt_, path, nullptr, nullptr) < 0 || avformat_find_stream_info(fmt_, nullptr) < 0) {
         fprintf(stderr, "cannot open %s\n", path);
         return false;
@@ -71,8 +71,9 @@ bool Media::open(const char* path, int cuda_device) {
     // (USE_PRIMARY_CONTEXT refuses a primary context someone else already started with other flags)
     char dev[16];
     snprintf(dev, sizeof dev, "%d", cuda_device);
-    if (av_hwdevice_ctx_create(&hw_, AV_HWDEVICE_TYPE_CUDA, dev, nullptr, AV_CUDA_USE_CURRENT_CONTEXT) < 0)
-        fprintf(stderr, "NVDEC unavailable, decoding on the CPU\n");
+    if (!nvdec) fprintf(stderr, "decoding on the CPU (setting)\n");
+    else if (av_hwdevice_ctx_create(&hw_, AV_HWDEVICE_TYPE_CUDA, dev, nullptr, AV_CUDA_USE_CURRENT_CONTEXT) < 0)
+        fprintf(stderr, "NVDEC unavailable, decoding on the CPU\n"), hw_ = nullptr;
     if (!(vctx_ = open_decoder(fmt_->streams[vidx_], hw_))) return fprintf(stderr, "cannot decode video\n"), false;
 
     aidx_ = av_find_best_stream(fmt_, AVMEDIA_TYPE_AUDIO, -1, vidx_, nullptr, 0);

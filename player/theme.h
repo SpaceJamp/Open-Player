@@ -36,6 +36,14 @@ inline constexpr ImWchar CP_X = 0xeb55;
 inline constexpr const char* ICON_X = "\xee\xad\x95";
 inline constexpr ImWchar CP_CLOCK = 0xea70;
 inline constexpr const char* ICON_CLOCK = "\xee\xa9\xb0";
+inline constexpr ImWchar CP_SETTINGS = 0xeb20;  // gear
+inline constexpr const char* ICON_SETTINGS = "\xee\xac\xa0";
+inline constexpr ImWchar CP_DESKTOP = 0xea89;  // device-desktop
+inline constexpr const char* ICON_DESKTOP = "\xee\xaa\x89";
+inline constexpr ImWchar CP_CPU = 0xef8e;
+inline constexpr const char* ICON_CPU = "\xee\xbe\x8e";
+inline constexpr ImWchar CP_ADJUSTMENTS = 0xea03;
+inline constexpr const char* ICON_ADJUSTMENTS = "\xee\xa8\x83";
 
 inline constexpr ImU32 COL_CAPSULE = IM_COL32(20, 22, 30, 184);   // rgba(20,22,30,0.72)
 inline constexpr ImU32 COL_TRACK = IM_COL32(255, 255, 255, 64);   // rgba(255,255,255,0.25)

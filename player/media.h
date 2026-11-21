@@ -23,7 +23,8 @@ extern "C" {
 class Media {
 public:
     ~Media();
-    bool open(const char* path, int cuda_device);
+    bool open(const char* path, int cuda_device, bool nvdec = true);  // nvdec false: decode on the CPU
+    bool nvdec() const { return hw_ != nullptr; }  // NVDEC was opened (codecs it lacks still decode on the CPU)
     static bool has_video(const char* path);  // FFmpeg can open it and it has a video stream
     int width() const { return vctx_->width; }
     int height() const { return vctx_->height; }

@@ -33,6 +33,8 @@
 #include "ui.h"
 #include "vsr.h"
 #include "collect.h"
+#include "settings.h"
+#include "build_info.h"  // generated: OPEN_PLAYER_BUILD
 #ifdef HAVE_RTX_VSR
 #include "rtx_vsr.h"
 #endif
@@ -40,7 +42,9 @@
 static const char* USAGE =
     "usage: open-player [video] [--model vsr.onnx] [--no-vsr] [--no-rtx] [--stats] [--screen N] [--fullscreen]\n"
     "no video (or double-clicked): pick one in a file dialog; cancel quits\n"
-    "--no-rtx: on Windows, upscale with our model instead of NVIDIA RTX VSR\n"
+    "--no-rtx: on Windows, upscale with Pixel Flow (our model) instead of NVIDIA RTX VSR\n"
+    "--cpu-decode: decode on the CPU instead of NVDEC (upscaling stays on the GPU)\n"
+    "--start T [--paused]: start T seconds in (paused); the player reopens itself this way after a settings change\n"
     "--collect DIR: on Windows with RTX VSR, save clips and their RTX upscale to DIR for train.py --pairs (2 GB cap)\n"
     "--screen N: play on monitor N (1 = first; --check lists them); upscaling is planned for that monitor\n"
     "       open-player --selftest [vsr.onnx]   compare the TensorRT engine against PyTorch\n"
@@ -55,7 +59,26 @@ static std::string trt_version() {
 }
 
 // --check: tries each part of the pipeline on its own and says which one is broken.
+// The connected monitors in SDL's order (index + 1 = --screen N); ids, when given, gets their SDL ids.
+static std::vector<ScreenInfo> list_screens(std::vector<SDL_DisplayID>* ids = nullptr) {
+    std::vector<ScreenInfo> out;
+    if (ids) ids->clear();
+    int n = 0;
+    SDL_DisplayID* d = SDL_GetDisplays(&n);
+    for (int i = 0; i < n; i++) {
+        const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(d[i]);
+        const char* name = SDL_GetDisplayName(d[i]);
+        out.push_back({name ? name : "?", m ? (int)std::lround(m->w * m->pixel_density) : 0,
+                       m ? (int)std::lround(m->h * m->pixel_density) : 0, m ? m->refresh_rate : 0,
+                       d[i] == SDL_GetPrimaryDisplay()});
+        if (ids) ids->push_back(d[i]);
+    }
+    SDL_free(d);
+    return out;
+}
+
 static int check(const char* model) {
+    printf("Open Player %s\n", OPEN_PLAYER_BUILD);
     int fails = 0;
     auto line = [&](const char* verdict, const char* what, const std::string& detail) {
         printf("%-4s  %-16s %s\n", verdict, what, detail.c_str());
@@ -97,18 +120,13 @@ static int check(const char* model) {
                                                                      : ", frames copied through the CPU (slower)"));
             } else line("FAIL", "Vulkan", "no Vulkan GPU for the window (on WSL install vulkan-dzn)");
         } else line("FAIL", "Window", SDL_GetError());
-        int nd = 0;
-        SDL_DisplayID* ids = SDL_GetDisplays(&nd);
-        for (int i = 0; i < nd; i++)
-            if (const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(ids[i])) {
-                const char* name = SDL_GetDisplayName(ids[i]);
-                char d[160];
-                snprintf(d, sizeof d, "%s, %ldx%ld @ %.0f Hz%s (--screen %d)", name ? name : "?",
-                         std::lround(m->w * m->pixel_density), std::lround(m->h * m->pixel_density), m->refresh_rate,
-                         ids[i] == SDL_GetPrimaryDisplay() ? ", primary" : "", i + 1);
-                line("INFO", ("Screen " + std::to_string(i + 1)).c_str(), d);
-            }
-        SDL_free(ids);
+        auto screens = list_screens();
+        for (size_t i = 0; i < screens.size(); i++) {
+            char d[160];
+            snprintf(d, sizeof d, "%s, %dx%d @ %.0f Hz%s (--screen %d)", screens[i].name.c_str(), screens[i].w,
+                     screens[i].h, screens[i].hz, screens[i].primary ? ", primary" : "", (int)i + 1);
+            line("INFO", ("Screen " + std::to_string(i + 1)).c_str(), d);
+        }
         SDL_AudioDeviceID dev = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, nullptr);
         line(dev ? "PASS" : "WARN", "Audio", dev ? SDL_GetAudioDeviceName(dev) : "no audio output: video plays silent");
         if (dev) SDL_CloseAudioDevice(dev);
@@ -119,7 +137,7 @@ static int check(const char* model) {
 #ifdef HAVE_RTX_VSR
     bool rtx = RtxVsr::selftest() == 0;
     line(rtx ? "PASS" : "WARN", "RTX VSR", rtx ? "NVIDIA RTX Video Super Resolution works"
-                                              : "unavailable (GPU or driver): our model upscales instead");
+                                              : "unavailable (GPU or driver): Pixel Flow upscales instead");
 #endif
     if (!std::filesystem::exists(model)) line("FAIL", "Model", std::string(model) + " not found: train, then export");
     else line(Vsr::selftest(model) == 0 ? "PASS" : "FAIL", "Model", model);
@@ -132,22 +150,36 @@ static const SDL_DialogFileFilter VIDEO_FILTERS[] = {{"Videos", "mp4;mkv;webm;mo
 
 int main(int argc, char** argv) {
     const char *path = nullptr, *model = "vsr.onnx", *collect_dir = nullptr;
-    bool vsr_on = true, selftest = false, checking = false, stats = false, fullscreen = false, want_rtx = true;
+    bool vsr_on = true, selftest = false, checking = false, stats = false, fullscreen = false, want_rtx = true,
+         cpu_decode = false, start_paused = false;
     int screen = 0;  // --screen N, counted from 1; 0 = the primary display
+    double start_at = -1;  // --start T: seconds; < 0: from the beginning
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
+        else if (!strcmp(argv[i], "--start") && i + 1 < argc) start_at = std::max(0.0, atof(argv[++i]));
+        else if (!strcmp(argv[i], "--paused")) start_paused = true;
         else if (!strcmp(argv[i], "--screen") && i + 1 < argc) screen = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--collect") && i + 1 < argc) collect_dir = argv[++i];
         else if (!strcmp(argv[i], "--no-vsr")) vsr_on = false;
         else if (!strcmp(argv[i], "--no-rtx")) want_rtx = false;
+        else if (!strcmp(argv[i], "--cpu-decode")) cpu_decode = true;
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = true;
         else if (!strcmp(argv[i], "--stats")) stats = true;
         else if (!strcmp(argv[i], "--selftest")) selftest = true;
         else if (!strcmp(argv[i], "--check")) checking = true;
         else if (!strcmp(argv[i], "--uitest")) return ui_selftest();
+        else if (!strcmp(argv[i], "--version")) return printf("Open Player %s\n", OPEN_PLAYER_BUILD), 0;
         else if (argv[i][0] != '-') (selftest || checking ? model : path) = argv[i];
         else return fputs(USAGE, stderr), 2;
     }
+    // saved settings, with this run's flags on top; only the settings card and the volume change `saved`
+    Settings saved = load_settings(settings_file()), cfg = saved;
+    if (!want_rtx && cfg.upscaler == Upscaler::Rtx) cfg.upscaler = Upscaler::PixelFlow;
+    if (!vsr_on) cfg.upscaler = Upscaler::Off;
+    cfg.cpu_decode |= cpu_decode;
+    cfg.start_fullscreen |= fullscreen;
+    vsr_on = cfg.upscaler != Upscaler::Off, want_rtx = cfg.upscaler == Upscaler::Rtx;
+    cpu_decode = cfg.cpu_decode, fullscreen = cfg.start_fullscreen;
     // double-clicked or "Open with": the working folder is anywhere, so also look next to the program
     std::string near_exe;
     if (!std::filesystem::exists(model) && std::filesystem::path(model).is_relative())
@@ -186,12 +218,16 @@ int main(int argc, char** argv) {
     }
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) return fprintf(stderr, "SDL: %s\n", SDL_GetError()), 1;
-    int n_disp = 0;
-    SDL_DisplayID* ids = SDL_GetDisplays(&n_disp);
+    std::vector<SDL_DisplayID> ids;
+    std::vector<ScreenInfo> screens = list_screens(&ids);
+    int n_disp = (int)ids.size();
+    if (!screen && !cfg.screen.empty()) {  // the saved monitor, found by name and size; gone: the primary
+        int i = match_screen(screens, cfg.screen);
+        if (i < n_disp && !screens[i].primary) screen = i + 1;
+    }
     if (screen > n_disp) fprintf(stderr, "no screen %d: this machine has %d, playing on the primary one\n", screen, n_disp),
                          screen = 0;
     SDL_DisplayID screen_id = !screen ? SDL_GetPrimaryDisplay() : screen > 0 && screen <= n_disp ? ids[screen - 1] : 0;
-    SDL_free(ids);
     if (!screen_id) return fprintf(stderr, "no screen %d: this machine has %d (see --check)\n", screen, n_disp), 2;
     // hidden until we know the video size; Vulkan needs the window first to choose the GPU
     SDL_Window* win = SDL_CreateWindow("Open Player", 1280, 720,
@@ -214,7 +250,7 @@ int main(int argc, char** argv) {
         cudaStreamCreate(&st);
 
         Media media;
-        if (!media.open(path, disp.cuda_device())) return 1;
+        if (!media.open(path, disp.cuda_device(), !cpu_decode)) return 1;
         int w = media.width(), h = media.height();
         // Like RTX VSR: only upscale video smaller than the screen in both directions. A 4K video on a 4K screen,
         // including 3840x1608 widescreen, would be blown up to 8K (7 fps on an RTX 5080) just to be shrunk back.
@@ -267,12 +303,14 @@ int main(int argc, char** argv) {
         else if (!have_vsr) fprintf(stderr, "VSR unavailable (no %s?), playing without upscaling\n", model);
         vsr_on &= have_vsr;
         int s = have_vsr ? vsr.scale() : 1;
-        // NVIDIA RTX VSR goes first on Windows; our network when the GPU or driver lacks it, with --no-rtx, and on Linux.
+        // NVIDIA RTX VSR goes first on Windows; Pixel Flow when the GPU or driver lacks it, when chosen, and on Linux.
         // shortcut: sized from our model's factor and screen plan, so it needs the model too; RTX can scale freely
 #ifdef HAVE_RTX_VSR
         RtxVsr rtx;
-        bool use_rtx = have_vsr && want_rtx && rtx.open(w, h, nw * s, nh * s, st);
-        if (have_vsr) fprintf(stderr, "VSR: %s\n", use_rtx ? "NVIDIA RTX Video Super Resolution" : "our model");
+        bool rtx_tried = have_vsr && want_rtx;  // otherwise opened on first use (settings card, V after --no-vsr)
+        bool rtx_ok = rtx_tried && rtx.open(w, h, nw * s, nh * s, st);
+        bool use_rtx = rtx_ok;
+        if (have_vsr) fprintf(stderr, "VSR: %s\n", use_rtx ? "NVIDIA RTX Video Super Resolution" : "Pixel Flow");
         Collector col;
         bool collecting = collect_dir && use_rtx && col.open(collect_dir, w, h, nw * s, nh * s, s, st);
         if (collect_dir)
@@ -281,7 +319,7 @@ int main(int argc, char** argv) {
                                          "a video of at least 128x128, and %s writable and under 2 GB)\n",
                     collect_dir);
 #else
-        const bool use_rtx = false;
+        bool use_rtx = false, rtx_ok = false;
         (void)want_rtx;
         if (collect_dir) fprintf(stderr, "collect: needs NVIDIA RTX VSR, which this build doesn't have\n");
 #endif
@@ -293,16 +331,20 @@ int main(int argc, char** argv) {
         bool running = true, paused = false, reset = true, step = false, size_warned = false;
         bool dirty = true;   // redraw only when the picture or the UI changed
         bool fresh = false;  // a new frame is waiting to be converted and copied (redraws of the UI alone skip that)
-        bool show_info = false, last_vis = false, named = false;
+        bool show_info = cfg.info_at_start, last_vis = false, named = false;
         int ui_redraw = 0;  // a few redraws after input, so ImGui's hover and click states catch up
         std::string info;   // info overlay, refreshed once a second
         std::error_code ec;
         std::string abs_path = std::filesystem::absolute(path, ec).string();
+        const std::string video_path = ec ? std::string(path) : abs_path;  // what a reopen plays again
         std::vector<std::string> recent = add_recent(load_recent(recent_file()), ec ? path : abs_path);
         save_recent(recent_file(), recent);
         recent = existing_only(recent);  // once: on WSL each check of a /mnt/c path is slow
         int serial = media.serial(), sw = 0, sh = 0, frames_shown = 0;
-        float volume = 1;
+        float volume = cfg.remember_volume ? cfg.volume : 1;
+        media.set_volume(volume);
+        bool volume_unsaved = false;  // saved at most once a second while it changes, and on quit
+        double volume_saved_at = 0;
         const __half* shown = nullptr;
         double pos = 0, wall_base = 0, last_mouse = -10, last_report = 0;
         Diag diag;
@@ -373,14 +415,48 @@ int main(int argc, char** argv) {
         };
         auto set_volume = [&](float v) {
             media.set_volume(volume = std::clamp(v, 0.f, 2.f));
+            if (saved.remember_volume) saved.volume = volume, volume_unsaved = true;
             post(volume > 0 ? ICON_VOLUME : ICON_VOLUME_OFF, "Volume " + std::to_string((int)std::lround(volume * 100)) + "%",
                  notice_level(volume));
         };
-        auto toggle_vsr = [&] {  // paused: show the change now
-            if (!have_vsr) return;
-            vsr_on = !vsr_on, reset = true, step |= paused, drop_ahead();
-            post(ICON_SPARKLES, vsr_on ? "VSR on, " + std::to_string(s) + "x" : "VSR off");
+        auto dims = [](int a, int b) { return std::to_string(a) + "x" + std::to_string(b); };
+        auto describe_vsr = [&] {  // the info overlay's upscaler line
+            return !have_vsr ? std::string(worth_it ? "none" : "off (fills screen)")
+                   : use_rtx ? "NVIDIA RTX, " + dims(w, h) + " -> " + dims(nw * s, nh * s)  // full-size in
+                             : "Pixel Flow " + std::to_string(s) + "x, " + dims(nw, nh) + " -> " + dims(nw * s, nh * s) +
+                                   (shrink ? " (shrunk from " + dims(w, h) + ")" : "");
         };
+        std::string vsr_desc = describe_vsr();
+        // the upscaler V and the badge turn back on: the last one chosen in settings (or the default)
+        Upscaler chosen = vsr_on ? (use_rtx ? Upscaler::Rtx : Upscaler::PixelFlow)  // what actually runs
+                          : cfg.upscaler != Upscaler::Off ? cfg.upscaler
+                          : saved.upscaler != Upscaler::Off ? saved.upscaler : Upscaler::Rtx;
+#ifndef HAVE_RTX_VSR
+        if (chosen == Upscaler::Rtx) chosen = Upscaler::PixelFlow;  // this build has no RTX VSR: no false warning
+#endif
+        // live switch; false when that upscaler can't run here (no model, or no RTX VSR on this GPU/driver)
+        auto set_upscaler = [&](Upscaler u) {
+            if (!have_vsr) return false;
+            bool ok = true;
+            if (u == Upscaler::Rtx) {
+#ifdef HAVE_RTX_VSR
+                if (!rtx_tried) rtx_tried = true, rtx_ok = rtx.open(w, h, nw * s, nh * s, st);
+#endif
+                if (!rtx_ok) u = Upscaler::PixelFlow, ok = false;
+            }
+            if (u != Upscaler::Off) chosen = u;
+            vsr_on = u != Upscaler::Off, use_rtx = u == Upscaler::Rtx;
+            reset = true, step |= paused, drop_ahead();  // paused: show the change now
+            if (paused && media.finished()) seek(pos);   // at the end no frame is queued: decode the last one again
+            vsr_desc = describe_vsr();
+            post(ICON_SPARKLES, !ok          ? std::string("NVIDIA RTX isn't available on this GPU or driver")
+                                : !vsr_on   ? std::string("VSR off")
+                                : use_rtx   ? "NVIDIA RTX, " + std::to_string(s) + "x"
+                                            : "Pixel Flow, " + std::to_string(s) + "x",
+                 -1, ok ? 1 : 2);
+            return ok;
+        };
+        auto toggle_vsr = [&] { set_upscaler(vsr_on ? Upscaler::Off : chosen); };  // V, the badge: not saved
         double seek_to = NAN;  // a key seek whose frame isn't shown yet: the next key seek builds on it
         auto key_seek = [&](double dt) {  // the seek bar shows its own position, so only keys post a notice
             double t = std::fmax(0, (std::isnan(seek_to) ? pos : seek_to) + dt);
@@ -390,6 +466,22 @@ int main(int argc, char** argv) {
             post(dt > 0 ? ICON_FORWARD_5 : ICON_BACKWARD_5, seek_notice_text(dt, t, dur));
         };
         auto toggle_fullscreen = [&] { SDL_SetWindowFullscreen(win, !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN)); };
+        // replaces this process with the player run with args (open another video, reopen after a settings change)
+        auto restart_with = [&](std::vector<std::string> args, const std::string& video) {
+            if (volume_unsaved) save_settings(settings_file(), saved);
+#ifdef _WIN32
+            for (auto& a : args) a = quote_arg(a);  // _execv joins the arguments with spaces and doesn't quote them
+#endif
+            std::vector<char*> cargs;
+            for (auto& a : args) cargs.push_back(a.data());
+            cargs.push_back(nullptr);
+#ifdef _WIN32
+            _execv(exe_path().c_str(), cargs.data());
+#else
+            execv("/proc/self/exe", cargs.data());
+#endif
+            fprintf(stderr, "can't open %s: restart failed (%s)\n", video.c_str(), strerror(errno));
+        };
         // Opening another file restarts the player on it with the same arguments: every buffer, the engine and
         // the window size depend on the video, so a fresh start is the simple, safe way to switch.
         auto open_video = [&](const std::string& p) {
@@ -406,18 +498,7 @@ int main(int argc, char** argv) {
                        args.end());
             if (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) args.push_back("--fullscreen");
             if (have_vsr && !vsr_on) args.push_back("--no-vsr");
-#ifdef _WIN32
-            for (auto& a : args) a = quote_arg(a);  // _execv joins the arguments with spaces and doesn't quote them
-#endif
-            std::vector<char*> cargs;
-            for (auto& a : args) cargs.push_back(a.data());
-            cargs.push_back(nullptr);
-#ifdef _WIN32
-            _execv(exe_path().c_str(), cargs.data());
-#else
-            execv("/proc/self/exe", cargs.data());
-#endif
-            fprintf(stderr, "can't open %s: restart failed (%s)\n", p.c_str(), strerror(errno));
+            restart_with(args, p);
         };
         // the dialog answers from another thread: hand the path to the main loop as an event
         auto show_open_dialog = [&] {
@@ -430,14 +511,47 @@ int main(int argc, char** argv) {
                 },
                 nullptr, win, VIDEO_FILTERS, 2, nullptr, false);
         };
-        auto dims = [](int a, int b) { return std::to_string(a) + "x" + std::to_string(b); };
-        const std::string vsr_desc = !have_vsr ? (worth_it ? "none" : "off (fills screen)")
-                                     : use_rtx ? "NVIDIA RTX, " + dims(w, h) + " -> " + dims(nw * s, nh * s)  // full-size in
-                                               : std::to_string(s) + "x, " + dims(nw, nh) + " -> " + dims(nw * s, nh * s) +
-                                                     (shrink ? " (shrunk from " + dims(w, h) + ")" : "");
         SDL_SetWindowTitle(win, std::filesystem::path(path).filename().string().c_str());
+        if (start_at >= 0) seek(start_position(start_at, dur));  // reopened after a settings change
+        if (start_paused) set_paused(true), step = true;         // ... while paused: show that frame, stay paused
+
+        // the settings card (S, the gear, the menu); OPEN_PLAYER_SHOW_SETTINGS=1 opens it at start (timing tests)
+        bool settings_open = getenv("OPEN_PLAYER_SHOW_SETTINGS") != nullptr;
+        std::vector<SDL_DisplayID> screen_ids;
+        std::vector<ScreenInfo> monitors = list_screens(&screen_ids);
+        std::vector<std::string> pending_restart;  // a reopen waits a moment so its notice gets drawn
+        double restart_at = 0;
+        auto save_prefs = [&] {
+            if (!save_settings(settings_file(), saved))
+                fprintf(stderr, "settings: can't save %s\n", settings_file().c_str());
+            volume_unsaved = false;
+        };
+        // keep_screen: a decoder change stays on this monitor; a monitor change goes to the saved one
+        auto reopen = [&](const std::string& why, bool keep_screen) {
+            post(ICON_SETTINGS, why, -1, 2);
+            dirty = true;
+            pending_restart = reopen_args(std::vector<std::string>(argv, argv + argc), video_path, pos, paused);
+            int here = 0;
+            for (size_t i = 0; keep_screen && i < screen_ids.size(); i++)
+                if (screen_ids[i] == screen_id) here = (int)i + 1;
+            for (auto& f : live_flags(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN, have_vsr && !vsr_on,
+                                      vsr_on && !use_rtx, here))
+                pending_restart.push_back(f);
+            restart_at = now() + 0.25;
+        };
+        auto toggle_settings = [&] {
+            settings_open = !settings_open, dirty = true;
+            if (settings_open) monitors = list_screens(&screen_ids);
+        };
 
         while (running) {
+            if (volume_unsaved && now() - volume_saved_at >= 1)
+                save_settings(settings_file(), saved), volume_unsaved = false, volume_saved_at = now();
+            if (!pending_restart.empty() && now() >= restart_at) {
+                restart_with(pending_restart, video_path);  // returns only if it failed
+                pending_restart.clear();
+                post(ICON_X, "Couldn't reopen the video", -1, 2);
+            }
             SDL_Event e;
             while (SDL_PollEvent(&e)) {
                 if (ui) ImGui_ImplSDL3_ProcessEvent(&e), ui_redraw = 2;
@@ -449,7 +563,9 @@ int main(int argc, char** argv) {
                     open_video(p);
                 }
                 else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) disp.resized(), dirty = true;
-                else if (e.type == SDL_EVENT_WINDOW_EXPOSED) dirty = true;
+                else if (e.type == SDL_EVENT_WINDOW_EXPOSED || e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED) dirty = true;
+                else if (e.type >= SDL_EVENT_DISPLAY_FIRST && e.type <= SDL_EVENT_DISPLAY_LAST)
+                    monitors = list_screens(&screen_ids), dirty = true;  // plugged in or out, moved, mode changed
                 else if (e.type == SDL_EVENT_MOUSE_MOTION) last_mouse = now();
                 else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT &&
                          e.button.clicks == 2 && !(ui && ImGui::GetIO().WantCaptureMouse))
@@ -468,7 +584,9 @@ int main(int argc, char** argv) {
                     case SDLK_V: toggle_vsr(); break;
                     case SDLK_F: toggle_fullscreen(); break;
                     case SDLK_I: show_info = !show_info, dirty = true; break;
+                    case SDLK_S: toggle_settings(); break;
                     case SDLK_ESCAPE:
+                        if (settings_open) { toggle_settings(); break; }  // the card first, then fullscreen, then quit
                         if (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) { toggle_fullscreen(); break; }
                         [[fallthrough]];
                     case SDLK_Q: running = false; break;
@@ -504,8 +622,10 @@ int main(int argc, char** argv) {
                     cudaEventRecord(p.ev[1], st);
 #ifdef HAVE_RTX_VSR
                     if (vsr_on && use_rtx && !(p.out = rtx.run(in))) {  // full-size input
-                        use_rtx = false;  // NVIDIA's upscaler failed: our model from here on
-                        fprintf(stderr, "VSR: NVIDIA RTX failed, switching to our model\n");
+                        use_rtx = rtx_ok = false;  // NVIDIA's upscaler failed: Pixel Flow from here on
+                        chosen = Upscaler::PixelFlow;
+                        fprintf(stderr, "VSR: NVIDIA RTX failed, switching to Pixel Flow\n");
+                        vsr_desc = describe_vsr();
                         if (shrink) shrink_rgb(full, w, h, vsr.input(), nw, nh, st);
                     }
                     if (vsr_on && use_rtx) {
@@ -548,8 +668,27 @@ int main(int argc, char** argv) {
                 ImGui::NewFrame();
                 bool full = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN;
                 if (shown && !named) named = true, post(nullptr, std::filesystem::path(path).filename().string(), -1, 2);
-                auto acts = draw_ui({pos, dur, now(), last_mouse, paused, have_vsr, vsr_on, full, show_info, volume, info, recent,
-                                     ui_scale(ImGui::GetIO().DisplaySize.y), notice, s});
+                UiState us{pos, dur, now(), last_mouse, paused, have_vsr, vsr_on, full, show_info, volume, info, recent,
+                           ui_scale(ImGui::GetIO().DisplaySize.y), notice, s, use_rtx};
+                us.settings_open = settings_open;
+                us.settings = cfg;
+                us.settings.upscaler = !vsr_on ? Upscaler::Off : use_rtx ? Upscaler::Rtx : Upscaler::PixelFlow;
+                us.settings.cpu_decode = cfg.cpu_decode || !media.nvdec();
+                us.screens = monitors;
+                for (size_t i = 0; i < screen_ids.size(); i++) {
+                    if (screen_ids[i] == screen_id) us.screen_index = (int)i;
+                    if (screen_ids[i] == SDL_GetDisplayForWindow(win)) us.playing_on = (int)i;
+                }
+#ifdef HAVE_RTX_VSR
+                us.rtx_available = have_vsr && (!rtx_tried || rtx_ok);  // not tried yet: offered, opened on first use
+#endif
+                us.pxf_available = have_vsr;
+                us.nvdec_available = media.nvdec() || cfg.cpu_decode;  // CPU chosen: NVDEC wasn't even tried
+                if (!have_vsr)
+                    us.vsr_unavailable = worth_it ? "no Pixel Flow model (" + std::string(model) + ") found"
+                                                  : "the video already fills the screen";
+                us.build = OPEN_PLAYER_BUILD;
+                auto acts = draw_ui(us);
                 if (full && ui_controls_hidden() && !ui_has_keyboard()) ImGui::SetMouseCursor(ImGuiMouseCursor_None);  // the SDL3 backend hides the OS cursor at its next NewFrame
                 ImGui::Render();
                 diag.ui.add((SDL_GetTicksNS() - ui0) / 1e6);
@@ -564,8 +703,31 @@ int main(int argc, char** argv) {
                     case UiAction::Quit: running = false; break;
                     case UiAction::Open: show_open_dialog(); break;
                     case UiAction::OpenPath: open_video(a.path); break;
+                    case UiAction::ToggleSettings: toggle_settings(); break;
+                    case UiAction::SetUpscaler:  // live; saved only when that upscaler can run here
+                        if (set_upscaler((Upscaler)(int)a.value))
+                            saved.upscaler = cfg.upscaler = (Upscaler)(int)a.value, save_prefs();
+                        break;
+                    case UiAction::SetDecoder:
+                        saved.cpu_decode = cfg.cpu_decode = a.value != 0, save_prefs();
+                        reopen(a.value != 0 ? "Switching to CPU decoding..." : "Switching to GPU decoding...", true);
+                        break;
+                    case UiAction::SetScreen:
+                        if (a.value >= 0 && a.value < monitors.size()) {
+                            saved.screen = cfg.screen = screen_key(monitors, (int)a.value), save_prefs();
+                            reopen("Reopening on screen " + std::to_string((int)a.value + 1) + "...", false);
+                        }
+                        break;
+                    case UiAction::SetStartFullscreen: saved.start_fullscreen = cfg.start_fullscreen = a.value != 0, save_prefs(); break;
+                    case UiAction::SetRememberVolume:
+                        saved.remember_volume = cfg.remember_volume = a.value != 0;
+                        if (saved.remember_volume) saved.volume = volume;
+                        save_prefs();
+                        break;
+                    case UiAction::SetHideAfter: saved.hide_after = cfg.hide_after = (int)a.value, save_prefs(); break;
+                    case UiAction::SetInfoAtStart: saved.info_at_start = cfg.info_at_start = a.value != 0, save_prefs(); break;
                     }
-                bool vis = paused || now() - last_mouse < 2;
+                bool vis = paused || settings_open || now() - last_mouse < cfg.hide_after;
                 bool ui_dirty = !acts.empty() || vis != last_vis || ui_redraw > 0 || ImGui::IsAnyItemActive() ||
                                 ImGui::IsAnyItemHovered() || ui_animating(now()) || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
                 last_vis = vis, ui_redraw = std::max(ui_redraw - 1, 0);
@@ -626,6 +788,7 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        if (volume_unsaved) save_settings(settings_file(), saved);
         drop_ahead();
         for (auto& e : rgba_ev) cudaEventDestroy(e);
         cudaStreamDestroy(ds);
