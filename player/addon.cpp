@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <chrono>
+#include <thread>
 #include <vector>
 
 #include "trt_loader.h"
@@ -73,26 +75,41 @@ bool install_tensorrt_addon(const std::function<void(uint64_t, uint64_t)>& progr
     if (fs::space(base, ec).available < 4700ull << 20 && !ec) return error = "needs 4.7 GB of free disk space", false;
     bool ok = https_download(TRT_WHEEL_URL, wheel.u8string(), TRT_WHEEL_SIZE, {"pypi.nvidia.com"}, progress, cancel,
                              error);
+    if (ok && cancel) ok = false, error = "cancelled";  // the hash and the unpacking take a while too
     if (ok && !verify_file_sha256(wheel.u8string(), TRT_WHEEL_SHA256))
         ok = false, error = "the download doesn't match NVIDIA's published file";
+    if (ok && cancel) ok = false, error = "cancelled";
     if (ok) ok = extract_tensorrt(wheel.u8string(), addon_dir(), error);
-    if (ok && !fs::exists(fs::u8path(addon_dir()) / "nvinfer_11.dll", ec))
-        ok = false, error = "the add-on is incomplete";
+    // everything Pixel Flow loads must be there: a cut-off unpacking (disk full) is refused, not crashed on later
+    for (const char* f : {"nvinfer_11.dll", "nvonnxparser_11.dll", "nvinfer_plugin_11.dll",
+                          "nvinfer_builder_resource_ptx_11.dll", "nvinfer_builder_resource_sm75_11.dll",
+                          "nvinfer_builder_resource_sm80_11.dll", "nvinfer_builder_resource_sm86_11.dll",
+                          "nvinfer_builder_resource_sm89_11.dll", "nvinfer_builder_resource_sm90_11.dll",
+                          "nvinfer_builder_resource_sm100_11.dll", "nvinfer_builder_resource_sm120_11.dll"})
+        if (ok && !fs::exists(fs::u8path(addon_dir()) / f, ec)) {
+            ok = false, error = std::string("the add-on is incomplete (no ") + f + ")";
+            fs::remove_all(fs::u8path(addon_dir()), ec);
+        }
     fs::remove(wheel, ec);
     return ok;
 }
 
-void remove_tensorrt_addon() {
+void remove_tensorrt_addon(bool in_use) {
     std::error_code ec;
-    fs::remove_all(fs::u8path(addon_dir()), ec);
-    if (ec) std::ofstream(fs::u8path(user_data_dir()) / "remove-tensorrt.txt") << "remove at next start\n";
+    // in use: deleting now would take the DLLs that aren't loaded and leave a half add-on; mark it instead
+    if (!in_use) fs::remove_all(fs::u8path(addon_dir()), ec);
+    if (in_use || ec) std::ofstream(fs::u8path(user_data_dir()) / "remove-tensorrt.txt") << "remove at next start\n";
 }
 
 void finish_pending_addon_removal() {
     std::error_code ec;
     fs::path marker = fs::u8path(user_data_dir()) / "remove-tensorrt.txt";
     if (!fs::exists(marker, ec)) return;
-    fs::remove_all(fs::u8path(addon_dir()), ec);
+    for (int i = 0; i < 30; i++) {  // a reopen starts this process before the old one has let go of the DLLs
+        fs::remove_all(fs::u8path(addon_dir()), ec);
+        if (!ec) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
     if (!ec) fs::remove(marker, ec);
 }
 

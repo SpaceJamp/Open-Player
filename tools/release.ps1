@@ -8,7 +8,7 @@
 # -DryRun skips the git checks and publishing (for testing, e.g. with a throwaway -Key and -PublicKeyPem).
 param(
     [string]$Notes = "",
-    [string]$Key = "C:\Users\Yeti\Documents\Open-Player-Keys\open-player-update-key.pem",
+    [string]$Key = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) "Open-Player-Keys\open-player-update-key.pem"),  # the private repo, cloned beside this one
     [string]$PublicKeyPem = "",  # default: the player's own key, from player\update_pubkey.h
     [switch]$DryRun,
     [switch]$SkipBuild
@@ -31,7 +31,7 @@ $ver = & "build-win\open-player.exe" --version
 if ($ver -notmatch '^Open Player build (\d+) \(([0-9a-f]+)(-modified)?\)$') { throw "no build number in: $ver" }
 $build = [int]$Matches[1]
 if ($Matches[3] -and -not $DryRun) { throw "this build has uncommitted changes: $ver" }
-if ($ver -match "TEST") { throw "refusing a TEST build" }
+if (-not $DryRun -and $Matches[2] -ne (git rev-parse --short HEAD)) { throw "build-win was built from another commit: $ver" }
 $file = "OpenPlayer-Setup-$build.exe"
 $installer = Join-Path $root "installer\out\$file"
 if (-not (Test-Path $installer)) { throw "missing $installer" }
@@ -91,4 +91,7 @@ Write-Host "signed and verified: $out (update.json, update.json.sig, $file)"
 if ($DryRun) { Write-Host "dry run: not published"; return }
 $answer = Read-Host "Publish GitHub release v$build with these 3 files? Type yes"
 if ($answer -ne "yes") { Write-Host "not published"; return }
-gh release create "v$build" "$out\$file" "$out\update.json" "$out\update.json.sig" --title "Open Player build $build" --notes $(if ($Notes) { $Notes } else { "Open Player build $build" })
+# notes go through a file: Windows PowerShell mangles quotes inside arguments to native programs
+$notesFile = Join-Path $out "notes.md"
+Set-Content $notesFile $(if ($Notes) { $Notes } else { "Open Player build $build" }) -Encoding utf8
+gh release create "v$build" "$out\$file" "$out\update.json" "$out\update.json.sig" --title "Open Player build $build" --notes-file $notesFile

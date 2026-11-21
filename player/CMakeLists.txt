@@ -56,7 +56,7 @@ target_link_libraries(open-player PRIVATE ${CMAKE_DL_LIBS} CUDA::cuda_driver Vul
 if(WIN32)
   target_link_libraries(open-player PRIVATE CUDA::cudart_static)  # one DLL less to ship
   target_link_libraries(open-player PRIVATE bcrypt crypt32 winhttp)  # update checks and downloads
-  target_link_libraries(open-player PRIVATE delayimp version)
+  target_link_libraries(open-player PRIVATE delayimp version shell32 ole32)
   # TensorRT is loaded only when needed and from known folders (trt_loader.cpp), so the player starts without it
   target_link_options(open-player PRIVATE /DELAYLOAD:nvinfer_11.dll /DELAYLOAD:nvonnxparser_11.dll)
   target_compile_definitions(open-player PRIVATE _CRT_SECURE_NO_WARNINGS)  # getenv, strerror: fine here

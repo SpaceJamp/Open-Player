@@ -12,6 +12,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <shlobj.h>
 #ifdef HAVE_RTX_VSR
 #include "nvsdk_ngx_defs.h"
 #endif
@@ -43,9 +44,13 @@ std::vector<std::string> tensorrt_candidates(const std::string& user_folder, con
 std::string user_data_dir() {
     const char* xdg = getenv("XDG_DATA_HOME");  // also on Windows: the tests point it at a temp folder
 #ifdef _WIN32
-    const char* local = getenv("LOCALAPPDATA");
     if (xdg && *xdg) return (fs::u8path(xdg) / "Open Player").u8string();
-    return (fs::u8path(local && *local ? local : ".") / "Open Player").u8string();
+    // the real Local AppData folder from Windows, never a relative "." (that could be a video's folder)
+    PWSTR local = nullptr;
+    fs::path base = SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local)) ? fs::path(local)
+                                                                                                : fs::temp_directory_path();
+    CoTaskMemFree(local);
+    return (base / "Open Player").u8string();
 #else
     const char* home = getenv("HOME");
     return ((xdg && *xdg ? fs::path(xdg) : fs::path(home ? home : ".") / ".local" / "share") / "open-player").string();
@@ -92,12 +97,16 @@ TrtFrom load_tensorrt(const std::string& user_folder, std::string& version, std:
                                             LOAD_WITH_ALTERED_SEARCH_PATH)
                            : nullptr;
         auto ver = inf ? (int32_t(*)())GetProcAddress(inf, "getInferLibVersion") : nullptr;
-        if (!inf || !onnx || !ver) {
-            why_not = "can't load TensorRT from " + dirs[i];
-            continue;  // shortcut: a half-loaded folder stays loaded; the next folder can't replace those DLLs
+        int v = ver ? ver() : 0;
+        if (!inf || !onnx || !ver || v / 10000 != 11) {
+            why_not = v && v / 10000 != 11 ? "TensorRT " + dotted(v) + " in " + dirs[i] + " (needs 11.x)"
+                                            : "can't load TensorRT from " + dirs[i];
+            // unloaded again, so a broken add-on can be replaced and the next folder's DLLs can load
+            if (onnx) FreeLibrary(onnx);
+            if (inf) FreeLibrary(inf);
+            SetDllDirectoryW(L"");  // back to: never the current folder
+            continue;
         }
-        int v = ver();
-        if (v / 10000 != 11) return why_not = "TensorRT " + dotted(v) + " in " + dirs[i] + " (needs 11.x)", TrtFrom::None;
         version = dotted(v);
         return kinds[i];
     }

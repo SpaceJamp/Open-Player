@@ -18,7 +18,7 @@ bool extract_tensorrt(const std::string& wheel, const std::string& dir, std::str
 // Download (progress: bytes so far, total), hash check, unpack, clean up. false + error on any failure or cancel.
 bool install_tensorrt_addon(const std::function<void(uint64_t, uint64_t)>& progress, const std::atomic<bool>& cancel,
                             std::string& error);
-// Removes the add-on folder. DLLs in use can't be deleted on Windows: then marks it for removal at the next start.
-void remove_tensorrt_addon();
+// Removes the add-on folder; in_use (its DLLs are loaded): marks it for removal at the next start instead.
+void remove_tensorrt_addon(bool in_use);
 void finish_pending_addon_removal();  // at start, before TensorRT loads
 int addon_selftest();                 // part of --uitest; 0 on pass

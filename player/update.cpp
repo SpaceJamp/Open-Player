@@ -143,6 +143,7 @@ bool download_update(const UpdateCheck& c, const std::function<void(uint64_t, ui
                      const std::atomic<bool>& cancel, std::string& installer_path, std::string& error) {
     auto dir = std::filesystem::temp_directory_path() / "open-player-update";
     std::error_code ec;
+    std::filesystem::remove_all(dir, ec);  // installers from earlier updates
     std::filesystem::create_directories(dir, ec);
     installer_path = (dir / c.info.file).u8string();
     const std::vector<std::string> gh = {"github.com", "release-assets.githubusercontent.com",
@@ -153,17 +154,22 @@ bool download_update(const UpdateCheck& c, const std::function<void(uint64_t, ui
     return error = "the download doesn't match the signed update", false;
 }
 
-bool run_installer(const std::string& path) {
+bool run_installer(const std::string& path, const std::string& sha256) {
 #ifdef _WIN32
     std::wstring exe = std::filesystem::u8path(path).wstring();
+    // locked against writes and deletes from the second hash check until the installer has started from it
+    HANDLE lock = CreateFileW(exe.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (lock == INVALID_HANDLE_VALUE) return false;
+    bool ok = verify_file_sha256(path, sha256);
     std::wstring cmd = L"\"" + exe + L"\" /SILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH=1";
     STARTUPINFOW si{sizeof si};
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) return false;
-    CloseHandle(pi.hThread), CloseHandle(pi.hProcess);
-    return true;
+    ok = ok && CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi);
+    if (ok) CloseHandle(pi.hThread), CloseHandle(pi.hProcess);
+    CloseHandle(lock);
+    return ok;
 #else
-    (void)path;
+    (void)path, (void)sha256;
     return false;
 #endif
 }
@@ -257,9 +263,11 @@ static bool fetch(std::string url, uint64_t cap, const std::vector<std::string>&
                   const std::function<bool(const char*, DWORD)>& sink,
                   const std::function<void(uint64_t, uint64_t)>& progress, const std::atomic<bool>* cancel,
                   std::string& error) {
+    error.clear();  // a retry must not inherit the last attempt's error (it ends the redirect loop)
     HINTERNET ses = WinHttpOpen(L"Open-Player-Updater", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                                 WINHTTP_NO_PROXY_BYPASS, 0);
     if (!ses) return error = "no network access", false;
+    WinHttpSetTimeouts(ses, 10000, 10000, 10000, 30000);  // resolve, connect, send, each receive: never hang forever
     bool ok = false;
     for (int hop = 0; hop < 6 && !ok; hop++) {
         if (!host_in(url, hosts)) {

@@ -45,5 +45,6 @@ void check_for_update(UpdateCheck& c, int current_build);
 // Downloads the installer into %TEMP%\open-player-update and checks it against the signed hash; false + error.
 bool download_update(const UpdateCheck& c, const std::function<void(uint64_t, uint64_t)>& progress,
                      const std::atomic<bool>& cancel, std::string& installer_path, std::string& error);
-bool run_installer(const std::string& path);  // starts it silently; the player then exits
+// Checks the hash again with the file locked, then starts it silently; the player then exits.
+bool run_installer(const std::string& path, const std::string& sha256);
 int update_selftest();  // part of --uitest; 0 on pass

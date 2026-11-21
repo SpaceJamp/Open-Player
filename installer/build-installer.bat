@@ -6,8 +6,8 @@ pushd "%~dp0.." || exit /b 1
 rem by full path: this folder isn't searched for programs when NoDefaultCurrentDirectoryInExePath is set
 call "%~dp0..\build-windows.bat" || exit /b 1
 for /f "tokens=4" %%b in ('build-win\open-player.exe --version') do set "BUILD=%%b"
+if not defined BUILD (echo open-player.exe --version printed nothing & exit /b 1)
 if "%BUILD%"=="unknown" (echo No build number: build from a git checkout & exit /b 1)
-for /f "tokens=*" %%t in ('build-win\open-player.exe --version ^| findstr /c:"TEST BUILD"') do (echo Refusing a TEST build & exit /b 1)
 for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS=%%i"
 for /d %%d in ("%VS%\VC\Redist\MSVC\*") do if exist "%%d\x64\Microsoft.VC143.CRT\vcruntime140.dll" set "VCREDIST=%%d\x64\Microsoft.VC143.CRT"
 rem no %VS% inside the parentheses: the ")" in "Program Files (x86)" would end the block

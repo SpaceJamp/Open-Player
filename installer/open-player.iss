@@ -33,6 +33,8 @@ WizardStyle=modern
 ; an update runs this while the player may still be closing
 CloseApplications=yes
 RestartApplications=no
+; tells Explorer about the Open with entries at once
+ChangesAssociations=yes
 
 [Tasks]
 Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
@@ -65,9 +67,14 @@ Root: HKA; Subkey: "Software\Classes\Applications\open-player.exe\SupportedTypes
 Root: HKA; Subkey: "Software\Classes\Applications\open-player.exe\SupportedTypes"; ValueType: string; ValueName: ".avi"; ValueData: ""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\Applications\open-player.exe\SupportedTypes"; ValueType: string; ValueName: ".m4v"; ValueData: ""; Tasks: openwith
 Root: HKA; Subkey: "Software\Classes\Applications\open-player.exe\SupportedTypes"; ValueType: string; ValueName: ".ts"; ValueData: ""; Tasks: openwith
-Root: HKA; Subkey: "Software\Classes\.mp4\OpenWithProgids"; ValueType: none; ValueName: "Applications\open-player.exe"; Flags: uninsdeletevalue; Tasks: openwith
-Root: HKA; Subkey: "Software\Classes\.mkv\OpenWithProgids"; ValueType: none; ValueName: "Applications\open-player.exe"; Flags: uninsdeletevalue; Tasks: openwith
-Root: HKA; Subkey: "Software\Classes\.webm\OpenWithProgids"; ValueType: none; ValueName: "Applications\open-player.exe"; Flags: uninsdeletevalue; Tasks: openwith
+; an empty string value (not ValueType: none, which writes no value at all) puts it in each type's Open with menu
+Root: HKA; Subkey: "Software\Classes\.mp4\OpenWithProgids"; ValueType: string; ValueName: "Applications\open-player.exe"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.mkv\OpenWithProgids"; ValueType: string; ValueName: "Applications\open-player.exe"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.webm\OpenWithProgids"; ValueType: string; ValueName: "Applications\open-player.exe"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.mov\OpenWithProgids"; ValueType: string; ValueName: "Applications\open-player.exe"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.avi\OpenWithProgids"; ValueType: string; ValueName: "Applications\open-player.exe"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.m4v\OpenWithProgids"; ValueType: string; ValueName: "Applications\open-player.exe"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
+Root: HKA; Subkey: "Software\Classes\.ts\OpenWithProgids"; ValueType: string; ValueName: "Applications\open-player.exe"; ValueData: ""; Flags: uninsdeletevalue; Tasks: openwith
 
 [Run]
 Filename: "{app}\open-player.exe"; Description: "Start Open Player"; Flags: nowait postinstall skipifsilent
