@@ -89,6 +89,19 @@ with a message. Cached `.engine` files already rebuild when TensorRT changes.
 - Download hosts are limited to the list in call 2 below (redirects
   elsewhere are refused); sizes are capped (`update.json` 64 KB, installer 500 MB).
 
+### Versions in Settings > About (added by the user, 2026-11-21)
+
+About lists, under the build number:
+- **TensorRT:** the version actually loaded (`getInferLibVersion()`, e.g. `11.5.0`) and where it came from
+  (add-on / your folder / next to the program), or "not installed (Pixel Flow needs the TensorRT add-on)".
+- **NVIDIA RTX VSR:** the version of the `nvngx_vsr.dll` in use, read with Windows' standard file-version API
+  (`GetFileVersionInfoW`, as Explorer's Properties > Details shows it; nothing inside NVIDIA's binary is
+  inspected), plus the RTX Video SDK API version the player was built against (`NVSDK_NGX_VERSION_API_MACRO`,
+  currently 1.5.0). "not available on this GPU or driver" when RTX VSR can't open; "not in this build" on Linux.
+- **NVIDIA driver:** the CUDA version the driver supports (`cuDriverGetVersion`, e.g. `13.5`), since RTX VSR and
+  TensorRT both depend on it.
+The same lines go to the log at start and to `--check`.
+
 ## 2. Installer (Inno Setup)
 
 - `installer/open-player.iss`: per-user (`PrivilegesRequired=lowest`), into `{localappdata}\Programs\Open Player`,
