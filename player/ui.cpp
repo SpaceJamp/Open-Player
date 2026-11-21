@@ -13,6 +13,7 @@
 #include "collect.h"
 #include "settings.h"
 #include "logfile.h"
+#include "update.h"
 #include "imgui.h"
 #include "imgui_internal.h"  // the self-test finds the volume panel's window
 #include "theme.h"
@@ -921,6 +922,7 @@ int ui_selftest() {
 #undef check
     fails += settings_selftest();
     fails += log_selftest();
+    fails += update_selftest();
     if (!fails) printf("ui checks passed\n");
     return fails ? 1 : 0;
 }

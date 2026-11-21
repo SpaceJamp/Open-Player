@@ -40,7 +40,7 @@ find_library(NVINFER NAMES nvinfer nvinfer_11 HINTS ${TENSORRT_ROOT}/lib REQUIRE
 find_library(NVONNXPARSER NAMES nvonnxparser nvonnxparser_11 HINTS ${TENSORRT_ROOT}/lib REQUIRED)
 
 set(IMGUI third_party/imgui)
-add_executable(open-player main.cpp media.cpp vsr.cpp display.cpp ui.cpp theme.cpp collect.cpp settings.cpp logfile.cpp kernels.cu
+add_executable(open-player main.cpp media.cpp vsr.cpp display.cpp ui.cpp theme.cpp collect.cpp settings.cpp logfile.cpp update.cpp kernels.cu
   ${IMGUI}/imgui.cpp ${IMGUI}/imgui_draw.cpp ${IMGUI}/imgui_tables.cpp ${IMGUI}/imgui_widgets.cpp
   ${IMGUI}/backends/imgui_impl_sdl3.cpp ${IMGUI}/backends/imgui_impl_vulkan.cpp)
 target_include_directories(open-player SYSTEM PRIVATE ${IMGUI} ${IMGUI}/backends)  # SYSTEM: no warnings from it
@@ -55,6 +55,7 @@ target_include_directories(open-player PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(open-player PRIVATE ${CMAKE_DL_LIBS} CUDA::cuda_driver Vulkan::Vulkan SDL3::SDL3 ffmpeg ${NVINFER} ${NVONNXPARSER})
 if(WIN32)
   target_link_libraries(open-player PRIVATE CUDA::cudart_static)  # one DLL less to ship
+  target_link_libraries(open-player PRIVATE bcrypt crypt32)  # SHA-256, ECDSA and base64 for update checks
   target_compile_definitions(open-player PRIVATE _CRT_SECURE_NO_WARNINGS)  # getenv, strerror: fine here
   target_sources(open-player PRIVATE open-player.manifest)  # UTF-8 code page for file names
   # TensorRT's DLLs (incl. the builder resources it loads when making an engine) next to the exe; vcpkg copies its own
