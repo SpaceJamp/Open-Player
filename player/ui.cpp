@@ -11,6 +11,7 @@
 #include <fstream>
 
 #include "collect.h"
+#include "settings.h"
 #include "imgui.h"
 #include "imgui_internal.h"  // the self-test finds the volume panel's window
 #include "theme.h"
@@ -94,7 +95,11 @@ std::string quote_arg(const std::string& a) {
 }
 
 std::vector<std::string> restart_args(const std::vector<std::string>& argv, const std::string& video) {
-    std::vector<std::string> out = argv;
+    std::vector<std::string> out;  // without --start T and --paused: they belonged to the video being replaced
+    for (size_t i = 0; i < argv.size(); i++) {
+        if (i && argv[i] == "--start") i++;
+        else if (!i || argv[i] != "--paused") out.push_back(argv[i]);
+    }
     for (size_t i = 1; i < out.size(); i++) {
         if (out[i] == "--model" || out[i] == "--screen" || out[i] == "--collect") i++;  // skip the flag's value
         else if (out[i].empty() || out[i][0] != '-') return out[i] = video, out;
@@ -457,6 +462,8 @@ int ui_selftest() {
     check(restart_args({"open-player", "--model", "m.onnx", "a.mkv", "--screen", "2"}, "/x/My Movie (2012).mkv") ==
           (std::vector<std::string>{"open-player", "--model", "m.onnx", "/x/My Movie (2012).mkv", "--screen", "2"}));
     check(restart_args({"open-player", "a.mkv"}, "/b.mp4") == (std::vector<std::string>{"open-player", "/b.mp4"}));
+    check(restart_args({"open-player", "a.mkv", "--start", "61.5", "--paused"}, "/b.mp4") ==  // they were a.mkv's
+          (std::vector<std::string>{"open-player", "/b.mp4"}));
     check(restart_args({"open-player", "--collect", "pairs", "a.mkv"}, "/b.mp4") ==  // a folder, not the video
           (std::vector<std::string>{"open-player", "--collect", "pairs", "/b.mp4"}));
     // the pair files train.py --pairs reads: header back as written
@@ -601,6 +608,7 @@ int ui_selftest() {
     ImGui::DestroyContext();
 
 #undef check
+    fails += settings_selftest();
     if (!fails) printf("ui checks passed\n");
     return fails ? 1 : 0;
 }

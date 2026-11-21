@@ -18,6 +18,7 @@ bool can_open(const std::string& path);  // an existing regular file: worth rest
 bool ui_has_keyboard();  // a menu or text field has the keys, so the player's shortcuts must not act on them
 // The player's own arguments with the video replaced, to restart it on another file. The video is the first
 // argument that isn't a flag or the value of --model/--screen/--collect; none: the video is added at the end.
+// --start T and --paused are dropped: they belong to the video being replaced.
 // One command-line argument quoted the way the Windows C runtime splits it again (restart on Windows)
 std::string quote_arg(const std::string& a);
 std::vector<std::string> restart_args(const std::vector<std::string>& argv, const std::string& video);  // 01:05 or 1:02:03
