@@ -14,6 +14,7 @@
 #include "settings.h"
 #include "logfile.h"
 #include "update.h"
+#include "trt_loader.h"
 #include "imgui.h"
 #include "imgui_internal.h"  // the self-test finds the volume panel's window
 #include "theme.h"
@@ -351,7 +352,7 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
         ImGui::PopStyleColor();
     } else {
         std::vector<Seg> segs = {{"NVIDIA RTX", s.rtx_available, "Not available on this GPU or driver"},
-                                 {"Pixel Flow", s.pxf_available, "No Pixel Flow model (vsr.onnx) loaded"},
+                                 {"Pixel Flow", s.pxf_available, s.pxf_why.empty() ? "No Pixel Flow model (vsr.onnx)" : s.pxf_why.c_str()},
                                  {"Off", true, nullptr}};
 #ifndef HAVE_RTX_VSR
         segs.erase(segs.begin());  // this build has no RTX VSR
@@ -456,7 +457,7 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
     card_heading(ICON_INFO, "ABOUT", sc);
     ImGui::PushStyleColor(ImGuiCol_Text, COL_DIM);
     ImGui::PushTextWrapPos(0);
-    ImGui::TextUnformatted(about_text(s.build, s.log_path).c_str());
+    ImGui::TextUnformatted(about_text(s.build, s.log_path, s.versions).c_str());
     ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
 
@@ -472,9 +473,10 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
 }
 }  // namespace
 
-std::string about_text(const std::string& build, const std::string& log) {
-    std::string t = "Open Player " + (build.empty() ? std::string("build unknown") : build) +
-                    "\nPixel Flow (PXF): Open Player's own upscaler.";
+std::string about_text(const std::string& build, const std::string& log, const std::vector<std::string>& versions) {
+    std::string t = "Open Player " + (build.empty() ? std::string("build unknown") : build);
+    for (const auto& v : versions) t += "\n" + v;  // TensorRT, NVIDIA RTX VSR, driver
+    t += "\nPixel Flow (PXF): Open Player's own upscaler.";
 #ifdef HAVE_RTX_VSR
     t += "\nThis software uses the NVIDIA RTX Video SDK. NVIDIA, GeForce RTX and NVIDIA RTX are trademarks of "
          "NVIDIA Corporation.";
@@ -876,7 +878,7 @@ int ui_selftest() {
                 check(click(20, 20) == 1);                                              // outside: closes
                 check(click(w->Pos.x + w->Size.x - 14 - 16, w->Pos.y + 12 + 16) == 1);  // the X
             }
-            std::string about = about_text("build 7 (abc1234)", "C:/u/open-player.log");  // what the card's About section shows
+            std::string about = about_text("build 7 (abc1234)", "C:/u/open-player.log", {});  // what the card's About section shows
             check(about.find("Open Player build 7 (abc1234)") != std::string::npos &&
                   about.find("Pixel Flow") != std::string::npos && about.find("Log: C:/u/open-player.log") != std::string::npos);
             io.AddMousePosEvent(5, 5);
@@ -923,6 +925,7 @@ int ui_selftest() {
     fails += settings_selftest();
     fails += log_selftest();
     fails += update_selftest();
+    fails += trt_loader_selftest();
     if (!fails) printf("ui checks passed\n");
     return fails ? 1 : 0;
 }

@@ -34,6 +34,7 @@ Settings settings_parse(const std::string& text) {
         else if (k == "start_fullscreen") flag(s.start_fullscreen);
         else if (k == "remember_volume") flag(s.remember_volume);
         else if (k == "info_at_start") flag(s.info_at_start);
+        else if (k == "trt_folder") s.trt_folder = v;
         else if (k == "volume") {
             char* end = nullptr;
             float f = strtof(v.c_str(), &end);
@@ -51,10 +52,12 @@ std::string settings_format(const Settings& s) {
     snprintf(vol, sizeof vol, "%g", s.volume);
     std::string screen = trim(s.screen);  // a monitor name comes from the OS: no line break may add a line
     std::replace_if(screen.begin(), screen.end(), [](char c) { return c == '\n' || c == '\r'; }, ' ');
+    std::string trt = trim(s.trt_folder);  // a folder name with a line break can't add lines either
+    std::replace_if(trt.begin(), trt.end(), [](char c) { return c == '\n' || c == '\r'; }, ' ');
     return std::string("upscaler=") + up + "\ndecoder=" + (s.cpu_decode ? "cpu" : "gpu") + "\nscreen=" + screen +
            "\nstart_fullscreen=" + (s.start_fullscreen ? "1" : "0") + "\nremember_volume=" +
            (s.remember_volume ? "1" : "0") + "\nvolume=" + vol + "\nhide_after=" + std::to_string(s.hide_after) +
-           "\ninfo_at_start=" + (s.info_at_start ? "1" : "0") + "\n";
+           "\ninfo_at_start=" + (s.info_at_start ? "1" : "0") + "\ntrt_folder=" + trt + "\n";
 }
 
 Settings load_settings(const std::string& file) {

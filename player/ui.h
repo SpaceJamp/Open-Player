@@ -54,12 +54,14 @@ struct UiState {
     int screen_index = 0;  // the chosen monitor
     int playing_on = -1;   // the monitor the window is on now; -1: unknown
     bool rtx_available = false, pxf_available = false, nvdec_available = true;
+    std::string pxf_why;          // why Pixel Flow can't run (tooltip)
     std::string vsr_unavailable;  // why neither upscaler can run here, shown instead of the choice
     std::string build;            // "build 214 (4a30cf8)"
     std::string log_path;         // open-player.log, shown in About
+    std::vector<std::string> versions;  // TensorRT, RTX VSR and driver lines, shown in About
 };
 std::string vsr_badge_text(bool available, bool on, bool rtx, int factor);  // "PXF 2x", "RTX 2x", "VSR off"; "" without VSR
-std::string about_text(const std::string& build, const std::string& log);  // the settings card's About section
+std::string about_text(const std::string& build, const std::string& log, const std::vector<std::string>& versions);  // About
 struct UiAction {
     enum Kind {
         TogglePause, Seek, SetVolume, ToggleVsr, ToggleFullscreen, ToggleInfo, Open, OpenPath, Quit,

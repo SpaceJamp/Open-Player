@@ -36,6 +36,7 @@
 #include "settings.h"
 #include "build_info.h"  // generated: OPEN_PLAYER_BUILD
 #include "logfile.h"
+#include "trt_loader.h"
 #ifdef HAVE_RTX_VSR
 #include "rtx_vsr.h"
 #endif
@@ -54,10 +55,6 @@ static const char* USAGE =
     "keys:  space pause | left/right seek 5s | up/down volume | v VSR on/off | f or double-click fullscreen\n"
     "       click the bar at the bottom to seek | q quit\n";
 
-static std::string trt_version() {
-    int v = getInferLibVersion();  // major*10000 + minor*100 + patch
-    return std::to_string(v / 10000) + "." + std::to_string(v / 100 % 100) + "." + std::to_string(v % 100);
-}
 
 // --check: tries each part of the pipeline on its own and says which one is broken.
 // The connected monitors in SDL's order (index + 1 = --screen N); ids, when given, gets their SDL ids.
@@ -78,7 +75,7 @@ static std::vector<ScreenInfo> list_screens(std::vector<SDL_DisplayID>* ids = nu
     return out;
 }
 
-static int check(const char* model) {
+static int check(const char* model, TrtFrom trt_from, const std::string& trt_ver, const std::string& trt_why) {
     printf("Open Player %s\nLog: %s\n", OPEN_PLAYER_BUILD, log_file().c_str());
     int fails = 0;
     auto line = [&](const char* verdict, const char* what, const std::string& detail) {
@@ -134,13 +131,19 @@ static int check(const char* model) {
         SDL_Quit();
     } else line("FAIL", "SDL", SDL_GetError());
 
-    line("PASS", "TensorRT", trt_version());
+    std::string tl = trt_line(trt_from, trt_ver, trt_why).substr(10);  // without "TensorRT: "
+    line(trt_from != TrtFrom::None ? "PASS" : "WARN", "TensorRT", tl);
 #ifdef HAVE_RTX_VSR
     bool rtx = RtxVsr::selftest() == 0;
     line(rtx ? "PASS" : "WARN", "RTX VSR", rtx ? "NVIDIA RTX Video Super Resolution works"
                                               : "unavailable (GPU or driver): Pixel Flow upscales instead");
+#else
+    bool rtx = false;
 #endif
-    if (!std::filesystem::exists(model)) line("FAIL", "Model", std::string(model) + " not found: train, then export");
+    printf("INFO  %s\nINFO  %s\n", rtx_vsr_line(true, rtx).c_str(), driver_line().c_str());
+    // no model is normal: nobody gets one, everyone trains their own Pixel Flow
+    if (!std::filesystem::exists(model)) line("INFO", "Model", std::string(model) + " not found: train your own Pixel Flow");
+    else if (trt_from == TrtFrom::None) line("WARN", "Model", std::string(model) + ": needs TensorRT to run");
     else line(Vsr::selftest(model) == 0 ? "PASS" : "FAIL", "Model", model);
     printf(fails ? "%d problem(s) found\n" : "all good\n", fails);
     return fails ? 1 : 0;
@@ -181,18 +184,26 @@ int main(int argc, char** argv) {
     cfg.start_fullscreen |= fullscreen;
     vsr_on = cfg.upscaler != Upscaler::Off, want_rtx = cfg.upscaler == Upscaler::Rtx;
     cpu_decode = cfg.cpu_decode, fullscreen = cfg.start_fullscreen;
-    // double-clicked or "Open with": the working folder is anywhere, so also look next to the program
-    std::string near_exe;
-    if (!std::filesystem::exists(model) && std::filesystem::path(model).is_relative())
-        for (const char* up : {".", ".."}) {
-            auto m = std::filesystem::path(exe_path()).parent_path() / up / model;
-            if (std::filesystem::exists(m)) {
-                model = (near_exe = m.lexically_normal().string()).c_str();
+    // Where vsr.onnx is, when given by name only: the current folder (not for an installed copy: "Open with" makes
+    // that the video's folder), the user's data folder (where an installed copy keeps your Pixel Flow, untouched by
+    // updates), then next to the program (developer builds).
+    std::string found_model;
+    if (std::filesystem::path(model).is_relative() && (installed_copy() || !std::filesystem::exists(model))) {
+        std::vector<std::filesystem::path> where = {std::filesystem::u8path(user_data_dir()) / model};
+        for (const char* up : {".", ".."}) where.push_back(std::filesystem::path(exe_path()).parent_path() / up / model);
+        for (auto& m : where)
+            if (std::error_code ec; std::filesystem::exists(m, ec)) {
+                model = (found_model = m.lexically_normal().u8string()).c_str();
                 break;
             }
-        }
-    if (selftest) return Vsr::selftest(model);
-    if (checking) return check(model);
+    }
+    // TensorRT, for Pixel Flow: loaded now from known folders only, so the player runs without it
+    std::string trt_ver, trt_why;
+    TrtFrom trt_from = load_tensorrt(saved.trt_folder, trt_ver, trt_why);
+    if (selftest)
+        return trt_from == TrtFrom::None ? fprintf(stderr, "%s\n", trt_line(trt_from, trt_ver, trt_why).c_str()), 1
+                                         : Vsr::selftest(model);
+    if (checking) return check(model, trt_from, trt_ver, trt_why);
     // open-player.log, for playback only (a --check must not push the last crash's log out to .old.log): everything
     // below that goes to stderr is also saved, with the libraries' own messages
     bool logging = start_log(log_file());
@@ -200,6 +211,7 @@ int main(int argc, char** argv) {
         atexit(stop_log);
         fprintf(stderr, "Open Player %s\n", OPEN_PLAYER_BUILD);
     } else fprintf(stderr, "log: can't write %s, running without a log file\n", log_file().c_str());
+    fprintf(stderr, "%s\n%s\n", trt_line(trt_from, trt_ver, trt_why).c_str(), driver_line().c_str());
     // double-clicked with no video: ask for one, like the Open button (cancel quits)
     struct Pick {
         std::string file;
@@ -294,31 +306,37 @@ int main(int argc, char** argv) {
         // when the network's fixed factor would overshoot the screen (1440p x2 = 5K on a 4K screen), shrink the
         // video first so the output lands exactly on it: 2560x1440 -> 1920x1080 -> 3840x2160. Gives up a little
         // source detail for 25 ms per frame instead of 46 (which dropped 1440p30 to 18 fps with the standard model).
+        // The plan uses Pixel Flow's factor, or 2x without a model (RTX VSR follows the same plan).
         int ms = worth_it ? Vsr::model_scale(model) : 0, nw = w, nh = h;
+        if (worth_it && ms <= 0) ms = 2;
         if (ms > 0 && screen_h && (w * ms > screen_w || h * ms > screen_h)) {
             double k = std::fmin((double)screen_w / (w * ms), (double)screen_h / (h * ms));
             nw = (int)std::lround(w * k) & ~1, nh = (int)std::lround(h * k) & ~1;
             fprintf(stderr, "VSR: shrinking %dx%d to %dx%d first, so %dx lands on the %dx%d screen\n", w, h, nw, nh,
                     ms, screen_w, screen_h);
         }
+        // Pixel Flow: needs your own trained model and TensorRT. Nobody gets a model with the player.
         Vsr vsr;
-        bool have_vsr = worth_it && vsr.open(model, nw, nh, st);
-        bool shrink = have_vsr && (nw != w || nh != h);
+        bool model_there = std::filesystem::exists(std::filesystem::u8path(model));
+        bool have_pxf = worth_it && model_there && trt_from != TrtFrom::None && vsr.open(model, nw, nh, st);
+        bool shrink = have_pxf && (nw != w || nh != h);
         __half* full = nullptr;  // full-size RGB frame, when it gets shrunk before the network
         if (shrink) cudaMalloc(&full, 3ull * w * h * 2);
         if (!worth_it)
             fprintf(stderr, "VSR off: the video (%dx%d) already fills the screen (%dx%d)\n", w, h, screen_w, screen_h);
-        else if (!have_vsr) fprintf(stderr, "VSR unavailable (no %s?), playing without upscaling\n", model);
-        vsr_on &= have_vsr;
-        int s = have_vsr ? vsr.scale() : 1;
-        // NVIDIA RTX VSR goes first on Windows; Pixel Flow when the GPU or driver lacks it, when chosen, and on Linux.
-        // shortcut: sized from our model's factor and screen plan, so it needs the model too; RTX can scale freely
+        else if (!have_pxf)
+            fprintf(stderr, "Pixel Flow: %s\n", !model_there ? "no model (vsr.onnx): train your own to use it"
+                                                : trt_from == TrtFrom::None ? "needs the TensorRT add-on"
+                                                                           : "couldn't load the model");
+        int s = have_pxf ? vsr.scale() : worth_it ? ms : 1;
+        // NVIDIA RTX VSR goes first on Windows, and whenever Pixel Flow can't run; Pixel Flow when chosen, and on Linux.
 #ifdef HAVE_RTX_VSR
         RtxVsr rtx;
-        bool rtx_tried = have_vsr && want_rtx;  // otherwise opened on first use (settings card, V after --no-vsr)
+        // otherwise opened on first use (settings card, V after --no-vsr)
+        bool rtx_tried = worth_it && vsr_on && (want_rtx || !have_pxf);
         bool rtx_ok = rtx_tried && rtx.open(w, h, nw * s, nh * s, st);
         bool use_rtx = rtx_ok;
-        if (have_vsr) fprintf(stderr, "VSR: %s\n", use_rtx ? "NVIDIA RTX Video Super Resolution" : "Pixel Flow");
+        fprintf(stderr, "%s\n", rtx_vsr_line(rtx_tried, rtx_ok).c_str());
         Collector col;
         bool collecting = collect_dir && use_rtx && col.open(collect_dir, w, h, nw * s, nh * s, s, st);
         if (collect_dir)
@@ -327,12 +345,16 @@ int main(int argc, char** argv) {
                                          "a video of at least 128x128, and %s writable and under 2 GB)\n",
                     collect_dir);
 #else
-        bool use_rtx = false, rtx_ok = false;
+        bool use_rtx = false, rtx_ok = false, rtx_tried = false;
         (void)want_rtx;
         if (collect_dir) fprintf(stderr, "collect: needs NVIDIA RTX VSR, which this build doesn't have\n");
 #endif
-        __half* plain = nullptr;  // RGB frame when there is no VSR engine to borrow the input buffer from
-        if (!have_vsr) cudaMalloc(&plain, 3ull * w * h * 2);
+        bool have_vsr = have_pxf || rtx_ok;  // something can upscale (grows when RTX VSR opens later)
+        vsr_on &= have_vsr;
+        if (have_vsr) fprintf(stderr, "VSR: %s\n", !vsr_on ? "off" : use_rtx ? "NVIDIA RTX Video Super Resolution"
+                                                                             : "Pixel Flow");
+        __half* plain = nullptr;  // RGB frame when there is no Pixel Flow engine to borrow the input buffer from
+        if (!have_pxf) cudaMalloc(&plain, 3ull * w * h * 2);
         if (!disp.alloc(std::max(w, nw * s), std::max(h, nh * s))) return fprintf(stderr, "display: out of GPU memory\n"), 1;
 
         const double dur = media.duration();
@@ -444,20 +466,26 @@ int main(int argc, char** argv) {
 #endif
         // live switch; false when that upscaler can't run here (no model, or no RTX VSR on this GPU/driver)
         auto set_upscaler = [&](Upscaler u) {
-            if (!have_vsr) return false;
-            bool ok = true;
+            if (!worth_it) return false;
+            std::string why;  // the chosen upscaler can't run here: say why, keep what can
             if (u == Upscaler::Rtx) {
 #ifdef HAVE_RTX_VSR
                 if (!rtx_tried) rtx_tried = true, rtx_ok = rtx.open(w, h, nw * s, nh * s, st);
 #endif
-                if (!rtx_ok) u = Upscaler::PixelFlow, ok = false;
-            }
+                if (!rtx_ok) why = "NVIDIA RTX isn't available on this GPU or driver";
+            } else if (u == Upscaler::PixelFlow && !have_pxf)
+                why = !model_there ? "Pixel Flow needs your own trained model (vsr.onnx)"
+                                   : "Pixel Flow needs the TensorRT add-on (Settings)";
+            have_vsr = have_pxf || rtx_ok;
+            if (!why.empty()) u = u == Upscaler::Rtx && have_pxf ? Upscaler::PixelFlow
+                                 : u == Upscaler::PixelFlow && rtx_ok ? Upscaler::Rtx : Upscaler::Off;
+            const bool ok = why.empty();
             if (u != Upscaler::Off) chosen = u;
             vsr_on = u != Upscaler::Off, use_rtx = u == Upscaler::Rtx;
             reset = true, step |= paused, drop_ahead();  // paused: show the change now
             if (paused && media.finished()) seek(pos);   // at the end no frame is queued: decode the last one again
             vsr_desc = describe_vsr();
-            post(ICON_SPARKLES, !ok          ? std::string("NVIDIA RTX isn't available on this GPU or driver")
+            post(ICON_SPARKLES, !ok          ? why
                                 : !vsr_on   ? std::string("VSR off")
                                 : use_rtx   ? "NVIDIA RTX, " + std::to_string(s) + "x"
                                             : "Pixel Flow, " + std::to_string(s) + "x",
@@ -624,7 +652,7 @@ int main(int argc, char** argv) {
                 if (f->width == w && f->height == h) {
                     Prepared p{f, pts, nullptr, w, h, vsr_on, {}};
                     for (auto& e : p.ev) cudaEventCreate(&e);
-                    __half* in = shrink ? full : have_vsr ? vsr.input() : plain;
+                    __half* in = shrink ? full : have_pxf ? vsr.input() : plain;
                     Uint64 u0 = SDL_GetTicksNS();
                     cudaEventRecord(p.ev[0], st);
                     YuvFrame yuv = media.to_gpu(f, st);
@@ -634,9 +662,11 @@ int main(int argc, char** argv) {
                     cudaEventRecord(p.ev[1], st);
 #ifdef HAVE_RTX_VSR
                     if (vsr_on && use_rtx && !(p.out = rtx.run(in))) {  // full-size input
-                        use_rtx = rtx_ok = false;  // NVIDIA's upscaler failed: Pixel Flow from here on
+                        use_rtx = rtx_ok = false;  // NVIDIA's upscaler failed: Pixel Flow from here on, if any
                         chosen = Upscaler::PixelFlow;
-                        fprintf(stderr, "VSR: NVIDIA RTX failed, switching to Pixel Flow\n");
+                        have_vsr = vsr_on = have_pxf;
+                        fprintf(stderr, have_pxf ? "VSR: NVIDIA RTX failed, switching to Pixel Flow\n"
+                                                 : "VSR: NVIDIA RTX failed, playing without upscaling\n");
                         vsr_desc = describe_vsr();
                         if (shrink) shrink_rgb(full, w, h, vsr.input(), nw, nh, st);
                     }
@@ -692,14 +722,19 @@ int main(int argc, char** argv) {
                     if (screen_ids[i] == SDL_GetDisplayForWindow(win)) us.playing_on = (int)i;
                 }
 #ifdef HAVE_RTX_VSR
-                us.rtx_available = have_vsr && (!rtx_tried || rtx_ok);  // not tried yet: offered, opened on first use
+                us.rtx_available = worth_it && (!rtx_tried || rtx_ok);  // not tried yet: offered, opened on first use
 #endif
-                us.pxf_available = have_vsr;
+                us.vsr_available = have_vsr || us.rtx_available;
+                us.pxf_available = have_pxf;
+                us.pxf_why = !model_there ? "No Pixel Flow model: train your own (vsr.onnx)"
+                             : trt_from == TrtFrom::None ? "Needs the TensorRT add-on"
+                                                         : "The model couldn't be loaded (see the log)";
                 us.nvdec_available = media.nvdec() || cfg.cpu_decode;  // CPU chosen: NVDEC wasn't even tried
-                if (!have_vsr)
-                    us.vsr_unavailable = worth_it ? "no Pixel Flow model (" + std::string(model) + ") found"
-                                                  : "the video already fills the screen";
+                if (!worth_it) us.vsr_unavailable = "the video already fills the screen";
+                else if (!have_pxf && !us.rtx_available)
+                    us.vsr_unavailable = "NVIDIA RTX VSR isn't available here, and " + us.pxf_why;
                 us.build = OPEN_PLAYER_BUILD;
+                us.versions = {trt_line(trt_from, trt_ver, trt_why), rtx_vsr_line(rtx_tried, rtx_ok), driver_line()};
                 if (logging) us.log_path = log_file();
                 auto acts = draw_ui(us);
                 if (full && ui_controls_hidden() && !ui_has_keyboard()) ImGui::SetMouseCursor(ImGuiMouseCursor_None);  // the SDL3 backend hides the OS cursor at its next NewFrame
@@ -788,7 +823,7 @@ int main(int argc, char** argv) {
                            disp.gpu_name(), disp.zero_copy() ? "zero-copy" : "CPU copy", media.decode_desc().c_str(),
                            w, h, media.fps(), screen_w, screen_h,
                            SDL_GetDisplayForWindow(win) == screen_id ? "true" : "false", vsr_desc.c_str(),
-                           trt_version().c_str());
+                           trt_from == TrtFrom::None ? "none" : trt_ver.c_str());
                     info_done = true;
                 }
                 if (stats) {
