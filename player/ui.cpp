@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 
+#include "collect.h"
 #include "imgui.h"
 #include "imgui_internal.h"  // the self-test finds the volume panel's window
 #include "theme.h"
@@ -95,7 +96,7 @@ std::string quote_arg(const std::string& a) {
 std::vector<std::string> restart_args(const std::vector<std::string>& argv, const std::string& video) {
     std::vector<std::string> out = argv;
     for (size_t i = 1; i < out.size(); i++) {
-        if (out[i] == "--model" || out[i] == "--screen") i++;  // skip the flag's value
+        if (out[i] == "--model" || out[i] == "--screen" || out[i] == "--collect") i++;  // skip the flag's value
         else if (out[i].empty() || out[i][0] != '-') return out[i] = video, out;
     }
     out.push_back(video);
@@ -456,6 +457,18 @@ int ui_selftest() {
     check(restart_args({"open-player", "--model", "m.onnx", "a.mkv", "--screen", "2"}, "/x/My Movie (2012).mkv") ==
           (std::vector<std::string>{"open-player", "--model", "m.onnx", "/x/My Movie (2012).mkv", "--screen", "2"}));
     check(restart_args({"open-player", "a.mkv"}, "/b.mp4") == (std::vector<std::string>{"open-player", "/b.mp4"}));
+    check(restart_args({"open-player", "--collect", "pairs", "a.mkv"}, "/b.mp4") ==  // a folder, not the video
+          (std::vector<std::string>{"open-player", "--collect", "pairs", "/b.mp4"}));
+    // the pair files train.py --pairs reads: header back as written
+    {
+        std::string pf = (std::filesystem::temp_directory_path() / "open-player-uitest.pair").string();
+        std::vector<uint8_t> lr(2 * 3 * 4 * 4, 7), hr(2 * 3 * 8 * 8, 9);
+        int T = 0, lw = 0, lh = 0, hw = 0, hh = 0;
+        check(write_pair_file(pf, 2, 4, 4, 8, 8, lr.data(), hr.data()) && read_pair_header(pf, T, lw, lh, hw, hh) &&
+              T == 2 && lw == 4 && lh == 4 && hw == 8 && hh == 8);
+        check(std::filesystem::file_size(pf) == 8 + 5 * 4 + lr.size() + hr.size());
+        std::filesystem::remove(pf);
+    }
     // Windows restart: one argument each after the C runtime splits the command line again
     check(quote_arg("plain.mkv") == "plain.mkv" && quote_arg("") == "\"\"");
     // a test run must never write the user's own recent list
