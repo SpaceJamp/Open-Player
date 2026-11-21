@@ -62,6 +62,9 @@ if(WIN32)
   target_compile_definitions(open-player PRIVATE _CRT_SECURE_NO_WARNINGS)  # getenv, strerror: fine here
   target_sources(open-player PRIVATE open-player.manifest)  # UTF-8 code page for file names
   target_sources(open-player PRIVATE open-player.rc)  # the program's icon
+  # a windowed program: no console window on double-click (main() still the entry; see the top of main)
+  set_target_properties(open-player PROPERTIES WIN32_EXECUTABLE TRUE)
+  target_link_options(open-player PRIVATE /ENTRY:mainCRTStartup)
   # TensorRT's DLLs (incl. the builder resources it loads when making an engine) next to the exe; vcpkg copies its own
   file(GLOB TENSORRT_DLLS ${TENSORRT_ROOT}/bin/nvinfer*.dll ${TENSORRT_ROOT}/bin/nvonnxparser*.dll)
   add_custom_command(TARGET open-player POST_BUILD

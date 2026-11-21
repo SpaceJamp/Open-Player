@@ -158,6 +158,18 @@ static const SDL_DialogFileFilter VIDEO_FILTERS[] = {{"Videos", "mp4;mkv;webm;mo
                                                       {"All files", "*"}};
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // A windowed program (no console window of its own). Started from a terminal, print there (--check, --version,
+    // usage); redirected (tests, the control panel) the pipes are used as they are. The log file gets it either way.
+    auto no_handle = [](DWORD h) {  // not a pipe or a file: nothing, or a console handle we must attach to first
+        DWORD t = GetFileType(GetStdHandle(h));
+        return t != FILE_TYPE_PIPE && t != FILE_TYPE_DISK;
+    };
+    if ((no_handle(STD_OUTPUT_HANDLE) || no_handle(STD_ERROR_HANDLE)) && AttachConsole(ATTACH_PARENT_PROCESS)) {
+        if (no_handle(STD_OUTPUT_HANDLE)) freopen("CONOUT$", "w", stdout);
+        if (no_handle(STD_ERROR_HANDLE)) freopen("CONOUT$", "w", stderr);
+    }
+#endif
     const char *path = nullptr, *model = "vsr.onnx", *collect_dir = nullptr;
     bool vsr_on = true, selftest = false, checking = false, stats = false, fullscreen = false, want_rtx = true,
          cpu_decode = false, start_paused = false;
