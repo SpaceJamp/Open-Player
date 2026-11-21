@@ -13,16 +13,16 @@ static const char MAGIC[8] = {'O', 'P', 'P', 'A', 'I', 'R', '1', '\0'};
 bool write_pair_file(const std::string& path, int T, int lw, int lh, int hw, int hh, const uint8_t* lr,
                      const uint8_t* hr) {
     std::string tmp = path + ".tmp";  // train.py may be reading the folder: only whole files get the real name
-    {
-        std::ofstream f(tmp, std::ios::binary);
-        int32_t head[5] = {T, lw, lh, hw, hh};
-        f.write(MAGIC, sizeof MAGIC).write((const char*)head, sizeof head);
-        f.write((const char*)lr, (size_t)T * 3 * lw * lh).write((const char*)hr, (size_t)T * 3 * hw * hh);
-        if (!f) return false;
-    }
+    std::ofstream f(tmp, std::ios::binary);
+    int32_t head[5] = {T, lw, lh, hw, hh};
+    f.write(MAGIC, sizeof MAGIC).write((const char*)head, sizeof head);
+    f.write((const char*)lr, (size_t)T * 3 * lw * lh).write((const char*)hr, (size_t)T * 3 * hw * hh);
+    f.close();  // a full disk often shows only here
     std::error_code ec;
-    std::filesystem::rename(tmp, path, ec);
-    return !ec;
+    if (f) std::filesystem::rename(tmp, path, ec);
+    if (f && !ec) return true;
+    std::filesystem::remove(tmp, ec);  // no half-written .tmp left behind
+    return false;
 }
 
 bool read_pair_header(const std::string& path, int& T, int& lw, int& lh, int& hw, int& hh) {
@@ -40,11 +40,15 @@ static constexpr int CROP = 128;          // low-res crop; RTX VSR makes it CROP
 static constexpr double EVERY = 10;       // seconds of playback between clips
 static constexpr uint64_t CAP = 2ull << 30;  // the folder stops growing at 2 GB
 
-bool Collector::open(const std::string& dir, int w, int h, int out_w, int out_h, int scale, cudaStream_t s) {
+bool Collector::open(const std::string& dir, int w, int h, int out_w, int out_h, int scale, double fps,
+                     cudaStream_t s) {
     dir_ = dir, w_ = w, h_ = h, s_ = scale, st_ = s;
-    if (w < CROP || h < CROP || scale < 2 || out_w != w * scale || out_h != h * scale) return false;
+    if (fps > 0) gap_ = 1.5 / fps;
+    // train.py --pairs trains a 2x model; other scales would be refused there
+    if (w < CROP || h < CROP || scale != 2 || out_w != w * scale || out_h != h * scale) return false;
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
+    if (!std::filesystem::is_directory(dir, ec)) return false;
     for (auto& e : std::filesystem::directory_iterator(dir, ec))
         if (e.is_regular_file(ec)) bytes_ += e.file_size(ec);
     if (bytes_ >= CAP) return false;
@@ -55,7 +59,8 @@ bool Collector::open(const std::string& dir, int w, int h, int out_w, int out_h,
 
 void Collector::add(const __half* frame, const __half* up, double pts) {
     if (off_) return;
-    if (got_ && (pts <= prev_ || pts - prev_ > 0.5)) got_ = 0;  // a seek or a gap: no longer consecutive frames
+    if (pts < last_) last_ = -1e9;  // went back past the last clip: don't wait for playback to catch up
+    if (got_ && (pts <= prev_ || pts - prev_ > gap_)) got_ = 0;  // a seek or a dropped frame: no longer consecutive
     if (!got_) {
         if (pts - last_ < EVERY) return;
         static std::mt19937 rng(std::random_device{}());
@@ -71,7 +76,8 @@ void Collector::add(const __half* frame, const __half* up, double pts) {
                           H * 2, H, cudaMemcpyDeviceToDevice, st_);
     }
     cudaMemcpyAsync(tmp_.data(), crop_, tmp_.size() * 2, cudaMemcpyDeviceToHost, st_);
-    // shortcut: waits for the GPU, ~1 ms for 8 frames every 10 s; use pinned memory and events if it ever shows
+    // shortcut: waits for all queued GPU work (about one frame's upscale) on 8 frames every 10 s; use pinned memory
+    // and events if it ever shows as dropped frames
     cudaStreamSynchronize(st_);
     auto to8 = [](__half v) { return (uint8_t)std::clamp(__half2float(v) * 255.f + .5f, 0.f, 255.f); };
     std::transform(tmp_.begin(), tmp_.begin() + n, lr_.begin() + (size_t)got_ * n, to8);

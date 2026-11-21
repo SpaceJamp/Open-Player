@@ -246,11 +246,11 @@ int main(int argc, char** argv) {
         bool use_rtx = have_vsr && want_rtx && rtx.open(w, h, nw * s, nh * s, st);
         if (have_vsr) fprintf(stderr, "VSR: %s\n", use_rtx ? "NVIDIA RTX Video Super Resolution" : "our model");
         Collector col;
-        bool collecting = collect_dir && use_rtx && col.open(collect_dir, w, h, nw * s, nh * s, s, st);
+        bool collecting = collect_dir && use_rtx && col.open(collect_dir, w, h, nw * s, nh * s, s, media.fps(), st);
         if (collect_dir)
             fprintf(stderr, collecting ? "collect: saving RTX VSR training pairs in %s\n"
                                        : "collect: off (needs RTX VSR at exactly 2x - no shrinking to fit the screen -, "
-                                         "a video of at least 128x128, and %s under 2 GB)\n",
+                                         "a video of at least 128x128, and %s writable and under 2 GB)\n",
                     collect_dir);
 #else
         const bool use_rtx = false;
@@ -328,6 +328,9 @@ int main(int argc, char** argv) {
             else wall_t0 = SDL_GetTicksNS();
             paused = p;
             media.set_paused(p);
+#ifdef HAVE_RTX_VSR
+            col.restart();  // the clock jumps over the pause: frames on either side aren't one clip
+#endif
         };
         UiNotice notice;
         auto post = [&](const char* icon, std::string text, float level = -1, double hold = 1) {
@@ -450,6 +453,9 @@ int main(int argc, char** argv) {
                 serial = media.serial();
                 reset = step = true;
                 drop_ahead();
+#ifdef HAVE_RTX_VSR
+                col.restart();
+#endif
             }
 
             // Prepare a frame up to one frame early (VSR on). A second one only once the first is due, so it's

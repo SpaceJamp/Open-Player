@@ -118,11 +118,18 @@ with tempfile.TemporaryDirectory() as d:
     head = b"OPPAIR1\0" + np.array([2, 6, 4, 12, 8], "<i4").tobytes()
     Path(f"{d}/pair-1.bin").write_bytes(head + lr8.tobytes() + hr8.tobytes())
     Path(f"{d}/pair-2.bin.tmp").write_bytes(b"half written")  # the player renames only whole files
-    pairs = train.Pairs(d)
-    assert len(pairs.files) == 1, pairs.files
-    plr, phr = pairs[0]
+    Path(f"{d}/pair-3.bin").write_bytes(head + lr8.tobytes())  # cut short
+    Path(f"{d}/pair-4.bin").write_bytes(b"OPPAIR1\0" + np.array([2, 6, 4, 18, 12], "<i4").tobytes()
+                                        + lr8.tobytes() + np.zeros(2 * 3 * 12 * 18, np.uint8).tobytes())  # 3x
+    Path(f"{d}/pair-5.bin").write_bytes(head + lr8.tobytes() + hr8.tobytes())  # deleted below, mid-run
+    pairs = train.Pairs(d, 2)
+    assert [f.name for f in pairs.files] == ["pair-1.bin", "pair-5.bin"], pairs.files
+    Path(f"{d}/pair-5.bin").unlink()
+    for _ in range(8):  # the missing file is skipped, not a crash
+        plr, phr = pairs[0]
     assert plr.shape == (2, 3, 4, 6) and phr.shape == (2, 3, 8, 12) and plr.dtype == torch.uint8
     assert np.array_equal(plr.numpy(), lr8) and np.array_equal(phr.numpy(), hr8)
+    assert [f.name for f in train.Pairs(d, 3).files] == ["pair-4.bin"]  # a 3x model takes only the 3x file
 
 # clip sampling: each title (a top-level file or folder, e.g. a whole series) is picked equally often
 w = train.title_weights([Path("/v/a.mp4"), Path("/v/S/e1.mkv"), Path("/v/S/e2.mkv"), Path("/v/S/x/e3.mkv")], Path("/v"))

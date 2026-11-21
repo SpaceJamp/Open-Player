@@ -21,15 +21,17 @@ bool read_pair_header(const std::string& path, int& T, int& lw, int& lh, int& hw
 class Collector {
 public:
     ~Collector();
-    // false: playback's upscale isn't exactly scale x, the video is smaller than a crop, or the folder is full
-    bool open(const std::string& dir, int w, int h, int out_w, int out_h, int scale, cudaStream_t s);
+    // false: playback's upscale isn't exactly 2x, the video is smaller than a crop, or the folder is unusable or full
+    bool open(const std::string& dir, int w, int h, int out_w, int out_h, int scale, double fps, cudaStream_t s);
     // the frame just decoded and RTX VSR's upscale of it (planar fp16 RGB), at pts seconds; every frame while playing
     void add(const __half* frame, const __half* up, double pts);
+    // a seek or pause: drop the clip in progress (its frames would not be consecutive)
+    void restart() { got_ = 0; }
 
 private:
     std::string dir_;
     int w_ = 0, h_ = 0, s_ = 0, got_ = 0, x_ = 0, y_ = 0;
-    double last_ = -1e9, prev_ = 0;
+    double last_ = -1e9, prev_ = 0, gap_ = 0.5;  // gap_: longer than this between frames means one was dropped
     uint64_t bytes_ = 0;  // in the folder so far
     bool off_ = false;
     cudaStream_t st_ = nullptr;
