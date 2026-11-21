@@ -3,6 +3,8 @@
 #include <SDL3/SDL.h>
 #include <atomic>
 #include <thread>
+#include <ctime>
+#include <memory>
 #include <cuda.h>
 #ifdef _WIN32
 #define NOMINMAX
@@ -39,6 +41,7 @@
 #include "logfile.h"
 #include "trt_loader.h"
 #include "addon.h"
+#include "update.h"
 #ifdef HAVE_RTX_VSR
 #include "rtx_vsr.h"
 #endif
@@ -606,7 +609,37 @@ int main(int argc, char** argv) {
             if (settings_open) monitors = list_screens(&screen_ids);
         };
 
+        // Updates, installed copies only: at most one check a day on its own thread (state shared, so the thread may
+        // outlive a quick exit), then "Update now" in About downloads the signed installer and runs it.
+        auto upd = std::make_shared<UpdateCheck>();
+        std::thread upd_check, upd_dl;
+        std::atomic<bool> upd_running{false}, upd_done{false}, upd_cancel{false};
+        std::atomic<uint64_t> upd_got{0}, upd_total{0};
+        std::string upd_path, upd_error;
+        bool upd_ok = false, upd_checking = false;
+        const int my_build = build_number(OPEN_PLAYER_BUILD);
+        if (installed_copy() && my_build > 0 &&
+            due_for_check((long long)time(nullptr), saved.last_update_check, saved.check_updates)) {
+            saved.last_update_check = (long long)time(nullptr), save_prefs();
+            upd_checking = true;
+            upd_check = std::thread([upd, my_build] { check_for_update(*upd, my_build); });
+        }
+
         while (running) {
+            if (upd_checking && upd->done) {
+                upd_check.join(), upd_checking = false;
+                if (upd->available)
+                    post(ICON_SPARKLES, "Update available: build " + std::to_string(upd->info.build) + " (Settings)", -1, 4);
+                else if (!upd->error.empty()) fprintf(stderr, "update check: %s\n", upd->error.c_str());
+            }
+            if (upd_done) {  // the installer is downloaded and checked: run it, the player closes
+                upd_dl.join(), upd_running = false, upd_done = false;
+                if (!upd_ok) post(ICON_X, "Update failed: " + upd_error, -1, 4);
+                else if (save_prefs(), fprintf(stderr, "updating to build %d\n", upd->info.build), run_installer(upd_path))
+                    running = false;
+                else post(ICON_X, "Update failed: couldn't start the installer", -1, 4);
+            }
+            if (upd_running && settings_open) dirty = true;
             if (volume_unsaved && now() - volume_saved_at >= 1)
                 save_settings(settings_file(), saved), volume_unsaved = false, volume_saved_at = now();
             if (addon_done) {  // the add-on download finished: load it by reopening, or say what went wrong
@@ -768,6 +801,15 @@ int main(int argc, char** argv) {
                 us.build = OPEN_PLAYER_BUILD;
                 us.versions = {trt_line(trt_from, trt_ver, trt_why), rtx_vsr_line(rtx_tried, rtx_ok), driver_line()};
                 us.trt_addon = trt_from == TrtFrom::AddOn;
+                if (upd_checking) us.update_status = "Checking for updates...";
+                else if (upd_running) {
+                    us.update_status = "Downloading build " + std::to_string(upd->info.build) + "...";
+                    us.update_progress = upd_total ? (float)((double)upd_got / upd_total) : 0;
+                } else if (upd->available)
+                    us.update_status = "Update available: build " + std::to_string(upd->info.build),
+                    us.update_build = upd->info.build;
+                else if (!installed_copy()) us.update_status = "Updates: only for installed copies";
+                else if (upd->done && !upd->error.empty()) us.update_status = "Last check: " + upd->error;
                 us.trt_status = trt_line(trt_from, trt_ver, trt_why);
                 if (addon_running) {
                     us.addon_progress = (float)((double)addon_got / TRT_WHEEL_SIZE);
@@ -825,6 +867,16 @@ int main(int argc, char** argv) {
                         break;
                     case UiAction::CancelTensorRT: addon_cancel = true; break;
                     case UiAction::ChooseTensorRTFolder: show_folder_dialog(); break;
+                    case UiAction::SetCheckUpdates: saved.check_updates = cfg.check_updates = a.value != 0, save_prefs(); break;
+                    case UiAction::InstallUpdate:
+                        if (upd_running || !upd->available) break;
+                        upd_running = true, upd_done = false, upd_cancel = false, upd_got = 0;
+                        upd_dl = std::thread([&] {
+                            upd_ok = download_update(*upd, [&](uint64_t g, uint64_t t) { upd_got = g, upd_total = t; },
+                                                     upd_cancel, upd_path, upd_error);
+                            upd_done = true;
+                        });
+                        break;
                     case UiAction::RemoveTensorRT:
                         remove_tensorrt_addon();  // in use now: removed when the player reopens
                         if (saved.trt_folder.empty()) reopen("Removing TensorRT...", true);
@@ -892,6 +944,8 @@ int main(int argc, char** argv) {
             }
         }
         stop_addon();  // a download in progress is cancelled (its partial file is deleted)
+        if (upd_dl.joinable()) upd_cancel = true, upd_dl.join();
+        if (upd_check.joinable()) upd_check.detach();  // owns its shared state; may still be waiting on the network
         if (volume_unsaved) save_settings(settings_file(), saved);
         drop_ahead();
         for (auto& e : rgba_ev) cudaEventDestroy(e);

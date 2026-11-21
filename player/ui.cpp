@@ -489,6 +489,35 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
     ImGui::TextUnformatted(about_text(s.build, s.log_path, s.versions).c_str());
     ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
+#ifdef _WIN32
+    {  // updates: the switch, then what the last check found, an Update button or the download's progress
+        float rh = 0;
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Check for updates", 22 * sc, 40 * sc, sc, rh);
+        if (toggle("##upd", c, s.settings.check_updates, sc))
+            out.push_back({UiAction::SetCheckUpdates, s.settings.check_updates ? 0.0 : 1.0});
+        card_row_end(row, rh + 4 * sc);
+        if (!s.update_status.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, s.update_build ? COL_PLAYED : COL_DIM);
+            ImGui::PushTextWrapPos(0);
+            ImGui::TextUnformatted(s.update_status.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::PopStyleColor();
+        }
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float aw = ImGui::GetContentRegionAvail().x;
+        if (s.update_progress >= 0) {
+            dl->AddRectFilled({p.x, p.y + 6 * sc}, {p.x + aw, p.y + 10 * sc}, col(COL_TRACK), 2 * sc);
+            dl->AddRectFilled({p.x, p.y + 6 * sc}, {p.x + aw * std::clamp(s.update_progress, 0.f, 1.f), p.y + 10 * sc},
+                              col(COL_PLAYED), 2 * sc);
+            card_row_end(p, 16 * sc);
+        } else if (s.update_build) {
+            std::vector<Seg> b = {{"Update now", true, nullptr}};
+            if (segmented("update", {p.x + aw - segmented_w(b, sc), p.y}, b, -1, sc) == 0)
+                out.push_back({UiAction::InstallUpdate});
+            card_row_end(p, 32 * sc);
+        }
+    }
+#endif
 
     ImGui::End();
     ImGui::PopStyleColor();
