@@ -34,6 +34,7 @@
 #include "vsr.h"
 #include "collect.h"
 #include "settings.h"
+#include "build_info.h"  // generated: OPEN_PLAYER_BUILD
 #ifdef HAVE_RTX_VSR
 #include "rtx_vsr.h"
 #endif
@@ -77,6 +78,7 @@ static std::vector<ScreenInfo> list_screens(std::vector<SDL_DisplayID>* ids = nu
 }
 
 static int check(const char* model) {
+    printf("Open Player %s\n", OPEN_PLAYER_BUILD);
     int fails = 0;
     auto line = [&](const char* verdict, const char* what, const std::string& detail) {
         printf("%-4s  %-16s %s\n", verdict, what, detail.c_str());
@@ -166,6 +168,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--selftest")) selftest = true;
         else if (!strcmp(argv[i], "--check")) checking = true;
         else if (!strcmp(argv[i], "--uitest")) return ui_selftest();
+        else if (!strcmp(argv[i], "--version")) return printf("Open Player %s\n", OPEN_PLAYER_BUILD), 0;
         else if (argv[i][0] != '-') (selftest || checking ? model : path) = argv[i];
         else return fputs(USAGE, stderr), 2;
     }

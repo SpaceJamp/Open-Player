@@ -117,8 +117,8 @@ bool ui_has_keyboard() {
     return ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) || ImGui::GetIO().WantTextInput;
 }
 
-bool controls_visible(double now, double last_mouse, bool paused, bool hovered) {
-    return paused || hovered || now - last_mouse < 2;
+bool controls_visible(double now, double last_mouse, bool paused, bool hovered, double hide_after) {
+    return paused || hovered || now - last_mouse < hide_after;
 }
 
 float fade_alpha(double now, double changed_at, bool visible, double in, double out) {
@@ -232,7 +232,241 @@ void draw_notice(const UiNotice& n, float sc, float a) {
         if (bx > b0.x) dl->AddRectFilled(b0, {bx, b1.y}, ImGui::GetColorU32(COL_PLAYED, a), bar_h / 2);
     }
 }
+
+// --- the settings card: drawn at the window's cursor, each piece ends with an item that moves the cursor down ---
+constexpr ImU32 COL_SUBTLE = IM_COL32(255, 255, 255, 20), COL_DIM = IM_COL32(240, 242, 248, 150);
+
+// A section title: icon and name, dimmed, with space above
+void card_heading(const char* icon, const char* text, float sc) {
+    ImGui::Dummy({1, 6 * sc});
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float px = 13 * sc;
+    std::string t = theme_loaded() ? std::string(icon) + "  " + text : text;
+    ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), px, p, col(COL_DIM), t.c_str());
+    ImGui::Dummy({1, px + 4 * sc});
+}
+
+// A row: its label on the left (and a dimmer note under it), the control right-aligned by the caller at the
+// returned position. h: the control's height.
+ImVec2 card_row(const char* label, float h, float control_w, float sc) {
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float w = ImGui::GetContentRegionAvail().x, px = 15 * sc;
+    ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), px, {p.x, std::round(p.y + (h - px) / 2)}, col(COL_TEXT),
+                                        label);
+    return {p.x + w - control_w, p.y};
+}
+void card_row_end(ImVec2 row_start, float h) {
+    ImGui::SetCursorScreenPos(row_start);
+    ImGui::Dummy({ImGui::GetContentRegionAvail().x, h});
+}
+
+struct Seg {
+    const char* label;
+    bool enabled;
+    const char* why;  // tooltip when disabled
+};
+float segmented_w(const std::vector<Seg>& segs, float sc) {
+    float w = 0;
+    for (auto& s : segs) w += text_size(14 * sc, s.label).x + 24 * sc;
+    return w + 4 * sc;
+}
+// Pill-shaped choice; the selected segment is violet. Returns the clicked index, or -1.
+int segmented(const char* id, ImVec2 p, const std::vector<Seg>& segs, int selected, float sc) {
+    const float h = 28 * sc, px = 14 * sc, inner = 2 * sc;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, {p.x + segmented_w(segs, sc), p.y + h}, col(COL_SUBTLE), h / 2);
+    float x = p.x + inner;
+    int clicked = -1;
+    for (int i = 0; i < (int)segs.size(); i++) {
+        const float w = text_size(px, segs[i].label).x + 24 * sc;
+        const ImVec2 a{x, p.y + inner}, b{x + w, p.y + h - inner};
+        ImGui::SetCursorScreenPos(a);
+        ImGui::PushID(id);
+        ImGui::PushID(i);
+        ImGui::BeginDisabled(!segs[i].enabled);
+        if (ImGui::InvisibleButton("##seg", {w, b.y - a.y}) && i != selected) clicked = i;
+        ImGui::EndDisabled();
+        const bool hov = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+        ImGui::PopID();
+        ImGui::PopID();
+        if (i == selected) dl->AddRectFilled(a, b, col(COL_VSR_ON), (b.y - a.y) / 2);
+        else if (hov && segs[i].enabled) dl->AddRectFilled(a, b, col(IM_COL32(0x3f, 0xd0, 0xe0, 48)), (b.y - a.y) / 2);
+        if (hov && !segs[i].enabled && segs[i].why) ImGui::SetTooltip("%s", segs[i].why);
+        text_centred(dl, px, {x + w / 2, p.y + h / 2}, col(COL_TEXT, segs[i].enabled ? 1 : .35f), segs[i].label);
+        x += w;
+    }
+    return clicked;
+}
+
+// On/off switch. Returns true when clicked.
+bool toggle(const char* id, ImVec2 p, bool on, float sc) {
+    const float w = 40 * sc, h = 22 * sc, r = h / 2 - 3 * sc;
+    ImGui::SetCursorScreenPos(p);
+    const bool pressed = ImGui::InvisibleButton(id, {w, h});
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, {p.x + w, p.y + h}, col(on ? COL_VSR_ON : COL_TRACK), h / 2);
+    if (ImGui::IsItemHovered()) dl->AddRect(p, {p.x + w, p.y + h}, col(COL_PLAYED), h / 2, 0, 1.5f * sc);
+    dl->AddCircleFilled({on ? p.x + w - h / 2 : p.x + h / 2, p.y + h / 2}, r, col(IM_COL32_WHITE));
+    return pressed;
+}
+
+void draw_settings(const UiState& s, std::vector<UiAction>& out) {
+    const ImGuiIO& io = ImGui::GetIO();
+    const float sc = s.scale, W = std::fmin(520 * sc, io.DisplaySize.x - 32 * sc);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {14 * sc, 12 * sc});
+    ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 8 * sc);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(20, 22, 30, 235));  // opaque enough to read over video
+    ImGui::SetNextWindowPos({io.DisplaySize.x / 2, io.DisplaySize.y / 2}, ImGuiCond_Always, {.5f, .5f});
+    ImGui::SetNextWindowSizeConstraints({W, 0}, {W, io.DisplaySize.y * .8f});
+    ImGui::Begin("settings", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float bh = 32 * sc, rh = 30 * sc;
+
+    // header: gear, title, X
+    {
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float aw = ImGui::GetContentRegionAvail().x, px = 18 * sc;
+        std::string t = theme_loaded() ? std::string(ICON_SETTINGS) + "  Settings" : "Settings";
+        dl->AddText(ImGui::GetFont(), px, {p.x, std::round(p.y + (bh - px) / 2)}, col(COL_TEXT), t.c_str());
+        if (icon_button("##close", ICON_X, "Close", {p.x + aw - button_w("Close", bh, sc), p.y}, bh, sc))
+            out.push_back({UiAction::ToggleSettings});
+        card_row_end(p, bh);
+    }
+
+    card_heading(ICON_SPARKLES, "UPSCALING", sc);
+    if (!s.vsr_unavailable.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_DIM);
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextUnformatted(("Not available: " + s.vsr_unavailable).c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+    } else {
+        std::vector<Seg> segs = {{"NVIDIA RTX", s.rtx_available, "Not available on this GPU or driver"},
+                                 {"Pixel Flow", s.pxf_available, "No Pixel Flow model (vsr.onnx) loaded"},
+                                 {"Off", true, nullptr}};
+#ifndef HAVE_RTX_VSR
+        segs.erase(segs.begin());  // this build has no RTX VSR
+        const int base = 1;
+#else
+        const int base = 0;
+#endif
+        const float sw = segmented_w(segs, sc);
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Upscaler", 28 * sc, sw, sc);
+        int i = segmented("up", c, segs, (int)s.settings.upscaler - base, sc);
+        if (i >= 0) out.push_back({UiAction::SetUpscaler, (double)(i + base)});
+        card_row_end(row, 28 * sc);
+    }
+
+    card_heading(ICON_CPU, "DECODING", sc);
+    {
+        std::vector<Seg> segs = {{"GPU (NVDEC)", s.nvdec_available, "NVDEC isn't available on this GPU or driver"},
+                                 {"CPU", true, nullptr}};
+        const float sw = segmented_w(segs, sc);
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Decoder", 28 * sc, sw, sc);
+        int i = segmented("dec", c, segs, s.settings.cpu_decode ? 1 : 0, sc);
+        if (i >= 0) out.push_back({UiAction::SetDecoder, (double)i});
+        card_row_end(row, 28 * sc);
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_DIM);
+        ImGui::TextUnformatted("Changing it reopens the video where it is.");
+        ImGui::PopStyleColor();
+    }
+
+    card_heading(ICON_DESKTOP, "DISPLAY", sc);
+    if (s.screens.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_DIM);
+        ImGui::TextUnformatted("No monitors reported.");
+        ImGui::PopStyleColor();
+    }
+    for (int i = 0; i < (int)s.screens.size(); i++) {  // one row per monitor; picking one reopens the video there
+        const ScreenInfo& m = s.screens[i];
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float aw = ImGui::GetContentRegionAvail().x, px = 15 * sc, tpx = 12 * sc;
+        ImGui::PushID(i);
+        if (ImGui::InvisibleButton("##screen", {aw, rh}) && i != s.screen_index)
+            out.push_back({UiAction::SetScreen, (double)i});
+        const bool hov = ImGui::IsItemHovered();
+        ImGui::PopID();
+        if (hov) dl->AddRectFilled(p, {p.x + aw, p.y + rh}, col(COL_SUBTLE), 8 * sc);
+        const float cy = p.y + rh / 2, r = 7 * sc;
+        dl->AddCircle({p.x + 10 * sc + r, cy}, r, col(i == s.screen_index ? COL_VSR_ON : COL_DIM), 0, 1.5f * sc);
+        if (i == s.screen_index) dl->AddCircleFilled({p.x + 10 * sc + r, cy}, r - 3 * sc, col(COL_VSR_ON));
+        char mode[64];
+        snprintf(mode, sizeof mode, "%dx%d @ %.0f Hz", m.w, m.h, m.hz);
+        std::string tags = std::string(m.primary ? "primary" : "") + (m.primary && i == s.playing_on ? " · " : "") +
+                           (i == s.playing_on ? "playing here" : "");
+        const float tags_w = text_size(tpx, tags.c_str()).x, mode_w = text_size(px, mode).x;
+        const float x_num = p.x + 10 * sc + 2 * r + 10 * sc, x_name = x_num + 20 * sc;
+        const float x_tags = p.x + aw - 8 * sc - tags_w, x_mode = x_tags - 14 * sc - mode_w;
+        const ImVec4 clip{x_name, p.y, x_mode - 10 * sc, p.y + rh};  // long names are cut, not overlapped
+        dl->AddText(ImGui::GetFont(), px, {x_num, std::round(cy - px / 2)}, col(COL_DIM), std::to_string(i + 1).c_str());
+        dl->AddText(ImGui::GetFont(), px, {x_name, std::round(cy - px / 2)}, col(COL_TEXT), m.name.c_str(), nullptr, 0,
+                    &clip);
+        dl->AddText(ImGui::GetFont(), px, {x_mode, std::round(cy - px / 2)}, col(COL_TEXT), mode);
+        dl->AddText(ImGui::GetFont(), tpx, {x_tags, std::round(cy - tpx / 2)}, col(COL_PLAYED), tags.c_str());
+    }
+    {
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Start fullscreen", 22 * sc, 40 * sc, sc);
+        if (toggle("##fs", c, s.settings.start_fullscreen, sc))
+            out.push_back({UiAction::SetStartFullscreen, s.settings.start_fullscreen ? 0.0 : 1.0});
+        card_row_end(row, 26 * sc);
+    }
+
+    card_heading(ICON_ADJUSTMENTS, "PLAYBACK & CONTROLS", sc);
+    {
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Remember volume", 22 * sc, 40 * sc, sc);
+        if (toggle("##vol", c, s.settings.remember_volume, sc))
+            out.push_back({UiAction::SetRememberVolume, s.settings.remember_volume ? 0.0 : 1.0});
+        card_row_end(row, 26 * sc);
+    }
+    {
+        static const int secs[] = {1, 2, 3, 5};
+        std::vector<Seg> segs = {{"1 s", true, nullptr}, {"2 s", true, nullptr}, {"3 s", true, nullptr},
+                                 {"5 s", true, nullptr}};
+        int sel = int(std::find(std::begin(secs), std::end(secs), s.settings.hide_after) - std::begin(secs));
+        const float sw = segmented_w(segs, sc);
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Hide controls after", 28 * sc, sw, sc);
+        int i = segmented("hide", c, segs, sel, sc);
+        if (i >= 0) out.push_back({UiAction::SetHideAfter, (double)secs[i]});
+        card_row_end(row, 32 * sc);
+    }
+    {
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Show info overlay at start", 22 * sc, 40 * sc, sc);
+        if (toggle("##info", c, s.settings.info_at_start, sc))
+            out.push_back({UiAction::SetInfoAtStart, s.settings.info_at_start ? 0.0 : 1.0});
+        card_row_end(row, 26 * sc);
+    }
+
+    card_heading(ICON_INFO, "ABOUT", sc);
+    ImGui::PushStyleColor(ImGuiCol_Text, COL_DIM);
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextUnformatted(about_text(s.build).c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+    // a click anywhere outside every window (the video) closes the card; the capsule and the menu don't
+    // (a button pressed this frame is "active", which hides the hover without AllowWhenBlockedByActiveItem)
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+        !ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
+        !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
+        out.push_back({UiAction::ToggleSettings});
+}
 }  // namespace
+
+std::string about_text(const std::string& build) {
+    std::string t = "Open Player " + (build.empty() ? std::string("build unknown") : build) +
+                    "\nPixel Flow (PXF): Open Player's own upscaler.";
+#ifdef HAVE_RTX_VSR
+    t += "\nThis software uses the NVIDIA RTX Video SDK. NVIDIA, GeForce RTX and NVIDIA RTX are trademarks of "
+         "NVIDIA Corporation.";
+#endif
+    return t + "\nLicensed under the GNU AGPL v3.";
+}
 
 std::string vsr_badge_text(bool available, bool on, bool rtx, int factor) {
     return !available ? "" : on ? (rtx ? "RTX " : "PXF ") + std::to_string(factor) + "x" : "VSR off";
@@ -258,7 +492,7 @@ std::vector<UiAction> draw_ui(const UiState& s) {
     const ImVec2 c1{c0.x + cw, c0.y + ch};
     const float cy = c0.y + ch / 2, pad = 8 * sc, bh = 32 * sc, gap = 6 * sc, seek_gap = 12 * sc;
     const bool hovered = g_vol_open || ImGui::IsMouseHoveringRect(c0, c1, false);
-    const bool vis = controls_visible(s.now, s.last_mouse, s.paused, hovered);
+    const bool vis = controls_visible(s.now, s.last_mouse, s.paused, hovered || s.settings_open, s.settings.hide_after);
     if (vis != g_shown) {  // start the new fade from the current opacity, so a reversal doesn't jump
         g_changed_at = s.now - (vis ? g_alpha * FADE_IN : (1 - g_alpha) * FADE_OUT);
         g_shown = vis;
@@ -296,7 +530,8 @@ std::vector<UiAction> draw_ui(const UiState& s) {
         float x = c0.x + pad;
         const float seek_x = x + button_w(play_l, bh, sc) + gap + tw + seek_gap;
         const float right = seek_gap + tw + gap + button_w(vol_l, bh, sc) + gap +
-                            (s.vsr_available ? badge_w + gap : 0) + button_w("Open", bh, sc) + gap +
+                            (s.vsr_available ? badge_w + gap : 0) + button_w("Settings", bh, sc) + gap +
+                            button_w("Open", bh, sc) + gap +
                             button_w(fs_l, bh, sc) + pad;
         const float seek_w = std::fmax(c1.x - right - seek_x, 1);
 
@@ -344,6 +579,10 @@ std::vector<UiAction> draw_ui(const UiState& s) {
             text_centred(dl, badge_px, {x + badge_w / 2, cy}, col(IM_COL32_WHITE), vsr_l);
             x += badge_w + gap;
         }
+        if (icon_button("##settings", ICON_SETTINGS, "Settings", {x, cy - bh / 2}, bh, sc))
+            out.push_back({UiAction::ToggleSettings});
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Settings (S)");
+        x += button_w("Settings", bh, sc) + gap;
         if (icon_button("##open", ICON_FOLDER, "Open", {x, cy - bh / 2}, bh, sc)) out.push_back({UiAction::Open});
         x += button_w("Open", bh, sc) + gap;
         if (icon_button("##full", s.fullscreen ? ICON_MINIMIZE : ICON_MAXIMIZE, fs_l, {x, cy - bh / 2}, bh, sc))
@@ -399,6 +638,7 @@ std::vector<UiAction> draw_ui(const UiState& s) {
         ImGui::TextUnformatted(s.info.c_str());
         ImGui::End();
     }
+    if (s.settings_open) draw_settings(s, out);
 
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow))
         ImGui::OpenPopup("menu");
@@ -420,6 +660,8 @@ std::vector<UiAction> draw_ui(const UiState& s) {
         if (ImGui::MenuItem(item(s.fullscreen ? ICON_MINIMIZE : ICON_MAXIMIZE, "Fullscreen").c_str(), "F", s.fullscreen))
             out.push_back({UiAction::ToggleFullscreen});
         if (ImGui::MenuItem(item(ICON_INFO, "Info").c_str(), "I", s.show_info)) out.push_back({UiAction::ToggleInfo});
+        if (ImGui::MenuItem(item(ICON_SETTINGS, "Settings").c_str(), "S", s.settings_open))
+            out.push_back({UiAction::ToggleSettings});
         ImGui::Separator();
         if (ImGui::MenuItem(item(ICON_X, "Quit").c_str(), "Q")) out.push_back({UiAction::Quit});
         ImGui::EndPopup();
@@ -459,6 +701,7 @@ int ui_selftest() {
 
     check(controls_visible(10, 9, false, false) &&!controls_visible(10, 7, false, false));  // 2 s rule
     check(controls_visible(10, 0, true, false) && controls_visible(10, 0, false, true));    // paused, hovered
+    check(controls_visible(10, 7.5, false, false, 3) && !controls_visible(10, 7.5, false, false, 2));  // hide_after
     check(restart_args({"open-player", "--model", "m.onnx", "a.mkv", "--screen", "2"}, "/x/My Movie (2012).mkv") ==
           (std::vector<std::string>{"open-player", "--model", "m.onnx", "/x/My Movie (2012).mkv", "--screen", "2"}));
     check(restart_args({"open-player", "a.mkv"}, "/b.mp4") == (std::vector<std::string>{"open-player", "/b.mp4"}));
@@ -551,7 +794,7 @@ int ui_selftest() {
         io.AddMouseButtonEvent(0, false);
         frames(st, 2, 0);
         // mid-track: about the middle of the video (labels without the icon font push the bar left)
-        check(acts.size() == 1 && acts[0].kind == UiAction::Seek && acts[0].value > 200 && acts[0].value < 480);
+        check(acts.size() == 1 && acts[0].kind == UiAction::Seek && acts[0].value > 200 && acts[0].value < 560);
         // the volume panel stays open on the way up from the icon, through the capsule's edge, to its slider
         const float cy = 1080 - 14 - 24, top = cy - 24;
         float vol_cx = -1;
@@ -573,6 +816,54 @@ int ui_selftest() {
         io.AddMouseButtonEvent(0, false);
         frames(st, 1, 0);
         check(!acts.empty() && acts[0].kind == UiAction::SetVolume);
+        // the settings card: draws at both scales with 0, 1 and 3 monitors and with nothing available, never takes
+        // the player's keys, closes on its X and on a click outside it, and shows the build in About
+        {
+            std::vector<ScreenInfo> mons = {{"PG27UCDM", 3840, 2160, 240, true}, {"LG ULTRAGEAR", 2560, 1440, 60, false},
+                                            {"Very Long Monitor Name That Goes On And On", 1920, 1080, 60, false}};
+            for (float scale : {1.f, 2.5f})
+                for (size_t n : {0, 1, 3})
+                    for (bool avail : {true, false}) {
+                        io.DisplaySize = scale > 1 ? ImVec2{3840, 2160} : ImVec2{1920, 1080};
+                        UiState cs{12, 600, 70, 70, false, avail, avail, false, false, 0.8f, "", {}};
+                        cs.scale = scale, cs.settings_open = true, cs.build = "build 7 (abc1234)";
+                        cs.screens.assign(mons.begin(), mons.begin() + n);
+                        cs.playing_on = n ? (int)n - 1 : -1;
+                        cs.rtx_available = cs.pxf_available = cs.nvdec_available = avail;
+                        if (!avail) cs.vsr_unavailable = "no vsr.onnx";
+                        io.AddMousePosEvent(5, 5);
+                        frames(cs, 2, .1);
+                        ImGuiWindow* w = ImGui::FindWindowByName("settings");
+                        check(w && w->Active && w->DrawList->VtxBuffer.Size > 0 && !ui_has_keyboard());
+                        check(w && w->Size.y <= io.DisplaySize.y * .8f + 1);  // scrolls rather than overflowing
+                    }
+            io.DisplaySize = {1920, 1080};
+            UiState cs{12, 600, 80, 80, false, true, true, false, false, 0.8f, "", {}};
+            cs.settings_open = true, cs.screens = mons, cs.build = "build 7 (abc1234)";
+            frames(cs, 2, .1);
+            ImGuiWindow* w = ImGui::FindWindowByName("settings");
+            check(w != nullptr);
+            auto click = [&](float x, float y) {
+                acts.clear();
+                io.AddMousePosEvent(x, y);
+                frames(cs, 1, 0);
+                io.AddMouseButtonEvent(0, true);
+                frames(cs, 1, 0);
+                io.AddMouseButtonEvent(0, false);
+                frames(cs, 1, 0);
+                return std::count_if(acts.begin(), acts.end(),
+                                     [](const UiAction& a) { return a.kind == UiAction::ToggleSettings; });
+            };
+            if (w) {
+                check(click(w->Pos.x + w->Size.x / 2, w->Pos.y + w->Size.y / 2) == 0);  // inside: stays open
+                check(click(20, 20) == 1);                                              // outside: closes
+                check(click(w->Pos.x + w->Size.x - 14 - 16, w->Pos.y + 12 + 16) == 1);  // the X
+            }
+            std::string about = about_text("build 7 (abc1234)");  // what the card's About section shows
+            check(about.find("Open Player build 7 (abc1234)") != std::string::npos &&
+                  about.find("Pixel Flow") != std::string::npos);
+            io.AddMousePosEvent(5, 5);
+        }
         // shortcut keys stay with the menu while it's open (Esc closes it instead of quitting); the menu draws
         ImGui::NewFrame();
         check(!ui_has_keyboard());
@@ -587,7 +878,9 @@ int ui_selftest() {
     for (auto [s, cp] : {std::pair{ICON_PLAY, CP_PLAY}, {ICON_PAUSE, CP_PAUSE}, {ICON_VOLUME, CP_VOLUME},
                          {ICON_VOLUME_OFF, CP_VOLUME_OFF}, {ICON_FOLDER, CP_FOLDER}, {ICON_MAXIMIZE, CP_MAXIMIZE},
                          {ICON_MINIMIZE, CP_MINIMIZE}, {ICON_SPARKLES, CP_SPARKLES}, {ICON_FORWARD_5, CP_FORWARD_5},
-                         {ICON_BACKWARD_5, CP_BACKWARD_5}, {ICON_INFO, CP_INFO}, {ICON_X, CP_X}, {ICON_CLOCK, CP_CLOCK}}) {
+                         {ICON_BACKWARD_5, CP_BACKWARD_5}, {ICON_INFO, CP_INFO}, {ICON_X, CP_X}, {ICON_CLOCK, CP_CLOCK},
+                         {ICON_SETTINGS, CP_SETTINGS}, {ICON_DESKTOP, CP_DESKTOP}, {ICON_CPU, CP_CPU},
+                         {ICON_ADJUSTMENTS, CP_ADJUSTMENTS}}) {
         const unsigned char* u = (const unsigned char*)s;  // 3-byte sequence
         check(((u[0] & 0x0f) << 12 | (u[1] & 0x3f) << 6 | (u[2] & 0x3f)) == cp);
     }
@@ -603,7 +896,8 @@ int ui_selftest() {
         unsigned char* px;
         int fw, fh;
         io.Fonts->GetTexDataAsRGBA32(&px, &fw, &fh);
-        for (ImWchar c : {CP_PLAY, CP_PAUSE, CP_VOLUME, CP_FOLDER, CP_MAXIMIZE, CP_SPARKLES, (ImWchar)'A', (ImWchar)0xE9})
+        for (ImWchar c : {CP_PLAY, CP_PAUSE, CP_VOLUME, CP_FOLDER, CP_MAXIMIZE, CP_SPARKLES, CP_SETTINGS, CP_DESKTOP,
+                          CP_CPU, CP_ADJUSTMENTS, (ImWchar)'A', (ImWchar)0xE9})
             check(io.Fonts->Fonts[0]->IsGlyphInFont(c));
     } else printf("note: assets not found next to the binary, font checks skipped\n");
     ImGui::DestroyContext();

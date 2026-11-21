@@ -45,6 +45,13 @@ add_executable(open-player main.cpp media.cpp vsr.cpp display.cpp ui.cpp theme.c
   ${IMGUI}/backends/imgui_impl_sdl3.cpp ${IMGUI}/backends/imgui_impl_vulkan.cpp)
 target_include_directories(open-player SYSTEM PRIVATE ${IMGUI} ${IMGUI}/backends)  # SYSTEM: no warnings from it
 target_include_directories(open-player SYSTEM PRIVATE ${TENSORRT_INCLUDE})  # SYSTEM: hide NVIDIA's own deprecation warnings
+# build number (About, --version, --check): refreshed at every build, rewritten only when it changes
+add_custom_target(build_info ALL
+  COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/.. -DOUT=${CMAKE_CURRENT_BINARY_DIR}/build_info.h
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/build_info.cmake
+  BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/build_info.h)
+add_dependencies(open-player build_info)
+target_include_directories(open-player PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(open-player PRIVATE ${CMAKE_DL_LIBS} CUDA::cuda_driver Vulkan::Vulkan SDL3::SDL3 ffmpeg ${NVINFER} ${NVONNXPARSER})
 if(WIN32)
   target_link_libraries(open-player PRIVATE CUDA::cudart_static)  # one DLL less to ship

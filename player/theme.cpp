@@ -53,7 +53,8 @@ bool load_theme(const std::string& font_dir) {
                                      CP_VOLUME_OFF, CP_VOLUME_OFF, CP_FOLDER,   CP_FOLDER,    CP_MAXIMIZE,   CP_MAXIMIZE,
                                      CP_MINIMIZE,  CP_MINIMIZE,  CP_SPARKLES,  CP_SPARKLES,  CP_FORWARD_5,  CP_FORWARD_5,
                                      CP_BACKWARD_5, CP_BACKWARD_5, CP_INFO,     CP_INFO,      CP_X,          CP_X,
-                                     CP_CLOCK,     CP_CLOCK,     0};
+                                     CP_CLOCK,     CP_CLOCK,     CP_SETTINGS,  CP_SETTINGS,  CP_DESKTOP,    CP_DESKTOP,
+                                     CP_CPU,       CP_CPU,       CP_ADJUSTMENTS, CP_ADJUSTMENTS, 0};
     ImFontConfig cfg;
     cfg.MergeMode = true;
     cfg.GlyphMinAdvanceX = 16.0f;

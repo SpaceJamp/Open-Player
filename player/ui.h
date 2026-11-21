@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include "settings.h"
+
 // Recent files: newest first, no duplicates, at most 10.
 std::vector<std::string> add_recent(std::vector<std::string> list, const std::string& path);
 std::vector<std::string> existing_only(const std::vector<std::string>& list);  // drops files that no longer exist
@@ -45,17 +47,32 @@ struct UiState {
     UiNotice notice;
     int vsr_factor = 2;
     bool vsr_rtx = false;  // NVIDIA RTX VSR upscales (else Pixel Flow)
+    // the settings card
+    bool settings_open = false;
+    Settings settings;  // as this run plays (upscaler Off whenever upscaling is off, whichever way)
+    std::vector<ScreenInfo> screens;
+    int screen_index = 0;  // the chosen monitor
+    int playing_on = -1;   // the monitor the window is on now; -1: unknown
+    bool rtx_available = false, pxf_available = false, nvdec_available = true;
+    std::string vsr_unavailable;  // why neither upscaler can run here, shown instead of the choice
+    std::string build;            // "build 214 (4a30cf8)"
 };
 std::string vsr_badge_text(bool available, bool on, bool rtx, int factor);  // "PXF 2x", "RTX 2x", "VSR off"; "" without VSR
+std::string about_text(const std::string& build);  // the settings card's About section
 struct UiAction {
-    enum Kind { TogglePause, Seek, SetVolume, ToggleVsr, ToggleFullscreen, ToggleInfo, Open, OpenPath, Quit } kind;
+    enum Kind {
+        TogglePause, Seek, SetVolume, ToggleVsr, ToggleFullscreen, ToggleInfo, Open, OpenPath, Quit,
+        // the settings card; value: an Upscaler, a screen index, seconds, or 0/1
+        ToggleSettings, SetUpscaler, SetDecoder, SetScreen, SetStartFullscreen, SetRememberVolume, SetHideAfter,
+        SetInfoAtStart
+    } kind;
     double value = 0;  // Seek: seconds; SetVolume: 0..2
     std::string path;  // OpenPath
 };
-// The control bar shows while the mouse moved in the last 2 s, while paused, or while the mouse is over it.
-bool controls_visible(double now, double last_mouse, bool paused, bool hovered);
-// Draws the control capsule, the notice card, the info card (s.show_info) and the right-click menu; returns what
-// the user did. Call between ImGui::NewFrame() and ImGui::Render().
+// The control bar shows while the mouse moved in the last hide_after s, while paused, or while the mouse is over it.
+bool controls_visible(double now, double last_mouse, bool paused, bool hovered, double hide_after = 2);
+// Draws the control capsule, the notice card, the info card (s.show_info), the settings card (s.settings_open) and
+// the right-click menu; returns what the user did. Call between ImGui::NewFrame() and ImGui::Render().
 std::vector<UiAction> draw_ui(const UiState& s);
 bool ui_animating(double now);  // the capsule is fading or a notice is showing: keep redrawing
 bool ui_controls_hidden();      // the capsule was fully faded out at the last draw_ui
