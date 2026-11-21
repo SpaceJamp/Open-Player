@@ -80,7 +80,9 @@ class Clips(Dataset):
         """`frames` consecutive full-size frames from a random spot in a random video, as uint8 (T,H,W,3)."""
         T = self.frames
         for _ in range(10):  # retry on reads that come up short (end of file, broken streams)
-            p, w, h, dur = random.choices(self.videos, title_weights([v[0] for v in self.videos], self.root))[0]
+            if getattr(self, "_weighted", None) is not self.videos:  # the list is replaced (held-out), never edited
+                self._weighted, self._weights = self.videos, title_weights([v[0] for v in self.videos], self.root)
+            p, w, h, dur = random.choices(self.videos, self._weights)[0]
             # start at the keyframe before t instead of decoding up to t exactly, then skip a few frames so runs
             # don't all open on a keyframe, which is sharper than the frames that follow it
             t, skip = random.uniform(0, dur - 1.5), random.randrange(12)
@@ -257,8 +259,8 @@ def main():
     ap.add_argument("--frames", type=int, default=8, help="frames per clip the recurrence is trained over")
     ap.add_argument("--crop", type=int, default=256, help="high-res crop size")
     ap.add_argument("--batch", type=int, default=8)
-    ap.add_argument("--steps", type=int, default=100_000, help="total steps; a resumed run continues up to this")
-    ap.add_argument("--lr", type=float, default=2e-4)
+    ap.add_argument("--steps", type=int, help="total steps (default 100000; a resumed run keeps its own unless given)")
+    ap.add_argument("--lr", type=float, help="peak learning rate (default 2e-4; a resumed run keeps its own)")
     ap.add_argument("--fft-loss", type=float, default=0, metavar="W", help="weight of a frequency-domain loss "
                     "added to the pixel loss, for sharper output; 0 = off, try 0.05. A resumed run keeps its checkpoint's value.")
     ap.add_argument("--teacher", help="trained checkpoint (any size) whose output the student also learns to copy")
@@ -269,6 +271,9 @@ def main():
         raise SystemExit(f"--crop must be a multiple of {a.scale * 8}")
 
     dev = "cuda"
+    ck = torch.load(a.resume, map_location=dev) if a.resume else {}
+    # a resumed run keeps its schedule: a different --steps or --lr would make the cosine curve jump
+    a.steps, a.lr = a.steps or ck.get("steps", 100_000), a.lr or ck.get("lr", 2e-4)
     torch.backends.cudnn.benchmark = True  # crops are a fixed size: time cuDNN's conv algorithms once, keep the fastest
     if a.resume:
         model = load(a.resume, dev).train()
@@ -283,7 +288,6 @@ def main():
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=0, fused=True)  # one kernel per step, same math
     start = 0
     if a.resume:
-        ck = torch.load(a.resume, map_location=dev)
         start = ck.get("step", 0)
         a.fft_loss = a.fft_loss or ck.get("fft_loss", 0)
         if "opt" in ck:  # checkpoints from before this was saved restart the optimizer
@@ -292,8 +296,12 @@ def main():
             raise SystemExit(f"{a.resume} already has {start} steps; raise --steps to train further")
         a.teacher, a.distill = a.teacher or ck.get("teacher"), a.distill if a.distill is not None else ck.get("distill")
         print(f"resuming at step {start}")
+    if a.distill == 0:  # turns the teacher off, also on a resumed run
+        a.teacher, a.distill = None, None
     if a.teacher and a.distill is None:
         a.distill = 0.5
+    if a.teacher:
+        a.teacher = str(Path(a.teacher).resolve())  # saved with the checkpoint: resuming may start elsewhere
     if a.distill is not None and not (a.teacher and 0 <= a.distill <= 1):
         raise SystemExit("--distill needs --teacher and a weight between 0 and 1")
     teacher = None
@@ -352,7 +360,8 @@ def main():
         gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         for g in opt.param_groups:
             g["lr"] = lr_at(step, a.steps, a.lr)
-        opt.step()
+        if torch.isfinite(gnorm):  # a NaN/inf step would poison the weights and Adam's state for good
+            opt.step()
         dg.end(step, loss, gnorm, g["lr"])
 
         if step % 100 == 0:
@@ -363,7 +372,8 @@ def main():
         if step % 1000 == 0:
             check(step)
         if step % 2000 == 0 or step == a.steps or stop:
-            save(model, a.out, step=step, opt=opt.state_dict(), fft_loss=a.fft_loss, teacher=a.teacher, distill=a.distill)
+            save(model, a.out, step=step, opt=opt.state_dict(), fft_loss=a.fft_loss, teacher=a.teacher, distill=a.distill,
+                 steps=a.steps, lr=a.lr)
         if stop:
             break
     print(f"saved {a.out} at step {step}")

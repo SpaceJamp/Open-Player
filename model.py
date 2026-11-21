@@ -3,6 +3,8 @@
 Each frame sees the current low-res frame plus the previous high-res output, warped onto the
 current frame by a learned flow, so detail recovered in earlier frames carries forward.
 """
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -80,8 +82,11 @@ def load(path, device="cuda"):
 
 
 def save(model, path, **extra):
+    # whole or not at all: a kill mid-save must not wreck the only checkpoint a run resumes from
+    tmp = f"{path}.tmp"
     torch.save({"scale": model.scale, "ch": model.ch, "blocks": model.blocks, "gate": model.gate,
-                "state": model.state_dict(), **extra}, path)
+                "state": model.state_dict(), **extra}, tmp)
+    os.replace(tmp, path)
 
 
 if __name__ == "__main__":  # self-check

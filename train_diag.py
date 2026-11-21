@@ -133,7 +133,13 @@ def suggest(recs):
 
 
 def read(path):
-    return [json.loads(x) for x in Path(path).read_text().splitlines() if x.strip()]
+    out = []
+    for x in Path(path).read_text().splitlines():
+        try:
+            out.append(json.loads(x))
+        except json.JSONDecodeError:  # a line torn by a kill mid-write; the rest is still good
+            pass
+    return out
 
 
 def summary(path):

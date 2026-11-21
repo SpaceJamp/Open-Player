@@ -101,6 +101,16 @@ with tempfile.TemporaryDirectory() as d:
     except SystemExit:
         pass
 
+# checkpoints are written whole or not at all (a kill mid-save must not corrupt the resume file), and a torn last
+# line in the diagnostics log is skipped instead of stopping every later start
+import train_diag  # noqa: E402
+from model import load as load_model, save as save_model  # noqa: E402
+with tempfile.TemporaryDirectory() as d:
+    save_model(VSR(2, 8, 1), f"{d}/c.pt", step=7)
+    assert load_model(f"{d}/c.pt", "cpu").scale == 2 and not list(Path(d).glob("*.tmp")), "save must leave no temp file"
+    Path(f"{d}/x.diag.jsonl").write_text('{"type": "window", "step": 100}\n{"type": "val", "st')
+    assert [r["step"] for r in train_diag.read(f"{d}/x.diag.jsonl")] == [100]
+
 # clip sampling: each title (a top-level file or folder, e.g. a whole series) is picked equally often
 w = train.title_weights([Path("/v/a.mp4"), Path("/v/S/e1.mkv"), Path("/v/S/e2.mkv"), Path("/v/S/x/e3.mkv")], Path("/v"))
 assert w == [1.0, 1 / 3, 1 / 3, 1 / 3], w
@@ -133,7 +143,7 @@ if torch.cuda.is_available() and shutil.which("ffmpeg"):  # train.py trains on c
         r = subprocess.run(cmd, capture_output=True, text=True)
         assert r.returncode == 0 and "distill" in r.stdout, r.stdout + r.stderr
         ck = torch.load(f"{d}/s.pt")
-        assert ck["teacher"] == f"{d}/teacher.pt" and ck["distill"] == 0.5
+        assert Path(ck["teacher"]) == Path(f"{d}/teacher.pt").resolve() and ck["distill"] == 0.5  # stored absolute
     distilled = "distill run ok"
 else:
     distilled = "distill run skipped (no cuda/ffmpeg)"
