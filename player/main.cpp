@@ -201,6 +201,8 @@ int main(int argc, char** argv) {
                 model = (found_model = m.lexically_normal().u8string()).c_str();
                 break;
             }
+        if (found_model.empty() && installed_copy())  // never the current folder's: point at where it belongs
+            model = (found_model = where[0].u8string()).c_str();
     }
     // TensorRT, for Pixel Flow: loaded now from known folders only, so the player runs without it
     std::string trt_ver, trt_why;

@@ -156,7 +156,7 @@ bool download_update(const UpdateCheck& c, const std::function<void(uint64_t, ui
 bool run_installer(const std::string& path) {
 #ifdef _WIN32
     std::wstring exe = std::filesystem::u8path(path).wstring();
-    std::wstring cmd = L"\"" + exe + L"\" /SILENT /SUPPRESSMSGBOXES /NORESTART";
+    std::wstring cmd = L"\"" + exe + L"\" /SILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH=1";
     STARTUPINFOW si{sizeof si};
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) return false;

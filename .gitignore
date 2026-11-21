@@ -11,3 +11,4 @@ __pycache__/
 build-win/
 build-dev/
 *.pem
+installer/out/
