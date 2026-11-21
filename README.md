@@ -142,6 +142,10 @@ the Vulkan SDK, vcpkg in `C:\vcpkg`, TensorRT unzipped to `C:\TensorRT\TensorRT-
 yourself: its license keeps it out of this repo). Then run `build-windows.bat`; the first run builds SDL3 and FFmpeg
 with vcpkg. `build-win\open-player.exe --check vsr.onnx` tests each part, RTX VSR included.
 
+To teach the model to upscale like RTX VSR (which then also works on Linux), play videos with
+`--collect pairs`: about every 10 s it saves 8 frames of a crop next to RTX VSR's 2x upscale of them (only while
+RTX upscales exactly 2x, up to 2 GB). Then train with `--pairs pairs` (weight `--pairs-weight`, default 0.5).
+
 This software uses the NVIDIA RTX Video SDK. NVIDIA, GeForce RTX and NVIDIA RTX are trademarks of NVIDIA Corporation.
 
 ## Limits

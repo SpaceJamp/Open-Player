@@ -42,6 +42,25 @@ def title_weights(paths, root):
     return [1 / key.count(k) for k in key]
 
 
+class Pairs(Dataset):
+    """The player's --collect files: real decoded frames and NVIDIA RTX VSR's upscale of them (format in
+    player/collect.h). Learning them teaches our model to imitate RTX VSR. Items are uint8 (T,3,h,w), (T,3,H,W)."""
+
+    def __init__(self, folder):
+        self.files = sorted(Path(folder).expanduser().glob("pair-*.bin"))  # .tmp: still being written
+
+    def __len__(self):
+        return 1 << 30  # random sampling, like Clips
+
+    def __getitem__(self, _):
+        raw = random.choice(self.files).read_bytes()
+        T, lw, lh, hw, hh = np.frombuffer(raw, "<i4", 5, 8)
+        n = T * 3 * lh * lw
+        lr = np.frombuffer(raw, np.uint8, n, 28).reshape(T, 3, lh, lw)
+        hr = np.frombuffer(raw, np.uint8, T * 3 * hh * hw, 28 + n).reshape(T, 3, hh, hw)
+        return torch.from_numpy(lr.copy()), torch.from_numpy(hr.copy())
+
+
 class Clips(Dataset):
     """Random runs of `frames` consecutive frames, randomly cropped to crop x crop, as uint8 (T,H,W,3)."""
 
@@ -261,6 +280,9 @@ def main():
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--steps", type=int, help="total steps (default 100000; a resumed run keeps its own unless given)")
     ap.add_argument("--lr", type=float, help="peak learning rate (default 2e-4; a resumed run keeps its own)")
+    ap.add_argument("--pairs", help="folder of the player's --collect files: also learn to match NVIDIA RTX VSR")
+    ap.add_argument("--pairs-weight", type=float, default=0.5, metavar="W",
+                    help="weight of the --pairs loss next to the usual one (default 0.5)")
     ap.add_argument("--fft-loss", type=float, default=0, metavar="W", help="weight of a frequency-domain loss "
                     "added to the pixel loss, for sharper output; 0 = off, try 0.05. A resumed run keeps its checkpoint's value.")
     ap.add_argument("--teacher", help="trained checkpoint (any size) whose output the student also learns to copy")
@@ -335,6 +357,18 @@ def main():
     data = DataLoader(clips, batch_size=a.batch, num_workers=a.workers,
                       persistent_workers=a.workers > 0, pin_memory=True, worker_init_fn=ignore_sigint)
 
+    pair_it = None
+    if a.pairs:
+        pairs = Pairs(a.pairs)
+        if not pairs.files:
+            raise SystemExit(f"no pair-*.bin files in {a.pairs} (play with open-player --collect {a.pairs})")
+        plr0, phr0 = pairs[0]
+        if phr0.shape[-1] != plr0.shape[-1] * s:
+            raise SystemExit(f"{a.pairs} holds {phr0.shape[-1] // plr0.shape[-1]}x pairs, this model is {s}x")
+        pair_it = iter(DataLoader(pairs, batch_size=a.batch, num_workers=min(a.workers, 2),
+                                  persistent_workers=a.workers > 0, pin_memory=True, worker_init_fn=ignore_sigint))
+        print(f"{len(pairs.files)} RTX VSR pair files, weight {a.pairs_weight}")
+
     stop = []  # Ctrl+C / the panel's Stop: finish this step, save, exit
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
     t0, it = time.time(), iter(data)
@@ -351,6 +385,10 @@ def main():
             if a.fft_loss:
                 fft = sum(fft_loss(out, hr[:, t]) for t, out in enumerate(outs))
                 loss = loss + a.fft_loss * fft
+            if pair_it:  # real compressed frames -> NVIDIA RTX VSR's upscale of them
+                plr, phr = (x.to(dev, non_blocking=True).float().div_(255) for x in next(pair_it))
+                pouts, _ = unroll(model, plr)
+                loss = loss + a.pairs_weight * sum(F.l1_loss(o.float(), phr[:, t]) for t, o in enumerate(pouts))
             # teach the flow net real motion: the warped previous frame should match the current one
             loss = loss + 0.1 * sum(F.l1_loss(warp(lr[:, t - 1], flows[t].float()), lr[:, t]) for t in range(1, T))
             loss = loss / T

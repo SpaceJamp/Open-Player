@@ -111,6 +111,19 @@ with tempfile.TemporaryDirectory() as d:
     Path(f"{d}/x.diag.jsonl").write_text('{"type": "window", "step": 100}\n{"type": "val", "st')
     assert [r["step"] for r in train_diag.read(f"{d}/x.diag.jsonl")] == [100]
 
+# --pairs: the player's --collect files (format in player/collect.h) read back as low-res frames and their upscale
+with tempfile.TemporaryDirectory() as d:
+    lr8 = np.random.randint(0, 256, (2, 3, 4, 6), np.uint8)
+    hr8 = np.random.randint(0, 256, (2, 3, 8, 12), np.uint8)
+    head = b"OPPAIR1\0" + np.array([2, 6, 4, 12, 8], "<i4").tobytes()
+    Path(f"{d}/pair-1.bin").write_bytes(head + lr8.tobytes() + hr8.tobytes())
+    Path(f"{d}/pair-2.bin.tmp").write_bytes(b"half written")  # the player renames only whole files
+    pairs = train.Pairs(d)
+    assert len(pairs.files) == 1, pairs.files
+    plr, phr = pairs[0]
+    assert plr.shape == (2, 3, 4, 6) and phr.shape == (2, 3, 8, 12) and plr.dtype == torch.uint8
+    assert np.array_equal(plr.numpy(), lr8) and np.array_equal(phr.numpy(), hr8)
+
 # clip sampling: each title (a top-level file or folder, e.g. a whole series) is picked equally often
 w = train.title_weights([Path("/v/a.mp4"), Path("/v/S/e1.mkv"), Path("/v/S/e2.mkv"), Path("/v/S/x/e3.mkv")], Path("/v"))
 assert w == [1.0, 1 / 3, 1 / 3, 1 / 3], w
