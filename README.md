@@ -30,14 +30,20 @@ python3 -m venv ~/vsr-venv && ~/vsr-venv/bin/pip install torch numpy onnx onnxsc
 from NVIDIA's tarball unpacked to `/opt/tensorrt`. On a fresh Arch WSL, first run
 `sudo pacman-key --init && sudo pacman-key --populate archlinux`, or downloads fail with "signature is unknown trust".
 
-**Windows** needs:
-- Visual Studio 2022 or newer with the C++ tools (the Build Tools are enough), CUDA 13, and the Vulkan SDK
-- [vcpkg](https://github.com/microsoft/vcpkg) cloned and bootstrapped in `C:\vcpkg`
-- TensorRT for Windows unzipped to `C:\TensorRT\TensorRT-11.5.0.63` (other versions: pass `-DTENSORRT_ROOT=...`)
+**Windows**, with the NVIDIA driver already installed:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File setup-windows.ps1     # -Check: only report; -NoTraining: skip Python/PyTorch/FFmpeg
+```
+
+[setup-windows.ps1](setup-windows.ps1) installs with winget what's missing: the Visual Studio 2022 Build Tools with
+C++, CUDA 13, the Vulkan SDK, Git, Python with PyTorch, and FFmpeg. It also clones
+[vcpkg](https://github.com/microsoft/vcpkg) to `C:\vcpkg` (or `OPEN_PLAYER_VCPKG`). Two downloads need an NVIDIA
+login, so it only checks for them:
+- TensorRT for Windows, unzipped to `C:\TensorRT\TensorRT-11.5.0.63` (other versions: pass `-DTENSORRT_ROOT=...`
+  to build-windows.bat; the script checks only this path)
 - for RTX VSR: the [NVIDIA RTX Video SDK](https://developer.nvidia.com/rtx-video-sdk) unzipped to `C:\rtx_video_sdk`
-  (download it yourself: its license keeps it out of this repo; without it the player builds with our network only)
-- for training: Python with `py -m pip install torch numpy onnx onnxscript --index-url https://download.pytorch.org/whl/cu130`,
-  and FFmpeg on the PATH (`winget install Gyan.FFmpeg`)
+  (its license keeps it out of this repo; without it the player builds with our network only)
 
 ## 2. Train a model
 

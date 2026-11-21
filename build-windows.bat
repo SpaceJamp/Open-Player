@@ -4,8 +4,8 @@ rem Needs: Visual Studio 2022+ with C++ (its CMake and Ninja are used), CUDA, th
 rem (or set OPEN_PLAYER_VCPKG), and TensorRT unzipped (default C:\TensorRT\TensorRT-11.5.0.63, or pass -DTENSORRT_ROOT=...).
 rem The first run builds SDL3 and FFmpeg with vcpkg, which takes a while.
 setlocal
-for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS=%%i"
-if not defined VS (echo No Visual Studio with the C++ tools found & exit /b 1)
+for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.CMake.Project -property installationPath`) do set "VS=%%i"
+if not defined VS (echo No Visual Studio with the C++ and C++ CMake tools found: run setup-windows.ps1 & exit /b 1)
 call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 rem not VCPKG_ROOT: vcvars points that at Visual Studio's own vcpkg
 if not defined OPEN_PLAYER_VCPKG set "OPEN_PLAYER_VCPKG=C:\vcpkg"
