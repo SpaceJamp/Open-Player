@@ -30,4 +30,20 @@ bool https_download(const std::string& url, const std::string& to, uint64_t cap,
                     std::string& error);
 bool https_get(const std::string& url, uint64_t cap, const std::vector<std::string>& hosts, std::string& body,
                std::string& error);
+// From GitHub's releases/latest JSON: the download URLs whose file name is exactly name (empty if none or several).
+std::string release_asset_url(const std::string& release_json, const std::string& name);
+bool due_for_check(int64_t now, int64_t last, bool enabled);  // at most once a day
+
+// The whole check (on a background thread): latest release -> update.json + signature -> verified -> newer?
+struct UpdateCheck {
+    std::atomic<bool> done{false};
+    bool available = false;
+    UpdateInfo info;
+    std::string installer_url, error;
+};
+void check_for_update(UpdateCheck& c, int current_build);
+// Downloads the installer into %TEMP%\open-player-update and checks it against the signed hash; false + error.
+bool download_update(const UpdateCheck& c, const std::function<void(uint64_t, uint64_t)>& progress,
+                     const std::atomic<bool>& cancel, std::string& installer_path, std::string& error);
+bool run_installer(const std::string& path);  // starts it silently; the player then exits
 int update_selftest();  // part of --uitest; 0 on pass

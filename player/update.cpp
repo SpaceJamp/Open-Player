@@ -87,6 +87,87 @@ int build_number(const std::string& b) {
 
 bool should_offer(int current, const UpdateInfo& u) { return current > 0 && u.build > current; }
 
+std::string release_asset_url(const std::string& j, const std::string& name) {
+    std::string found;
+    const std::string key = "\"browser_download_url\"";
+    for (size_t at = j.find(key); at != std::string::npos; at = j.find(key, at + 1)) {
+        size_t i = j.find_first_not_of(" \t\r\n", at + key.size());
+        if (i == std::string::npos || j[i] != ':') continue;
+        i = j.find_first_not_of(" \t\r\n", i + 1);
+        if (i == std::string::npos || j[i] != '"') continue;
+        std::string url;
+        for (i++; i < j.size() && j[i] != '"'; i++) {
+            if (j[i] == '\\') return "";  // GitHub never escapes these URLs: anything odd is refused
+            url += j[i];
+        }
+        if (i >= j.size() || !host_allowed(url)) continue;
+        if (url.size() > name.size() && url.compare(url.size() - name.size() - 1, std::string::npos, "/" + name) == 0) {
+            if (!found.empty()) return "";  // two candidates: ambiguous, take neither
+            found = url;
+        }
+    }
+    return found;
+}
+
+bool due_for_check(int64_t now, int64_t last, bool enabled) {
+    return enabled && (now - last >= 86400 || now < last);
+}
+
+#include "update_pubkey.h"
+
+void check_for_update(UpdateCheck& c, int current) {
+    const std::vector<std::string> gh = {"api.github.com", "github.com", "release-assets.githubusercontent.com",
+                                         "objects.githubusercontent.com"};
+    std::string rel, json, sig;
+    if (!https_get("https://api.github.com/repos/SpaceJamp/Open-Player/releases/latest", 1 << 20, gh, rel, c.error)) {
+        c.done = true;
+        return;
+    }
+    std::string json_url = release_asset_url(rel, "update.json"), sig_url = release_asset_url(rel, "update.json.sig");
+    if (json_url.empty() || sig_url.empty()) c.error = "no update information in the latest release";
+    else if (https_get(json_url, 64 * 1024, gh, json, c.error) && https_get(sig_url, 1024, gh, sig, c.error)) {
+        while (!sig.empty() && isspace((unsigned char)sig.back())) sig.pop_back();
+        UpdateInfo u;
+        if (!verify_signature(UPDATE_PUBKEY, json, sig)) c.error = "the update isn't signed by Open Player's key";
+        else if (!parse_update_json(json, u)) c.error = "the update information is malformed";
+        else if (should_offer(current, u)) {
+            c.installer_url = release_asset_url(rel, u.file);
+            if (c.installer_url.empty()) c.error = "the release has no " + u.file;
+            else c.info = u, c.available = true;
+        }
+    }
+    c.done = true;
+}
+
+bool download_update(const UpdateCheck& c, const std::function<void(uint64_t, uint64_t)>& progress,
+                     const std::atomic<bool>& cancel, std::string& installer_path, std::string& error) {
+    auto dir = std::filesystem::temp_directory_path() / "open-player-update";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    installer_path = (dir / c.info.file).u8string();
+    const std::vector<std::string> gh = {"github.com", "release-assets.githubusercontent.com",
+                                         "objects.githubusercontent.com"};
+    if (!https_download(c.installer_url, installer_path, 500ull << 20, gh, progress, cancel, error)) return false;
+    if (verify_file_sha256(installer_path, c.info.sha256)) return true;
+    std::filesystem::remove(std::filesystem::u8path(installer_path), ec);
+    return error = "the download doesn't match the signed update", false;
+}
+
+bool run_installer(const std::string& path) {
+#ifdef _WIN32
+    std::wstring exe = std::filesystem::u8path(path).wstring();
+    std::wstring cmd = L"\"" + exe + L"\" /SILENT /SUPPRESSMSGBOXES /NORESTART";
+    STARTUPINFOW si{sizeof si};
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) return false;
+    CloseHandle(pi.hThread), CloseHandle(pi.hProcess);
+    return true;
+#else
+    (void)path;
+    return false;
+#endif
+}
+
 bool host_allowed(const std::string& url) {
     return host_in(url, {"api.github.com", "github.com", "release-assets.githubusercontent.com",
                          "objects.githubusercontent.com"});
@@ -354,6 +435,28 @@ int update_selftest() {
           !host_allowed("https://evil-github.com/x") && !host_allowed("ftp://github.com/x") && !host_allowed(""));
     check(host_allowed("https://GitHub.com/x") && host_allowed("https://github.com:443/x") &&
           !host_allowed("https://github.com:8443/x"));
+
+    // GitHub's releases/latest answer (trimmed): the assets are picked by exact file name
+    const std::string rel = R"({"tag_name": "v214", "name": "x \"quoted\"", "assets": [
+        {"name": "OpenPlayer-Setup-214.exe", "browser_download_url":
+         "https://github.com/SpaceJamp/Open-Player/releases/download/v214/OpenPlayer-Setup-214.exe"},
+        {"name": "update.json", "browser_download_url":
+         "https://github.com/SpaceJamp/Open-Player/releases/download/v214/update.json"},
+        {"name": "update.json.sig", "browser_download_url":
+         "https://github.com/SpaceJamp/Open-Player/releases/download/v214/update.json.sig"}]})";
+    check(release_asset_url(rel, "update.json") ==
+          "https://github.com/SpaceJamp/Open-Player/releases/download/v214/update.json");
+    check(release_asset_url(rel, "update.json.sig").size() > 0 && release_asset_url(rel, "OpenPlayer-Setup-214.exe").size() > 0);
+    check(release_asset_url(rel, "json").empty() && release_asset_url(rel, "missing.exe").empty());
+    check(release_asset_url("{\"message\": \"API rate limit exceeded\"}", "update.json").empty());
+    check(release_asset_url("junk", "update.json").empty() && release_asset_url("", "update.json").empty());
+    const std::string twice = R"({"assets": [{"browser_download_url": "https://github.com/a/update.json"},
+        {"browser_download_url": "https://github.com/b/update.json"}]})";
+    check(release_asset_url(twice, "update.json").empty());  // ambiguous: none
+
+    check(due_for_check(100000, 0, true) && !due_for_check(100000, 100000 - 3600, true) &&
+          due_for_check(100000, 100000 - 86400, true) && !due_for_check(100000, 0, false));
+    check(due_for_check(100000, 200000, true));  // a clock set back doesn't block checks forever
 #undef check
     return fails ? 1 : 0;
 }
