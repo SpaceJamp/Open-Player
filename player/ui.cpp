@@ -316,10 +316,52 @@ bool toggle(const char* id, ImVec2 p, bool on, float sc) {
     return pressed;
 }
 
+// The Training tab: train.py's training.json, read by main once a second while this tab is open.
+void draw_training(const UiState& s, float sc) {
+    card_heading(ICON_SPARKLES, "TRAINING", sc);
+    auto line = [](ImU32 colour, const std::string& text) {
+        ImGui::PushStyleColor(ImGuiCol_Text, colour);
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextUnformatted(text.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+    };
+    if (!s.training_known) {
+        line(COL_DIM, "No training yet. Train your own Pixel Flow with train.py; its progress shows here while it runs.");
+        return;
+    }
+    const TrainingStatus& t = s.training;
+    const bool stale = training_stale(t, s.now_unix), running = t.state == "training" && !stale;
+    line(running ? COL_PLAYED : COL_TEXT, stale                     ? "Not running (no news for 5 minutes)"
+                                          : running                 ? "Training"
+                                          : t.state == "finished"   ? "Finished"
+                                                                    : "Stopped");
+    char b[256];
+    snprintf(b, sizeof b, "Step %lld of %lld", t.step, t.steps);
+    line(COL_TEXT, b);
+    {  // progress bar
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float aw = ImGui::GetContentRegionAvail().x, f = t.steps > 0 ? std::clamp((float)t.step / t.steps, 0.f, 1.f) : 0;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled({p.x, p.y + 4 * sc}, {p.x + aw, p.y + 8 * sc}, col(COL_TRACK), 2 * sc);
+        dl->AddRectFilled({p.x, p.y + 4 * sc}, {p.x + aw * f, p.y + 8 * sc}, col(COL_PLAYED), 2 * sc);
+        ImGui::Dummy({aw, 12 * sc});
+    }
+    if (t.loss >= 0) snprintf(b, sizeof b, "Loss %.4f", t.loss), line(COL_TEXT, b);
+    if (t.has_val) snprintf(b, sizeof b, "Validation %+.2f dB vs bilinear (best %+.2f dB)", t.val_db, t.best_db), line(COL_TEXT, b);
+    if (running && t.s_per_step > 0) {
+        long long left = (long long)t.eta_s, h = left / 3600, m = left % 3600 / 60;
+        snprintf(b, sizeof b, "%.2f s/step, about %s%lld min left", t.s_per_step, h ? (std::to_string(h) + " h ").c_str() : "", m);
+        line(COL_TEXT, b);
+    }
+    if (!t.suggest.empty()) line(COL_DIM, "Suggestion: " + t.suggest);
+    if (!t.out.empty()) line(COL_DIM, "Model: " + t.out);
+}
+
 // capsule_top: the card stays above the control capsule, which stays visible and clickable while it's open
 void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_top) {
     const ImGuiIO& io = ImGui::GetIO();
-    const float sc = s.scale, W = std::fmin(520 * sc, io.DisplaySize.x - 32 * sc);
+    const float sc = s.scale, W = std::fmin(650 * sc, io.DisplaySize.x - 32 * sc);  // 520 + the tab column
     const float top = 8 * sc, bottom = std::fmax(capsule_top - 8 * sc, top + 40 * sc);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {14 * sc, 12 * sc});
     ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 8 * sc);
@@ -343,6 +385,37 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
             out.push_back({UiAction::ToggleSettings});
         card_row_end(p, bh);
     }
+
+    // tabs, as a column on the left (icons only when the card is narrow); the tab's content beside it
+    const int tab = std::clamp(s.settings.settings_tab, 0, 2);
+    const bool narrow = W < 460 * sc;
+    const float colw = (narrow ? 40 : 130) * sc, rowh = 36 * sc;
+    const ImVec2 tabs_at = ImGui::GetCursorScreenPos();
+    {
+        const char* names[] = {"General", "Training", "About"};
+        const char* icons[] = {ICON_ADJUSTMENTS, ICON_SPARKLES, ICON_INFO};
+        const float px = 15 * sc;
+        for (int i = 0; i < 3; i++) {
+            const ImVec2 a{tabs_at.x, tabs_at.y + i * rowh}, b{a.x + colw, a.y + rowh - 4 * sc};
+            ImGui::SetCursorScreenPos(a);
+            ImGui::PushID(i);
+            if (ImGui::InvisibleButton("##tab", {colw, rowh - 4 * sc}) && i != tab)
+                out.push_back({UiAction::SetSettingsTab, (double)i});
+            const bool hov = ImGui::IsItemHovered();
+            if (hov && narrow) ImGui::SetTooltip("%s", names[i]);
+            ImGui::PopID();
+            if (i == tab) dl->AddRectFilled(a, b, col(COL_VSR_ON), 8 * sc);
+            else if (hov) dl->AddRectFilled(a, b, col(IM_COL32(0x3f, 0xd0, 0xe0, 48)), 8 * sc);
+            const float ty = std::round((a.y + b.y - px) / 2);
+            if (theme_loaded()) dl->AddText(ImGui::GetFont(), px, {a.x + 12 * sc, ty}, col(COL_TEXT), icons[i]);
+            if (!narrow) dl->AddText(ImGui::GetFont(), px, {a.x + (theme_loaded() ? 38 : 12) * sc, ty}, col(COL_TEXT), names[i]);
+            else if (!theme_loaded()) dl->AddText(ImGui::GetFont(), px, {a.x + 14 * sc, ty}, col(COL_TEXT), std::string(1, names[i][0]).c_str());
+        }
+    }
+    ImGui::Indent(colw + 12 * sc);
+    ImGui::SetCursorScreenPos({tabs_at.x + colw + 12 * sc, tabs_at.y});
+    if (tab == 1) draw_training(s, sc);
+    else if (tab == 0) {
 
     card_heading(ICON_SPARKLES, "UPSCALING", sc);
     if (!s.vsr_unavailable.empty()) {
@@ -482,6 +555,14 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
             out.push_back({UiAction::SetInfoAtStart, s.settings.info_at_start ? 0.0 : 1.0});
         card_row_end(row, rh + 4 * sc);
     }
+    {
+        float rh = 0;
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Remember where I left off", 22 * sc, 40 * sc, sc, rh);
+        if (toggle("##resume", c, s.settings.remember_position, sc))
+            out.push_back({UiAction::SetRememberPosition, s.settings.remember_position ? 0.0 : 1.0});
+        card_row_end(row, rh + 4 * sc);
+    }
+    } else {  // About
 
     card_heading(ICON_INFO, "ABOUT", sc);
     ImGui::PushStyleColor(ImGuiCol_Text, COL_DIM);
@@ -518,6 +599,12 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
         }
     }
 #endif
+    }  // the tabs
+    ImGui::Unindent(colw + 12 * sc);
+    if (ImGui::GetCursorScreenPos().y < tabs_at.y + 3 * rowh) {  // a short tab still leaves room for the column
+        ImGui::SetCursorScreenPos({tabs_at.x, tabs_at.y + 3 * rowh});
+        ImGui::Dummy({1, 1});
+    }
 
     ImGui::End();
     ImGui::PopStyleColor();
