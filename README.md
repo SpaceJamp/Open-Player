@@ -10,8 +10,25 @@ trained, exported and played entirely from this repo.
 > **Open Player does not come with a Pixel Flow model, and never will.** Every user trains their own Pixel Flow
 > on their own videos with `train.py` and exports it to `vsr.onnx` (see [2. Train a model](#2-train-a-model)).
 > No trained model is in this repo, in its releases, or in any download. Without a `vsr.onnx` the player still
-> plays video, but doesn't upscale it: today that includes NVIDIA RTX VSR on Windows, which is sized from the
-> model's plan.
+> plays video and, on Windows, upscales it with NVIDIA RTX VSR; Pixel Flow needs your own model.
+
+## Install (Windows)
+
+1. Download `OpenPlayer-Setup-<build>.exe` from [Releases](https://github.com/SpaceJamp/Open-Player/releases) and
+   run it. It installs for your user only (no admin prompt) into `%LOCALAPPDATA%\Programs\Open Player`. The
+   installer isn't code-signed yet, so Windows SmartScreen may say "Windows protected your PC": click *More info*,
+   then *Run anyway*.
+2. Play videos. On an RTX GPU, NVIDIA RTX VSR upscales them right away; no model and no extra download needed.
+3. **Optional, for Pixel Flow:** train your own model (step 2 below), put `vsr.onnx` and `vsr.ref` in
+   `%LOCALAPPDATA%\Open Player\`, then in Settings > Upscaling click **Download** to get TensorRT (1.9 GB, from
+   NVIDIA's own server, checked against a fixed SHA-256), or **Choose folder...** for your own TensorRT 11.x.
+
+**Updates.** Once a day the player asks GitHub whether a newer release exists (turn it off in Settings > About).
+"Update now" downloads the new installer and runs it only if it carries a valid signature from Open Player's
+release key and matches the signed checksum; anything else is refused. Nothing about you is sent.
+
+**About** in Settings shows the build number and the TensorRT, NVIDIA RTX VSR and driver versions; the log file
+and `--check` show them too.
 
 ```
 decode (FFmpeg, NVDEC) -> YUV->RGB (CUDA) -> upscale: RTX VSR or Pixel Flow (TensorRT) -> RGBA (CUDA) -> Vulkan -> window
@@ -199,6 +216,21 @@ there's only one).
 
 [upscale.py](upscale.py) upscales a file without the player: `python upscale.py in.mp4 -o out.mp4`.
 
+## Releasing (maintainers)
+
+The Windows build is a windowed program (no console window); started from a terminal it prints there (`--check`,
+`--version`), and the log file has everything.
+
+- `installer\build-installer.bat` builds the player and `installer\out\OpenPlayer-Setup-<build>.exe` (Inno Setup 6;
+  `setup-windows.ps1` installs it). The installer never contains TensorRT or a model.
+- `tools\release.ps1 -Notes "..."` (from a clean `main` only) builds it, writes `update.json`, signs it with the
+  update key (asks for its passphrase), checks the signature against the key built into the player, and publishes
+  the GitHub release after you type `yes`.
+- The build number is the number of commits on `main`, so `main`'s history must never be rewritten.
+- The update key: `tools\make-update-key.ps1` made it once; its encrypted private half lives only in the private
+  `Open-Player-Keys` repo, its passphrase only in the maintainer's password manager, its public half in
+  `player\update_pubkey.h`. Losing it means installed copies can't update themselves any more.
+
 ## Limits
 
 - SDR only: HDR video plays with washed-out colours.
@@ -206,7 +238,7 @@ there's only one).
 - Audio-only files don't open, and there's no switching between audio or subtitle tracks yet.
 - On WSL, CUDA and Vulkan can't share memory, so each frame goes through the CPU; native Linux and Windows are
   zero-copy. WSLg also tears; native systems don't.
-- Opening another video restarts the player process; volume resets.
+- Opening another video restarts the player process.
 
 ## License
 
