@@ -16,15 +16,15 @@ bool write_pair_file(const std::string& path, int T, int lw, int lh, int hw, int
 bool read_pair_header(const std::string& path, int& T, int& lw, int& lh, int& hw, int& hh);
 
 #ifdef HAVE_RTX_VSR
-#include "rtx_vsr.h"
-
+// Crops come from playback's own RTX VSR output (a second RTX VSR instance can't be created), so it only collects
+// when that output is exactly scale x the frame, not when the video is shrunk to fit the screen first.
 class Collector {
 public:
     ~Collector();
-    // false: no RTX VSR for the crop, the video is smaller than a crop, or the folder is already at its cap
-    bool open(const std::string& dir, int w, int h, int scale, cudaStream_t s);
-    // the frame just decoded (planar fp16 RGB, w x h) at pts seconds; call for every frame while playing
-    void add(const __half* frame, double pts);
+    // false: playback's upscale isn't exactly scale x, the video is smaller than a crop, or the folder is full
+    bool open(const std::string& dir, int w, int h, int out_w, int out_h, int scale, cudaStream_t s);
+    // the frame just decoded and RTX VSR's upscale of it (planar fp16 RGB), at pts seconds; every frame while playing
+    void add(const __half* frame, const __half* up, double pts);
 
 private:
     std::string dir_;
@@ -33,8 +33,7 @@ private:
     uint64_t bytes_ = 0;  // in the folder so far
     bool off_ = false;
     cudaStream_t st_ = nullptr;
-    RtxVsr rtx_;
-    __half* crop_ = nullptr;
+    __half* crop_ = nullptr;  // low-res crop then its upscale, on the GPU
     std::vector<__half> tmp_;
     std::vector<uint8_t> lr_, hr_;
 };

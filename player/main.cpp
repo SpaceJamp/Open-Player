@@ -246,10 +246,11 @@ int main(int argc, char** argv) {
         bool use_rtx = have_vsr && want_rtx && rtx.open(w, h, nw * s, nh * s, st);
         if (have_vsr) fprintf(stderr, "VSR: %s\n", use_rtx ? "NVIDIA RTX Video Super Resolution" : "our model");
         Collector col;
-        bool collecting = collect_dir && use_rtx && col.open(collect_dir, w, h, s, st);
+        bool collecting = collect_dir && use_rtx && col.open(collect_dir, w, h, nw * s, nh * s, s, st);
         if (collect_dir)
             fprintf(stderr, collecting ? "collect: saving RTX VSR training pairs in %s\n"
-                                       : "collect: off (needs RTX VSR, a video of at least 128x128, and %s under 2 GB)\n",
+                                       : "collect: off (needs RTX VSR at exactly 2x - no shrinking to fit the screen -, "
+                                         "a video of at least 128x128, and %s under 2 GB)\n",
                     collect_dir);
 #else
         const bool use_rtx = false;
@@ -477,7 +478,7 @@ int main(int argc, char** argv) {
                     }
                     if (vsr_on && use_rtx) {
                         p.w = nw * s, p.h = nh * s;
-                        if (collecting && !paused) col.add(in, pts);
+                        if (collecting && !paused) col.add(in, p.out, pts);
                     } else
 #endif
                     if (vsr_on) p.out = vsr.run(reset), p.w = nw * s, p.h = nh * s, reset = false;

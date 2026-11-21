@@ -40,9 +40,9 @@ static constexpr int CROP = 128;          // low-res crop; RTX VSR makes it CROP
 static constexpr double EVERY = 10;       // seconds of playback between clips
 static constexpr uint64_t CAP = 2ull << 30;  // the folder stops growing at 2 GB
 
-bool Collector::open(const std::string& dir, int w, int h, int scale, cudaStream_t s) {
+bool Collector::open(const std::string& dir, int w, int h, int out_w, int out_h, int scale, cudaStream_t s) {
     dir_ = dir, w_ = w, h_ = h, s_ = scale, st_ = s;
-    if (w < CROP || h < CROP || scale < 2) return false;
+    if (w < CROP || h < CROP || scale < 2 || out_w != w * scale || out_h != h * scale) return false;
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     for (auto& e : std::filesystem::directory_iterator(dir, ec))
@@ -50,10 +50,10 @@ bool Collector::open(const std::string& dir, int w, int h, int scale, cudaStream
     if (bytes_ >= CAP) return false;
     lr_.resize((size_t)CLIP * 3 * CROP * CROP), hr_.resize(lr_.size() * scale * scale);
     tmp_.resize(3 * CROP * CROP * (1 + scale * scale));
-    return cudaMalloc(&crop_, 6ull * CROP * CROP) == cudaSuccess && rtx_.open(CROP, CROP, CROP * scale, CROP * scale, s);
+    return cudaMalloc(&crop_, 2ull * tmp_.size()) == cudaSuccess;
 }
 
-void Collector::add(const __half* frame, double pts) {
+void Collector::add(const __half* frame, const __half* up, double pts) {
     if (off_) return;
     if (got_ && (pts <= prev_ || pts - prev_ > 0.5)) got_ = 0;  // a seek or a gap: no longer consecutive frames
     if (!got_) {
@@ -63,14 +63,14 @@ void Collector::add(const __half* frame, double pts) {
         y_ = std::uniform_int_distribution<int>(0, h_ - CROP)(rng);
     }
     prev_ = pts;
-    for (int c = 0; c < 3; c++)
+    const int H = CROP * s_, n = 3 * CROP * CROP, W = w_ * s_, Hh = h_ * s_;
+    for (int c = 0; c < 3; c++) {  // the same region of the frame and of its upscale
         cudaMemcpy2DAsync(crop_ + c * CROP * CROP, CROP * 2, frame + (size_t)c * w_ * h_ + (size_t)y_ * w_ + x_, w_ * 2,
                           CROP * 2, CROP, cudaMemcpyDeviceToDevice, st_);
-    const __half* up = rtx_.run(crop_);
-    if (!up) return (void)(off_ = true);
-    const int H = CROP * s_, n = 3 * CROP * CROP;
-    cudaMemcpyAsync(tmp_.data(), crop_, n * 2, cudaMemcpyDeviceToHost, st_);
-    cudaMemcpyAsync(tmp_.data() + n, up, (size_t)3 * H * H * 2, cudaMemcpyDeviceToHost, st_);
+        cudaMemcpy2DAsync(crop_ + n + c * H * H, H * 2, up + (size_t)c * W * Hh + (size_t)y_ * s_ * W + x_ * s_, W * 2,
+                          H * 2, H, cudaMemcpyDeviceToDevice, st_);
+    }
+    cudaMemcpyAsync(tmp_.data(), crop_, tmp_.size() * 2, cudaMemcpyDeviceToHost, st_);
     // shortcut: waits for the GPU, ~1 ms for 8 frames every 10 s; use pinned memory and events if it ever shows
     cudaStreamSynchronize(st_);
     auto to8 = [](__half v) { return (uint8_t)std::clamp(__half2float(v) * 255.f + .5f, 0.f, 255.f); };
