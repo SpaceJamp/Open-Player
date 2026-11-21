@@ -277,6 +277,7 @@ int main(int argc, char** argv) {
 
         Media media;
         if (!media.open(path, disp.cuda_device(), !cpu_decode)) return 1;
+        media.set_paused(true);  // nothing plays while the upscalers get ready (a TensorRT engine build takes a minute)
         int w = media.width(), h = media.height();
         // Like RTX VSR: only upscale video smaller than the screen in both directions. A 4K video on a 4K screen,
         // including 3840x1608 widescreen, would be blown up to 8K (7 fps on an RTX 5080) just to be shrunk back.
@@ -579,6 +580,7 @@ int main(int argc, char** argv) {
         SDL_SetWindowTitle(win, std::filesystem::path(path).filename().string().c_str());
         if (start_at >= 0) seek(start_position(start_at, dur));  // reopened after a settings change
         if (start_paused) set_paused(true), step = true;         // ... while paused: show that frame, stay paused
+        else media.set_paused(false), wall_t0 = SDL_GetTicksNS();  // ready: play from the start, not from mid-setup
 
         // the settings card (S, the gear, the menu); OPEN_PLAYER_SHOW_SETTINGS=1 opens it at start (timing tests)
         bool settings_open = getenv("OPEN_PLAYER_SHOW_SETTINGS") != nullptr;
