@@ -34,10 +34,10 @@
 
 **Interfaces (Produces):** `using Positions = std::vector<std::pair<double, std::string>>;` `Positions load_positions(const std::string& file);` `bool save_positions(const std::string& file, const Positions&);` `Positions positions_add(Positions, const std::string& path, double t);` (newest first, no duplicates, cap 200, paths with `\t`/`\n`/`\r` refused) `double resume_point(const Positions&, const std::string& path, double dur);` (-1 = start from 0) `std::string positions_file();` `Settings` gains `bool remember_position = true; int settings_tab = 0;`.
 
-- [ ] Failing tests: add/dedupe/cap 200; refuse `"a\tb"`; round trip through a temp file, no `.tmp` left; `resume_point` → 120 for (120, dur 3600), -1 for t 5, -1 for t 3590 of 3600, -1 for any t in a 35 s clip, 15 for dur 0 and t 15; junk lines ignored; settings round trip of the two keys.
-- [ ] `--uitest` fails to compile; implement; `--uitest` passes (Windows and Linux).
-- [ ] main.cpp: after the start seek, if no `--start` and `cfg.remember_position`: `t = resume_point(...)`; `t >= 0` → `seek(t)` + notice "Resumed at <clock_text(t)>". Save (`positions_add` + `save_positions`) every 10 s while playing, in `restart_with`, and at exit. Test run on screen 2: play 15 s of a clip, kill it, reopen → log/stats show it starts near 15 s.
-- [ ] Commit.
+- [x] Failing tests: add/dedupe/cap 200; refuse `"a\tb"`; round trip through a temp file, no `.tmp` left; `resume_point` → 120 for (120, dur 3600), -1 for t 5, -1 for t 3590 of 3600, -1 for any t in a 35 s clip, 15 for dur 0 and t 15; junk lines ignored; settings round trip of the two keys.
+- [x] `--uitest` fails to compile; implement; `--uitest` passes (Windows and Linux).
+- [x] main.cpp: after the start seek, if no `--start` and `cfg.remember_position`: `t = resume_point(...)`; `t >= 0` → `seek(t)` + notice "Resumed at <clock_text(t)>". Save (`positions_add` + `save_positions`) every 10 s while playing, in `restart_with`, and at exit. Test run on screen 2: play 15 s of a clip, kill it, reopen → log/stats show it starts near 15 s.
+- [x] Commit.
 
 ### Task 2: Training status
 
@@ -45,9 +45,9 @@
 
 **Interfaces (Produces):** train.py `status_file() -> Path`, `write_status(**fields)` (atomic: temp + `os.replace`, never raises). C++: `struct TrainingStatus { std::string state, suggest, out; long long step = 0, steps = 0, updated = 0; double loss = -1, val_db = NAN, best_db = NAN, s_per_step = 0, eta_s = 0; };` `bool parse_training_status(const std::string& json, TrainingStatus&);` `std::string training_file();` `bool training_stale(const TrainingStatus&, long long now);` (state "training" and `now - updated > 300`).
 
-- [ ] Failing tests: train_check writes a status into a temp `XDG_CONFIG_HOME` and reads back every key, no temp file left; C++: parse a full JSON, reject junk/half JSON, ignore unknown keys, `training_stale` false when `updated` is in the future.
-- [ ] Implement: train.py calls `write_status(state="training", ...)` every 100 steps and after `check()`, `state="finished"` at the end, `"stopped"` on Ctrl+C. The C++ reader is a small flat-JSON reader (strings, numbers), like `update.cpp`'s.
-- [ ] `py tests/train_check.py` and `--uitest` pass; commit.
+- [x] Failing tests: train_check writes a status into a temp `XDG_CONFIG_HOME` and reads back every key, no temp file left; C++: parse a full JSON, reject junk/half JSON, ignore unknown keys, `training_stale` false when `updated` is in the future.
+- [x] Implement: train.py calls `write_status(state="training", ...)` every 100 steps and after `check()`, `state="finished"` at the end, `"stopped"` on Ctrl+C. The C++ reader is a small flat-JSON reader (strings, numbers), like `update.cpp`'s.
+- [x] `py tests/train_check.py` and `--uitest` pass; commit.
 
 ### Task 3: Side tabs and the Training tab
 
@@ -55,14 +55,15 @@
 
 **Interfaces:** `UiState` gains `int settings_tab;` and `TrainingStatus training; bool training_known; long long now_unix;`; `UiAction::SetSettingsTab` (value 0..2); `SetRememberPosition`.
 
-- [ ] Failing tests: headless frames with each tab at scale 1 and 2.5 and at 640x360 (icons-only column), Training tab with no file / running / stale / finished; clicking the second tab row emits `SetSettingsTab` 1; the card still never covers the capsule.
-- [ ] Implement: left column (icon + label rows; icons only below a width), General = today's sections + the Remember switch, Training = status lines + progress bar (main reads `training.json` once a second while the tab is open), About = today's About.
-- [ ] `--uitest` both builds; commit.
+- [x] Failing tests: headless frames with each tab at scale 1 and 2.5 and at 640x360 (icons-only column), Training tab with no file / running / stale / finished; clicking the second tab row emits `SetSettingsTab` 1; the card still never covers the capsule.
+- [x] Implement: left column (icon + label rows; icons only below a width), General = today's sections + the Remember switch, Training = status lines + progress bar (main reads `training.json` once a second while the tab is open), About = today's About.
+- [x] `--uitest` both builds; commit.
 
 ### Task 4: Docs
 
-- [ ] README: tabs, resume, Training tab (and that `train.py` writes `training.json`). Commit.
+- [x] README: tabs, resume, Training tab (and that `train.py` writes `training.json`). Commit.
 
 ### Finish
 
-- [ ] 4 bug checks (one security); fix findings; ask before merging.
+- [x] 4 bug checks (one security); fix findings.
+- [ ] Ask before merging into main.

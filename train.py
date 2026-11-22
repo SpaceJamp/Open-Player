@@ -309,7 +309,12 @@ def write_status(**fields):
         clean = {k: (v if not isinstance(v, float) or math.isfinite(v) else None) for k, v in fields.items()}
         tmp = f.with_name(f.name + ".tmp")
         tmp.write_text(json.dumps({**clean, "updated": int(time.time())}, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, f)
+        for attempt in range(5):  # Windows refuses the replace while the player has the file open to read it
+            try:
+                os.replace(tmp, f)
+                return
+            except PermissionError:
+                time.sleep(0.02)
     except OSError:
         pass
 

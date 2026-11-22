@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <sstream>
 
 #include "ui.h"
@@ -131,7 +132,8 @@ bool save_positions(const std::string& file, const Positions& p) {
     for (auto& [s, path] : p) snprintf(t, sizeof t, "%.1f\t", s), text += t + path + "\n";
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::u8path(file).parent_path(), ec);
-    std::string tmp = file + ".tmp";
+    // its own temp name: two players saving at once must not write into the same temp file
+    std::string tmp = file + "." + std::to_string(std::random_device{}()) + ".tmp";
     {
         std::ofstream f(std::filesystem::u8path(tmp), std::ios::binary);
         f << text;
@@ -207,6 +209,11 @@ bool parse_training_status(const std::string& j, TrainingStatus& out) {
         if (j[i] == '"') {
             std::string v;
             if (!str(v)) return false;
+            if (v.size() > 512) {  // shown as wrapped text every frame: keep it short, cut between characters
+                v.resize(512);
+                while (!v.empty() && ((unsigned char)v.back() & 0xC0) == 0x80) v.pop_back();
+                if (!v.empty() && ((unsigned char)v.back() & 0x80)) v.pop_back();  // the cut character's first byte
+            }
             if (k == "state") t.state = v;
             else if (k == "suggest") t.suggest = v;
             else if (k == "out") t.out = v;
@@ -221,14 +228,15 @@ bool parse_training_status(const std::string& j, TrainingStatus& out) {
             double v = strtod(j.c_str() + i, &end);
             if (end == j.c_str() + i || !std::isfinite(v)) return false;
             i = end - j.c_str();
-            if (k == "step") t.step = (long long)v;
-            else if (k == "steps") t.steps = (long long)v;
-            else if (k == "updated") t.updated = (long long)v;
+            const double whole = std::clamp(v, -1e15, 1e15);  // a hand-edited 1e300 must not overflow the cast
+            if (k == "step") t.step = (long long)whole;
+            else if (k == "steps") t.steps = (long long)whole;
+            else if (k == "updated") t.updated = (long long)whole;
             else if (k == "loss") t.loss = v;
             else if (k == "val_db") t.val_db = v, t.has_val = true;
             else if (k == "best_db") t.best_db = v;
             else if (k == "s_per_step") t.s_per_step = v;
-            else if (k == "eta_s") t.eta_s = v;
+            else if (k == "eta_s") t.eta_s = std::clamp(v, 0.0, 1e9);  // the tab casts it to whole minutes
         }
         ws();
         if (i < j.size() && j[i] == ',') { i++; continue; }
@@ -385,7 +393,8 @@ int settings_selftest() {
         auto dir = std::filesystem::temp_directory_path() / "open-player-positions-test";
         std::filesystem::remove_all(dir);
         std::string f = (dir / "positions.txt").string();
-        check(load_positions(f).empty() && save_positions(f, r) && !std::filesystem::exists(f + ".tmp"));
+        check(load_positions(f).empty() && save_positions(f, r));
+        check(std::distance(std::filesystem::directory_iterator(dir), {}) == 1);  // no temp file left behind
         check(load_positions(f) == r);
         std::ofstream(f, std::ios::app) << "junk\nnan\t/x.mkv\n-5\t/y.mkv\n12\t\n";
         check(load_positions(f) == r);  // junk lines skipped
@@ -408,6 +417,17 @@ int settings_selftest() {
               !parse_training_status("junk", n) && !parse_training_status("{\"step\": 5}", n));  // no state
         check(!training_stale(t, 1795300000 + 100) && training_stale(t, 1795300000 + 400) &&
               !training_stale(t, 1795300000 - 3600));  // updated "in the future" (clock set back): running
+        TrainingStatus h;  // hand-edited numbers far out of range: clamped, never cast out of range
+        check(parse_training_status("{\"state\": \"training\", \"step\": 1e300, \"steps\": -1e300, \"updated\": 1e30, "
+                                    "\"eta_s\": 1e300, \"loss\": -1e300}",
+                                    h) &&
+              h.step > 0 && h.steps <= 0 && h.updated > 0 && h.eta_s <= 1e9 && h.loss < 0);
+        TrainingStatus l;  // a huge string is cut, not shown whole
+        check(parse_training_status("{\"state\": \"training\", \"suggest\": \"" + std::string(5000, 'x') + "\"}", l) &&
+              l.suggest.size() <= 512);
+        std::string umlauts;
+        for (int i = 0; i < 1001; i++) umlauts += "\xc3\xa4";  // starts the cut at the 2nd byte of an "ä"
+        check(parse_training_status("{\"state\": \"x" + umlauts + "\"}", l) && l.state.size() % 2 == 1);
         n.state = "finished";
         check(!training_stale(n, 1795300000 + 400000));
         check(std::filesystem::path(training_file()).filename() == "training.json");

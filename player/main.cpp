@@ -858,9 +858,9 @@ int main(int argc, char** argv) {
                     tf.read(text.data(), (std::streamsize)text.size());
                     text.resize((size_t)tf.gcount());
                     training_known = parse_training_status(text, training);
+                    ui_redraw = std::max(ui_redraw, 1);  // paused, nothing else redraws: the tab must still update
                 }
                 us.training = training, us.training_known = training_known, us.now_unix = (long long)time(nullptr);
-                if (upd_checking) us.update_status = "Checking for updates...";
                 if (upd_checking) us.update_status = "Checking for updates...";
                 else if (upd_running) {
                     us.update_status = "Downloading build " + std::to_string(upd->info.build) + "...";

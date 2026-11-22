@@ -95,6 +95,9 @@ How it works, and what helps:
 - **Diagnostics:** after each validation a `suggest: ...` line names what to improve (data loading too slow,
   plateau, overfitting, unstable gradients, a weak clip, flicker, soft edges, or `ok`). Timings and metrics go to
   `<out>.diag.jsonl`; `python train_diag.py <out>.diag.jsonl` prints a summary.
+- **Watch it in the player:** every 100 steps and after each validation, `train.py` writes `training.json` to the
+  player's settings folder (`XDG_CONFIG_HOME` if set, else `%APPDATA%\open-player\` or `~/.config/open-player/`).
+  Settings > Training shows it once a second.
 - **Sampling:** each title (a top-level video file or folder, such as a whole series) is picked equally often.
 - **Data sets the ceiling:** the network can't get sharper than its targets. High-bitrate sources (Blu-ray quality,
   4K shrunk to 1080p) beat 2-3 Mbit/s web rips, and varied content (animation, bright scenes, sports, film grain)
@@ -154,12 +157,21 @@ stops (the cursor hides in fullscreen) and stays while paused. Volume, seek keys
 short notice. Right-click for a menu with the same actions, recent files, the info overlay and settings. Drop a video
 on the window, or use Open, to switch videos.
 
-**Settings** (`S`, the gear, or the menu) open a card over the video, which keeps playing:
-- Upscaler (NVIDIA RTX / Pixel Flow / Off) and how long the controls stay after the mouse stops change at once.
-- Decoder (GPU or CPU) and the monitor (every connected one is listed with its resolution and refresh rate) reopen
-  the video where it is, on that monitor.
-- Start fullscreen, remember the volume, and show the info overlay at start.
-- About: the build number and credits.
+**Settings** (`S`, the gear, or the menu) open a card over the video, which keeps playing. Tabs run down its left
+side (icons only on a narrow window), and the card opens on the tab you used last:
+- **General:** the upscaler (NVIDIA RTX / Pixel Flow / Off) and how long the controls stay after the mouse stops
+  change at once. The decoder (GPU or CPU) and the monitor (every connected one is listed with its resolution and
+  refresh rate) reopen the video where it is, on that monitor. Start fullscreen, remember the volume, show the
+  info overlay at start, and remember where you left off.
+- **Training:** a running `train.py` live: step and progress bar, loss, validation score (and best), speed, time
+  left, the latest `suggest:` line and where the model is saved. It says "Not running" when a run has been silent
+  for 5 minutes (stopped without saying so, or crashed).
+- **About:** the build number, versions, updates, the log file and credits.
+
+**Remember where I left off** (on by default): the player saves your spot in each video every 10 seconds, on quit
+and when you open another one, and picks up there next time with a "Resumed at 12:34" notice. It skips spots in
+the first 10 seconds or the last 30, so a finished video starts over. `--start` wins over it. The last 200 videos
+are kept in `positions.txt`.
 
 Choices are saved in `settings.txt` next to the recent-files list (`%APPDATA%\open-player\` on Windows,
 `~/.config/open-player/` on Linux). `V` and the badge only compare for the moment; they don't change the saved
