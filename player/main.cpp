@@ -4,6 +4,7 @@
 #include <atomic>
 #include <thread>
 #include <ctime>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <cuda.h>
@@ -535,9 +536,19 @@ int main(int argc, char** argv) {
         };
         auto toggle_fullscreen = [&] { SDL_SetWindowFullscreen(win, !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN)); };
         // replaces this process with the player run with args (open another video, reopen after a settings change)
+        double position_saved_at = now();
+        TrainingStatus training;  // the Training tab's training.json, read once a second while it's open
+        bool training_known = false;
+        double training_read_at = -10;
+        auto save_position = [&] {  // this video's spot, for "Remember where I left off"
+            position_saved_at = now();
+            if (!frames_shown) return;  // quit before the first frame: pos is still 0, keep the saved spot
+            save_positions(positions_file(), positions_add(load_positions(positions_file()), video_path, pos));
+        };
         std::function<void()> stop_downloads;  // set below, once the downloads exist
         auto restart_with = [&](std::vector<std::string> args, const std::string& video) {
             if (stop_downloads) stop_downloads();  // cancelled (partial files deleted), not cut off by the restart
+            if (cfg.remember_position) save_position();
             if (volume_unsaved) save_settings(settings_file(), saved);
             fprintf(stderr, "reopening: %s\n", video.c_str());
             stop_log();  // the new process starts its own log; this one's last lines must reach the file first
@@ -606,6 +617,10 @@ int main(int argc, char** argv) {
         };
         SDL_SetWindowTitle(win, std::filesystem::path(path).filename().string().c_str());
         if (start_at >= 0) seek(start_position(start_at, dur));  // reopened after a settings change
+        else if (cfg.remember_position) {  // where you left off last time
+            double t = resume_point(load_positions(positions_file()), video_path, dur);
+            if (t >= 0) seek(t), post(ICON_CLOCK, "Resumed at " + clock_text(t), -1, 2);
+        }
         if (start_paused) set_paused(true), step = true;         // ... while paused: show that frame, stay paused
         else media.set_paused(false), wall_t0 = SDL_GetTicksNS();  // ready: play from the start, not from mid-setup
 
@@ -674,6 +689,7 @@ int main(int argc, char** argv) {
                 else post(ICON_X, "Update failed: couldn't start the installer", -1, 4);
             }
             if (upd_running && settings_open) dirty = true;
+            if (cfg.remember_position && !paused && now() - position_saved_at >= 10) save_position();
             if (volume_unsaved && now() - volume_saved_at >= 1)
                 save_settings(settings_file(), saved), volume_unsaved = false, volume_saved_at = now();
             if (addon_done) {  // the add-on download finished: load it by reopening, or say what went wrong
@@ -835,6 +851,16 @@ int main(int argc, char** argv) {
                 us.build = OPEN_PLAYER_BUILD;
                 us.versions = {trt_line(trt_from, trt_ver, trt_why), rtx_vsr_line(rtx_tried, rtx_ok), driver_line()};
                 us.trt_addon = trt_from == TrtFrom::AddOn;
+                if (settings_open && cfg.settings_tab == 1 && now() - training_read_at >= 1) {  // the Training tab: once a second
+                    training_read_at = now();
+                    std::ifstream tf(std::filesystem::u8path(training_file()), std::ios::binary);
+                    std::string text(1 << 20, '\0');
+                    tf.read(text.data(), (std::streamsize)text.size());
+                    text.resize((size_t)tf.gcount());
+                    training_known = parse_training_status(text, training);
+                    ui_redraw = std::max(ui_redraw, 1);  // paused, nothing else redraws: the tab must still update
+                }
+                us.training = training, us.training_known = training_known, us.now_unix = (long long)time(nullptr);
                 if (upd_checking) us.update_status = "Checking for updates...";
                 else if (upd_running) {
                     us.update_status = "Downloading build " + std::to_string(upd->info.build) + "...";
@@ -904,6 +930,10 @@ int main(int argc, char** argv) {
                     case UiAction::CancelTensorRT: addon_cancel = true; break;
                     case UiAction::ChooseTensorRTFolder: show_folder_dialog(); break;
                     case UiAction::SetCheckUpdates: saved.check_updates = cfg.check_updates = a.value != 0, save_prefs(); break;
+                    case UiAction::SetSettingsTab: saved.settings_tab = cfg.settings_tab = (int)a.value, save_prefs(); break;
+                    case UiAction::SetRememberPosition:
+                        saved.remember_position = cfg.remember_position = a.value != 0, save_prefs();
+                        break;
                     case UiAction::InstallUpdate:
                         if (upd_running || !upd->available) break;
                         upd_running = true, upd_done = false, upd_cancel = false, upd_got = 0;
@@ -979,6 +1009,7 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        if (cfg.remember_position) save_position();
         stop_addon();  // a download in progress is cancelled (its partial file is deleted)
         if (upd_dl.joinable()) upd_cancel = true, upd_dl.join();
         if (upd_check.joinable()) upd_check.detach();  // owns its shared state; may still be waiting on the network

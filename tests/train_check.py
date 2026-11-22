@@ -14,6 +14,9 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# the runs below write training.json for the player: into a temp folder, never the real settings folder
+import os  # noqa: E402
+os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="op-train-check-")
 import train  # noqa: E402
 from model import VSR  # noqa: E402
 
@@ -110,6 +113,24 @@ with tempfile.TemporaryDirectory() as d:
     assert load_model(f"{d}/c.pt", "cpu").scale == 2 and not list(Path(d).glob("*.tmp")), "save must leave no temp file"
     Path(f"{d}/x.diag.jsonl").write_text('{"type": "window", "step": 100}\n{"type": "val", "st')
     assert [r["step"] for r in train_diag.read(f"{d}/x.diag.jsonl")] == [100]
+
+# training.json: the player's Training tab reads it from its settings folder; written whole or not at all
+with tempfile.TemporaryDirectory() as d:
+    import json, os, time
+    old = os.environ.get("XDG_CONFIG_HOME")
+    os.environ["XDG_CONFIG_HOME"] = d
+    try:
+        assert train.status_file() == Path(d) / "open-player" / "training.json"
+        train.write_status(state="training", step=5, steps=10, loss=0.25, val_db=1.5, best_db=1.6, s_per_step=0.2,
+                           eta_s=1.0, suggest="ok", out="x.pt")
+        st = json.loads(train.status_file().read_text())
+        assert st["state"] == "training" and st["step"] == 5 and st["steps"] == 10 and st["best_db"] == 1.6
+        assert abs(st["updated"] - time.time()) < 60 and not list(train.status_file().parent.glob("*.tmp"))
+        train.write_status(state="finished", step=10, steps=10, val_db=float("nan"))  # NaN can't break the JSON
+        assert json.loads(train.status_file().read_text())["state"] == "finished"
+    finally:
+        if old is None: del os.environ["XDG_CONFIG_HOME"]
+        else: os.environ["XDG_CONFIG_HOME"] = old
 
 # --pairs: the player's --collect files (format in player/collect.h) read back as low-res frames and their upscale
 with tempfile.TemporaryDirectory() as d:

@@ -1,10 +1,13 @@
 #include "settings.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <sstream>
 
 #include "ui.h"
@@ -36,6 +39,10 @@ Settings settings_parse(const std::string& text) {
         else if (k == "info_at_start") flag(s.info_at_start);
         else if (k == "trt_folder") s.trt_folder = v;
         else if (k == "check_updates") flag(s.check_updates);
+        else if (k == "remember_position") flag(s.remember_position);
+        else if (k == "settings_tab") {
+            if (v == "0" || v == "1" || v == "2") s.settings_tab = v[0] - '0';
+        }
         else if (k == "last_update_check") {
             char* end = nullptr;
             long long t = strtoll(v.c_str(), &end, 10);
@@ -64,7 +71,9 @@ std::string settings_format(const Settings& s) {
            "\nstart_fullscreen=" + (s.start_fullscreen ? "1" : "0") + "\nremember_volume=" +
            (s.remember_volume ? "1" : "0") + "\nvolume=" + vol + "\nhide_after=" + std::to_string(s.hide_after) +
            "\ninfo_at_start=" + (s.info_at_start ? "1" : "0") + "\ntrt_folder=" + trt + "\ncheck_updates=" + (s.check_updates ? "1" : "0") +
-           "\nlast_update_check=" + std::to_string(s.last_update_check) + "\n";
+           "\nlast_update_check=" + std::to_string(s.last_update_check) +
+           "\nremember_position=" + (s.remember_position ? "1" : "0") + "\nsettings_tab=" +
+           std::to_string(s.settings_tab) + "\n";
 }
 
 Settings load_settings(const std::string& file) {
@@ -96,6 +105,154 @@ std::string settings_file() {
 }
 
 static std::string name_size(const ScreenInfo& s) { return s.name + " " + std::to_string(s.w) + "x" + std::to_string(s.h); }
+
+static constexpr size_t POSITIONS_MAX = 200;
+
+Positions load_positions(const std::string& file) {
+    std::ifstream f(std::filesystem::u8path(file), std::ios::binary);
+    Positions p;
+    std::string line;
+    size_t read = 0;
+    while (p.size() < POSITIONS_MAX && read < (1 << 20) && std::getline(f, line)) {  // a huge file is cut, not loaded
+        read += line.size() + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        size_t tab = line.find('\t');
+        if (tab == std::string::npos || tab + 1 >= line.size()) continue;
+        char* end = nullptr;
+        double t = strtod(line.c_str(), &end);
+        if (end != line.c_str() + tab || !(t >= 0 && t < 1e7)) continue;  // also rejects NaN
+        p.emplace_back(t, line.substr(tab + 1));
+    }
+    return p;
+}
+
+bool save_positions(const std::string& file, const Positions& p) {
+    std::string text;
+    char t[32];
+    for (auto& [s, path] : p) snprintf(t, sizeof t, "%.1f\t", s), text += t + path + "\n";
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::u8path(file).parent_path(), ec);
+    // its own temp name: two players saving at once must not write into the same temp file
+    std::string tmp = file + "." + std::to_string(std::random_device{}()) + ".tmp";
+    {
+        std::ofstream f(std::filesystem::u8path(tmp), std::ios::binary);
+        f << text;
+        f.close();
+        if (!f) return std::filesystem::remove(std::filesystem::u8path(tmp), ec), false;
+    }
+    std::error_code moved;
+    std::filesystem::rename(std::filesystem::u8path(tmp), std::filesystem::u8path(file), moved);
+    if (moved) std::filesystem::remove(std::filesystem::u8path(tmp), ec);
+    return !moved;
+}
+
+Positions positions_add(Positions p, const std::string& path, double t) {
+    if (path.empty() || path.find_first_of("\t\r\n") != std::string::npos || !(t >= 0)) return p;
+    p.erase(std::remove_if(p.begin(), p.end(), [&](auto& e) { return e.second == path; }), p.end());
+    p.insert(p.begin(), {t, path});
+    if (p.size() > POSITIONS_MAX) p.resize(POSITIONS_MAX);
+    return p;
+}
+
+double resume_point(const Positions& p, const std::string& path, double dur) {
+    for (auto& [t, f] : p)
+        if (f == path) return t >= 10 && (dur <= 0 || t < dur - 30) ? t : -1;
+    return -1;
+}
+
+std::string positions_file() {
+    return (std::filesystem::path(recent_file()).parent_path() / "positions.txt").string();
+}
+
+// training.json: one flat object of strings, numbers and null (nested values are skipped); strict, small
+bool parse_training_status(const std::string& j, TrainingStatus& out) {
+    if (j.size() > (1 << 20)) return false;
+    size_t i = 0;
+    auto ws = [&] { while (i < j.size() && isspace((unsigned char)j[i])) i++; };
+    auto str = [&](std::string& s) {
+        if (i >= j.size() || j[i] != '"') return false;
+        for (i++; i < j.size() && j[i] != '"'; i++) {
+            if (j[i] != '\\') { s += j[i]; continue; }
+            if (++i >= j.size()) return false;
+            char c = j[i];
+            s += c == 'n' ? '\n' : c == 't' ? '\t' : c == 'r' ? '\r' : c;  // \" \\ \/ as themselves; no \u (UTF-8)
+        }
+        return i++ < j.size();
+    };
+    auto skip = [&] {  // a nested array or object, strings included
+        int depth = 0;
+        do {
+            if (i >= j.size()) return false;
+            if (j[i] == '"') {
+                std::string dummy;
+                if (!str(dummy)) return false;
+                continue;
+            }
+            depth += j[i] == '[' || j[i] == '{';
+            depth -= j[i] == ']' || j[i] == '}';
+            i++;
+        } while (depth > 0);
+        return true;
+    };
+    TrainingStatus t;
+    ws();
+    if (i >= j.size() || j[i++] != '{') return false;
+    for (bool first = true;; first = false) {
+        ws();
+        if (i < j.size() && j[i] == '}' && first) { i++; break; }
+        std::string k;
+        if (!str(k)) return false;
+        ws();
+        if (i >= j.size() || j[i++] != ':') return false;
+        ws();
+        if (i >= j.size()) return false;
+        if (j[i] == '"') {
+            std::string v;
+            if (!str(v)) return false;
+            if (v.size() > 512) {  // shown as wrapped text every frame: keep it short, cut between characters
+                v.resize(512);
+                while (!v.empty() && ((unsigned char)v.back() & 0xC0) == 0x80) v.pop_back();
+                if (!v.empty() && ((unsigned char)v.back() & 0x80)) v.pop_back();  // the cut character's first byte
+            }
+            if (k == "state") t.state = v;
+            else if (k == "suggest") t.suggest = v;
+            else if (k == "out") t.out = v;
+        } else if (j[i] == '[' || j[i] == '{') {
+            if (!skip()) return false;
+        } else if (!j.compare(i, 4, "null")) {
+            i += 4;
+        } else if (!j.compare(i, 4, "true") || !j.compare(i, 5, "false")) {
+            i += j[i] == 't' ? 4 : 5;
+        } else {
+            char* end = nullptr;
+            double v = strtod(j.c_str() + i, &end);
+            if (end == j.c_str() + i || !std::isfinite(v)) return false;
+            i = end - j.c_str();
+            const double whole = std::clamp(v, -1e15, 1e15);  // a hand-edited 1e300 must not overflow the cast
+            if (k == "step") t.step = (long long)whole;
+            else if (k == "steps") t.steps = (long long)whole;
+            else if (k == "updated") t.updated = (long long)whole;
+            else if (k == "loss") t.loss = v;
+            else if (k == "val_db") t.val_db = v, t.has_val = true;
+            else if (k == "best_db") t.best_db = v;
+            else if (k == "s_per_step") t.s_per_step = v;
+            else if (k == "eta_s") t.eta_s = std::clamp(v, 0.0, 1e9);  // the tab casts it to whole minutes
+        }
+        ws();
+        if (i < j.size() && j[i] == ',') { i++; continue; }
+        if (i < j.size() && j[i] == '}') { i++; break; }
+        return false;
+    }
+    if (t.state.empty()) return false;
+    out = t;
+    return true;
+}
+
+bool training_stale(const TrainingStatus& t, long long now) { return t.state == "training" && now - t.updated > 300; }
+
+std::string training_file() {
+    return (std::filesystem::path(recent_file()).parent_path() / "training.json").string();
+}
 
 std::string screen_key(const std::vector<ScreenInfo>& screens, int i) {
     std::string k = name_size(screens[i]);
@@ -217,6 +374,64 @@ int settings_selftest() {
 
     check(start_position(5, .5) == 0 && start_position(5, 0) == 5);  // a clip of 1 s or less starts at 0
     check(settings_parse("\xEF\xBB\xBFupscaler=off\n").upscaler == Upscaler::Off);  // Notepad's UTF-8 BOM
+    {  // resume positions
+        Settings t;
+        t.remember_position = false, t.settings_tab = 2;
+        Settings b = settings_parse(settings_format(t));
+        check(!b.remember_position && b.settings_tab == 2 && settings_parse("settings_tab=7\n").settings_tab == 0);
+        Positions p;
+        for (int i = 0; i < 205; i++) p = positions_add(p, "/v/" + std::to_string(i) + ".mkv", i);
+        check(p.size() == 200 && p.front().second == "/v/204.mkv");  // newest first, cap 200
+        p = positions_add(p, "/v/10.mkv", 77);
+        check(p.front() == (std::pair<double, std::string>{77, "/v/10.mkv"}) &&
+              std::count_if(p.begin(), p.end(), [](auto& e) { return e.second == "/v/10.mkv"; }) == 1);
+        check(positions_add({}, "a\tb.mkv", 50).empty() && positions_add({}, "a\nb.mkv", 50).empty());
+        Positions r = {{120, "/a.mkv"}, {5, "/b.mkv"}, {3590, "/c.mkv"}, {20, "/d.mkv"}, {15, "/e.mkv"}};
+        check(resume_point(r, "/a.mkv", 3600) == 120 && resume_point(r, "/b.mkv", 3600) == -1 &&
+              resume_point(r, "/c.mkv", 3600) == -1 && resume_point(r, "/d.mkv", 35) == -1 &&
+              resume_point(r, "/e.mkv", 0) == 15 && resume_point(r, "/nope.mkv", 3600) == -1);
+        auto dir = std::filesystem::temp_directory_path() / "open-player-positions-test";
+        std::filesystem::remove_all(dir);
+        std::string f = (dir / "positions.txt").string();
+        check(load_positions(f).empty() && save_positions(f, r));
+        check(std::distance(std::filesystem::directory_iterator(dir), {}) == 1);  // no temp file left behind
+        check(load_positions(f) == r);
+        std::ofstream(f, std::ios::app) << "junk\nnan\t/x.mkv\n-5\t/y.mkv\n12\t\n";
+        check(load_positions(f) == r);  // junk lines skipped
+        std::filesystem::remove_all(dir);
+        check(std::filesystem::path(positions_file()).filename() == "positions.txt");
+    }
+    {  // training.json as train.py writes it
+        TrainingStatus t;
+        check(parse_training_status(
+                  "{\"state\": \"training\", \"steps\": 100000, \"out\": \"D:\\\\Tr\xc3\xa4ning\\\\vsr.pt\", \"step\": 42000, "
+                  "\"loss\": 0.0312, \"s_per_step\": 0.13, \"eta_s\": 7540.0, \"val_db\": 1.84, \"best_db\": 1.91, "
+                  "\"suggest\": \"plateau: try --fft-loss 0.1\", \"updated\": 1795300000, \"extra\": [1, 2]}",
+                  t) &&
+              t.state == "training" && t.step == 42000 && t.steps == 100000 && t.loss == 0.0312 && t.has_val &&
+              t.best_db == 1.91 && t.out == "D:\\Tr\xc3\xa4ning\\vsr.pt" && t.suggest.find("fft") != std::string::npos);
+        TrainingStatus n;
+        check(parse_training_status("{\"state\": \"finished\", \"step\": 5, \"steps\": 5, \"val_db\": null}", n) &&
+              !n.has_val);
+        check(!parse_training_status("", n) && !parse_training_status("{\"state\": \"trai", n) &&
+              !parse_training_status("junk", n) && !parse_training_status("{\"step\": 5}", n));  // no state
+        check(!training_stale(t, 1795300000 + 100) && training_stale(t, 1795300000 + 400) &&
+              !training_stale(t, 1795300000 - 3600));  // updated "in the future" (clock set back): running
+        TrainingStatus h;  // hand-edited numbers far out of range: clamped, never cast out of range
+        check(parse_training_status("{\"state\": \"training\", \"step\": 1e300, \"steps\": -1e300, \"updated\": 1e30, "
+                                    "\"eta_s\": 1e300, \"loss\": -1e300}",
+                                    h) &&
+              h.step > 0 && h.steps <= 0 && h.updated > 0 && h.eta_s <= 1e9 && h.loss < 0);
+        TrainingStatus l;  // a huge string is cut, not shown whole
+        check(parse_training_status("{\"state\": \"training\", \"suggest\": \"" + std::string(5000, 'x') + "\"}", l) &&
+              l.suggest.size() <= 512);
+        std::string umlauts;
+        for (int i = 0; i < 1001; i++) umlauts += "\xc3\xa4";  // starts the cut at the 2nd byte of an "ä"
+        check(parse_training_status("{\"state\": \"x" + umlauts + "\"}", l) && l.state.size() % 2 == 1);
+        n.state = "finished";
+        check(!training_stale(n, 1795300000 + 400000));
+        check(std::filesystem::path(training_file()).filename() == "training.json");
+    }
     {
         Settings u;
         u.check_updates = false, u.last_update_check = 1795270000;
