@@ -50,6 +50,11 @@ Source: "..\assets\*"; Excludes: "*.svg"; DestDir: "{app}\assets"; Flags: ignore
 Source: "..\LICENSE"; DestDir: "{app}"
 Source: "..\LICENSE-EXCEPTION"; DestDir: "{app}"
 Source: "THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"
+; the training scripts (Settings > Training runs them on the Training add-on's Python, downloaded on first use)
+Source: "..\train.py"; DestDir: "{app}\training"; Flags: ignoreversion
+Source: "..\model.py"; DestDir: "{app}\training"; Flags: ignoreversion
+Source: "..\train_diag.py"; DestDir: "{app}\training"; Flags: ignoreversion
+Source: "..\export.py"; DestDir: "{app}\training"; Flags: ignoreversion
 ; tells the player it is an installed copy: updates on, the model looked for in %LOCALAPPDATA%\Open Player
 Source: "installed.txt"; DestDir: "{app}"
 
@@ -92,7 +97,7 @@ var Data: String;
 begin
   Data := ExpandConstant('{localappdata}\Open Player');
   if (CurUninstallStep = usPostUninstall) and DirExists(Data) and not UninstallSilent then
-    if MsgBox('Also delete your Pixel Flow model and the TensorRT add-on in' + #13#10 + Data + '?',
+    if MsgBox('Also delete your Pixel Flow model, your training and the TensorRT and Training add-ons in' + #13#10 + Data + '?',
               mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
       DelTree(Data, True, True, True);
 end;
