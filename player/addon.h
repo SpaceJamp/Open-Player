@@ -21,4 +21,13 @@ bool install_tensorrt_addon(const std::function<void(uint64_t, uint64_t)>& progr
 // Removes the add-on folder; in_use (its DLLs are loaded): marks it for removal at the next start instead.
 void remove_tensorrt_addon(bool in_use);
 void finish_pending_addon_removal();  // at start, before TensorRT loads
-int addon_selftest();                 // part of --uitest; 0 on pass
+int addon_selftest();
+#include <filesystem>
+#include <utility>
+#include <vector>
+// Windows' own tar.exe unpacking the entries matching patterns (all if empty) of a zip into a folder; it refuses
+// ".." and absolute entry names. false: tar.exe couldn't run.
+bool tar_extract(const std::filesystem::path& zip, const std::filesystem::path& into,
+                 const std::vector<std::wstring>& patterns);
+// test helper: a stored (uncompressed) zip with any entry names, including hostile ones
+void write_zip(const std::filesystem::path& to, const std::vector<std::pair<std::string, std::string>>& entries);                 // part of --uitest; 0 on pass
