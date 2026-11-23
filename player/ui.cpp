@@ -17,6 +17,7 @@
 #include "trt_loader.h"
 #include "addon.h"
 #include "training_addon.h"
+#include "training_run.h"
 #include "imgui.h"
 #include "imgui_internal.h"  // the self-test finds the volume panel's window
 #include "theme.h"
@@ -1114,6 +1115,7 @@ int ui_selftest() {
     fails += trt_loader_selftest();
     fails += addon_selftest();
     fails += training_addon_selftest();
+    fails += training_run_selftest();
     if (!fails) printf("ui checks passed\n");
     return fails ? 1 : 0;
 }

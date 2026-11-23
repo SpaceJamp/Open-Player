@@ -20,6 +20,7 @@ struct Settings {
     long long last_update_check = 0;  // unix time
     bool remember_position = true;    // resume each video where you left off
     int settings_tab = 0;             // the settings card's tab: 0 General, 1 Training, 2 About
+    std::string train_videos;         // the Training tab's videos folder
 };
 
 // One "key=value" per line; unknown keys, bad values, blank lines and \r are ignored (defaults kept).
@@ -63,8 +64,8 @@ std::string positions_file();  // positions.txt next to settings.txt
 
 // train.py's progress, from training.json next to settings.txt (the Training tab)
 struct TrainingStatus {
-    std::string state, suggest, out;  // state: "training", "finished" or "stopped"
-    long long step = 0, steps = 0, updated = 0;
+    std::string state, suggest, out, reason;  // state: "training", "finished", "stopped" or "failed" (reason)
+    long long step = 0, steps = 0, updated = 0, batch = 0;
     double loss = -1, val_db = 0, best_db = 0, s_per_step = 0, eta_s = 0;
     bool has_val = false;
 };
