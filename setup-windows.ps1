@@ -46,7 +46,8 @@ function Step($name, $ok, $fix, $hint) {
 }
 
 function Winget($id, [string[]]$more = @()) {
-    winget install --id $id --exact --silent --accept-package-agreements --accept-source-agreements @more
+    # .exe: PowerShell names ignore case, so plain "winget" would call this function again
+    winget.exe install --id $id --exact --silent --accept-package-agreements --accept-source-agreements @more
     # 0: installed; -1978335189: already installed / no newer version. Anything else shows up in the re-check.
 }
 
@@ -82,7 +83,7 @@ if (-not (Have nvidia-smi)) {
     Write-Host "  MISSING  NVIDIA driver - install it from https://www.nvidia.com/drivers first" -ForegroundColor Yellow
     $missing += "NVIDIA driver"
 }
-if (-not $Check -and -not (Have winget)) {
+if (-not $Check -and -not (Have winget.exe)) {
     throw "winget not found: install 'App Installer' from the Microsoft Store, then run this again"
 }
 
