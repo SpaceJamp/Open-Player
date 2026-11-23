@@ -1264,6 +1264,18 @@ int ui_selftest() {
     // fonts and theme: missing files fall back, bundled files load with every icon present
     ImGui::CreateContext();
     check(!load_theme("/definitely/missing") && !theme_loaded());  // fallback: default font stays usable
+    {  // the assets folder: next to the program (installed), or above it (build\, build\Release\ in the repo)
+        namespace fs = std::filesystem;
+        const fs::path t = fs::temp_directory_path() / "op-assets-test";
+        std::error_code ec;
+        fs::remove_all(t, ec);
+        fs::create_directories(t / "app" / "assets"), fs::create_directories(t / "repo" / "assets");
+        fs::create_directories(t / "repo" / "build" / "Release");
+        check(fs::path(assets_dir_from(t / "app")) == (t / "app" / "assets").lexically_normal());
+        check(fs::path(assets_dir_from(t / "repo" / "build")) == (t / "repo" / "assets").lexically_normal());
+        check(fs::path(assets_dir_from(t / "repo" / "build" / "Release")) == (t / "repo" / "assets").lexically_normal());
+        fs::remove_all(t, ec);
+    }
     ImGui::DestroyContext();
     ImGui::CreateContext();
     if (std::filesystem::exists(assets_dir() + "/fonts/Inter-Medium.ttf")) {
