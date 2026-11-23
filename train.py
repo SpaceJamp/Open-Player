@@ -345,6 +345,8 @@ def main():
     ap.add_argument("--resume", help="checkpoint to continue from")
     ap.add_argument("--more", type=int, metavar="N", help="with --resume: train N more steps after the checkpoint's "
                     "own, the learning rate starting over for them (a finished model on new videos)")
+    ap.add_argument("--more-if-done", type=int, metavar="N", help="with --resume: --more N if the checkpoint has "
+                    "finished its steps, else just resume")
     ap.add_argument("--scale", type=int, default=2)
     ap.add_argument("--size", choices=SIZES, help="standard (up to 1080p30 -> 4K), fast (1080p60 -> 4K) or lean "
                     "(standard's speed, more capacity, no attention gates); default standard. A resumed model keeps its size.")
@@ -368,6 +370,8 @@ def main():
     RUN["out"] = str(Path(a.out).resolve())
     if a.more is not None and (not a.resume or a.more < 1):
         raise SystemExit("--more needs --resume and a number of steps above 0")
+    if a.more_if_done is not None and (not a.resume or a.more_if_done < 1 or a.more):
+        raise SystemExit("--more-if-done needs --resume, a number of steps above 0, and no --more")
     dev = "cuda"
     ck = torch.load(a.resume, map_location=dev) if a.resume else {}
     # a resumed run keeps its schedule: a different --steps or --lr would make the cosine curve jump
@@ -394,11 +398,15 @@ def main():
         if "opt" in ck:  # checkpoints from before this was saved restart the optimizer
             opt.load_state_dict(ck["opt"])
     base = ck.get("base", 0)
+    if a.more_if_done and start >= a.steps:
+        a.more = a.more_if_done
     if a.more:
         base, a.steps = start, start + a.more
+    if a.resume:
+        a.teacher, a.distill = a.teacher or ck.get("teacher"), a.distill if a.distill is not None else ck.get("distill")
     if a.resume and start >= a.steps:
         raise SystemExit(f"{a.resume} already has {start} steps; raise --steps or use --more N to train further")
-        a.teacher, a.distill = a.teacher or ck.get("teacher"), a.distill if a.distill is not None else ck.get("distill")
+    if a.resume:
         print(f"resuming at step {start}")
     if a.distill == 0:  # turns the teacher off, also on a resumed run
         a.teacher, a.distill = None, None
@@ -519,6 +527,10 @@ def main():
                 write_status(**status)
                 data = loader()
                 it = iter(data)
+                if pair_it:
+                    pair_it = iter(DataLoader(pairs, batch_size=a.batch, num_workers=min(a.workers, 2),
+                                              persistent_workers=a.workers > 0, pin_memory=True,
+                                              worker_init_fn=ignore_sigint))
         dg.end(step, loss, gnorm, g["lr"])
 
         if step % 100 == 0:

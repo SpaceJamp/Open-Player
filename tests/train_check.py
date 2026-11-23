@@ -220,6 +220,23 @@ if torch.cuda.is_available() and shutil.which("ffmpeg"):  # train.py trains on c
         assert r.returncode == 0, r.stdout + r.stderr
         ck = torch.load(f"{d}/s.pt")
         assert ck["step"] == 200 and ck["base"] == 100, (ck["step"], ck.get("base"))
+        # a resumed run keeps its checkpoint's teacher (s.pt was trained with one)
+        assert ck["teacher"] and ck["distill"] == 0.5, (ck.get("teacher"), ck.get("distill"))
+        # --more-if-done N (the player's Start): an unfinished checkpoint just resumes, a finished one gets N more
+        p = subprocess.Popen(quick + ["--out", f"{d}/u.pt", "--steps", "200"], stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True)
+        for line in p.stdout:
+            if line.startswith("step 100 "):
+                stop.write_text("")
+        p.wait(timeout=120)
+        assert torch.load(f"{d}/u.pt")["step"] < 200
+        again = quick + ["--out", f"{d}/u.pt", "--resume", f"{d}/u.pt", "--more-if-done", "50"]
+        r = subprocess.run(again, capture_output=True, text=True)
+        ck = torch.load(f"{d}/u.pt")
+        assert r.returncode == 0 and ck["step"] == 200 and ck.get("base", 0) == 0, (r.stderr, ck["step"])
+        r = subprocess.run(again, capture_output=True, text=True)
+        ck = torch.load(f"{d}/u.pt")
+        assert r.returncode == 0 and ck["step"] == 250 and ck["base"] == 200, (r.stderr, ck["step"])
         # out of GPU memory at batch 8 (PyTorch's own cap, set low): the batch halves and training goes on
         capped = ("import sys, runpy, torch; torch.cuda.set_per_process_memory_fraction(0.15 * 2**30 / "
                   "torch.cuda.get_device_properties(0).total_memory); sys.argv = sys.argv[1:]; "
