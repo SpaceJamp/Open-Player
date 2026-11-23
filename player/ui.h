@@ -71,6 +71,14 @@ struct UiState {
     TrainingStatus training;
     bool training_known = false;
     long long now_unix = 0;
+    // training from the player (the videos folder is settings.train_videos)
+    int train_video_count = -1;           // videos found in that folder; -1: not counted yet
+    int training_addon = 0;               // training_addon_installed(): 0 none, 1 current, 2 outdated
+    float training_addon_progress = -1;   // the add-on's download (< 0: none)
+    std::string training_error;           // the last thing that went wrong here (download, start, export)
+    std::string training_log;             // train.log, named when a run failed
+    bool training_own = false;            // training.json is the player's own run (it may control it)
+    bool has_checkpoint = false, has_best = false, exporting = false, gpu_ok = true;
 };
 std::string vsr_badge_text(bool available, bool on, bool rtx, int factor);  // "PXF 2x", "RTX 2x", "VSR off"; "" without VSR
 std::string about_text(const std::string& build, const std::string& log, const std::vector<std::string>& versions);  // About
@@ -81,11 +89,21 @@ struct UiAction {
         ToggleSettings, SetUpscaler, SetDecoder, SetScreen, SetStartFullscreen, SetRememberVolume, SetHideAfter,
         SetInfoAtStart, DownloadTensorRT, CancelTensorRT, RemoveTensorRT, ChooseTensorRTFolder, SetCheckUpdates,
         SetSettingsTab, SetRememberPosition,
+        // the Training tab
+        ChooseTrainVideos, StartTraining, StopTraining, UseModel, StartOver, CancelTrainingAddon, RemoveTrainingAddon,
         InstallUpdate
     } kind;
     double value = 0;  // Seek: seconds; SetVolume: 0..2
     std::string path;  // OpenPath
 };
+// The Training tab's buttons and its extra lines of text, for the state in s (drawn by the tab, checked by tests)
+struct TrainButton {
+    std::string label;
+    UiAction::Kind kind;
+    bool enabled = true;
+};
+std::vector<TrainButton> training_buttons(const UiState& s);
+std::vector<std::string> training_notes(const UiState& s);
 // The control bar shows while the mouse moved in the last hide_after s, while paused, or while the mouse is over it.
 bool controls_visible(double now, double last_mouse, bool paused, bool hovered, double hide_after = 2);
 // Draws the control capsule, the notice card, the info card (s.show_info), the settings card (s.settings_open) and

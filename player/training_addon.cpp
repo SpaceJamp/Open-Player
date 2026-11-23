@@ -217,7 +217,7 @@ int training_addon_selftest() {
         py += k == "python", ff += k == "ffmpeg";
     }
     check(py == 1 && ff == 1 && TRAINING_PINS.size() > 10);
-    check(training_addon_size() > (2000ull << 20));  // the add-on is about 2.1 GB
+    check(training_addon_size() > (2000ull << 20));  // the add-on is about 2.3 GB
 #ifdef _WIN32
     fs::path base = fs::temp_directory_path() / fs::u8path("op-zo\xc3\xab-training-test");
     std::error_code ec;
