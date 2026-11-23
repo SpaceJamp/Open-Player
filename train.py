@@ -282,9 +282,10 @@ def validate(model, val_lr, val_hr, s):
     return 10 * math.log10(se_bil / se_net)
 
 
-def lr_at(step, steps, peak):
-    """Cosine from peak down to peak/20 over the whole run; from the step alone, so resuming continues exactly."""
-    return peak / 20 + (peak - peak / 20) * (1 + math.cos(math.pi * step / steps)) / 2
+def lr_at(step, steps, peak, base=0):
+    """Cosine from peak down to peak/20 over steps base..steps; from the step alone, so resuming continues exactly.
+    base > 0: a --more run, whose schedule starts over at the step it began."""
+    return peak / 20 + (peak - peak / 20) * (1 + math.cos(math.pi * (step - base) / (steps - base))) / 2
 
 
 def status_file():
@@ -319,6 +320,9 @@ def write_status(**fields):
         pass
 
 
+RUN = {}  # this run's out path, so a "failed" training.json still says which run failed
+
+
 def ignore_sigint(_):
     """DataLoader workers: let only the main process see Ctrl+C. Otherwise PyTorch's workers quit on it and
     the main process crashes ("worker exited unexpectedly") before it can save."""
@@ -331,6 +335,8 @@ def main():
                     help="folder of high-quality videos, searched recursively (default: videos/ next to this script)")
     ap.add_argument("--out", default="vsr.pt")
     ap.add_argument("--resume", help="checkpoint to continue from")
+    ap.add_argument("--more", type=int, metavar="N", help="with --resume: train N more steps after the checkpoint's "
+                    "own, the learning rate starting over for them (a finished model on new videos)")
     ap.add_argument("--scale", type=int, default=2)
     ap.add_argument("--size", choices=SIZES, help="standard (up to 1080p30 -> 4K), fast (1080p60 -> 4K) or lean "
                     "(standard's speed, more capacity, no attention gates); default standard. A resumed model keeps its size.")
@@ -351,6 +357,9 @@ def main():
     if a.crop % (a.scale * 8):  # the low-res crop must split into the 8x8 blocks of the compression step
         raise SystemExit(f"--crop must be a multiple of {a.scale * 8}")
 
+    RUN["out"] = str(Path(a.out).resolve())
+    if a.more is not None and (not a.resume or a.more < 1):
+        raise SystemExit("--more needs --resume and a number of steps above 0")
     dev = "cuda"
     ck = torch.load(a.resume, map_location=dev) if a.resume else {}
     # a resumed run keeps its schedule: a different --steps or --lr would make the cosine curve jump
@@ -372,11 +381,15 @@ def main():
         start = ck.get("step", 0)
         a.fft_loss = a.fft_loss or ck.get("fft_loss", 0)
         a.pairs = a.pairs or ck.get("pairs")
-        a.pairs_weight = a.pairs_weight if a.pairs_weight is not None else ck.get("pairs_weight")
+        # without pairs a stored weight means nothing (older checkpoints saved the 0.5 default even then)
+        a.pairs_weight = a.pairs_weight if a.pairs_weight is not None else ck.get("pairs_weight") if a.pairs else None
         if "opt" in ck:  # checkpoints from before this was saved restart the optimizer
             opt.load_state_dict(ck["opt"])
-        if start >= a.steps:
-            raise SystemExit(f"{a.resume} already has {start} steps; raise --steps to train further")
+    base = ck.get("base", 0)
+    if a.more:
+        base, a.steps = start, start + a.more
+    if a.resume and start >= a.steps:
+        raise SystemExit(f"{a.resume} already has {start} steps; raise --steps or use --more N to train further")
         a.teacher, a.distill = a.teacher or ck.get("teacher"), a.distill if a.distill is not None else ck.get("distill")
         print(f"resuming at step {start}")
     if a.distill == 0:  # turns the teacher off, also on a resumed run
@@ -391,7 +404,7 @@ def main():
         a.pairs = None
     if a.pairs_weight is not None and (a.pairs_weight < 0 or (a.pairs_weight and not a.pairs)):
         raise SystemExit("--pairs-weight needs --pairs and a weight of 0 or more")
-    if a.pairs_weight is None:
+    if a.pairs_weight is None and a.pairs:
         a.pairs_weight = 0.5
     if a.distill is not None and not (a.teacher and 0 <= a.distill <= 1):
         raise SystemExit("--distill needs --teacher and a weight between 0 and 1")
@@ -412,6 +425,8 @@ def main():
     dg = Diag(out.with_suffix(".diag.jsonl"), fresh=new_set)  # train_diag.py: <out>.diag.jsonl and `suggest:` lines
 
     status = {"state": "training", "steps": a.steps, "out": str(out.resolve())}  # the player's Training tab
+    stop_file = status_file().with_name("training.stop")
+    stop_file.unlink(missing_ok=True)  # one left from an earlier run must not stop this one
 
     def check(step):
         nonlocal best
@@ -442,7 +457,7 @@ def main():
                                   persistent_workers=a.workers > 0, pin_memory=True, worker_init_fn=ignore_sigint))
         print(f"{len(pairs.files)} RTX VSR pair files, weight {a.pairs_weight}")
 
-    stop = []  # Ctrl+C / the panel's Stop: finish this step, save, exit
+    stop = []  # Ctrl+C / the panel's Stop / the player's training.stop file: finish this step, save, exit
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
     t0, it = time.time(), iter(data)
     for step in range(start + 1, a.steps + 1):
@@ -471,7 +486,7 @@ def main():
         loss.backward()
         gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         for g in opt.param_groups:
-            g["lr"] = lr_at(step, a.steps, a.lr)
+            g["lr"] = lr_at(step, a.steps, a.lr, base)
         if torch.isfinite(gnorm):  # a NaN/inf step would poison the weights and Adam's state for good
             opt.step()
         dg.end(step, loss, gnorm, g["lr"])
@@ -486,15 +501,25 @@ def main():
             t0 = time.time()
         if step % 1000 == 0:
             check(step)
+        if not stop and stop_file.exists():
+            stop.append(1)
         if step % 2000 == 0 or step == a.steps or stop:
             save(model, a.out, step=step, opt=opt.state_dict(), fft_loss=a.fft_loss, teacher=a.teacher, distill=a.distill,
-                 steps=a.steps, lr=a.lr, pairs=a.pairs, pairs_weight=a.pairs_weight)
+                 steps=a.steps, lr=a.lr, pairs=a.pairs, pairs_weight=a.pairs_weight, base=base)
         if stop:
             break
     status.update(state="stopped" if stop and step < a.steps else "finished", step=step, eta_s=0)
     write_status(**status)
+    stop_file.unlink(missing_ok=True)
     print(f"saved {a.out} at step {step}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        raise
+    except BaseException as e:  # the player's Training tab shows why, instead of "training" until it goes stale
+        if not (isinstance(e, SystemExit) and e.code in (None, 0)):
+            write_status(**RUN, state="failed", reason=str(e.code if isinstance(e, SystemExit) else e)[:300])
+        raise
