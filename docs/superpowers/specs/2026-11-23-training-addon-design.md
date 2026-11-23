@@ -1,6 +1,6 @@
 # Training add-on: train Pixel Flow from the player
 
-Date: 2026-11-23. Status: draft, waiting for the user's approval. Reviewed by a builder check; its open questions
+Date: 2026-11-23. Status: approved by the user (2026-11-23). Reviewed by a builder check; its open questions
 are answered below (two by the user, the rest marked as my calls).
 
 ## Intent
