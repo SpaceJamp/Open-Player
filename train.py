@@ -483,6 +483,7 @@ def main():
     stop = []  # Ctrl+C / the panel's Stop / the player's training.stop file: finish this step, save, exit
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
     t0, it = time.time(), iter(data)
+    t0_step, status_at, sps = start, 0.0, 0.0  # the speed since t0; when the status was last written
     for step in range(start + 1, a.steps + 1):
         while True:  # out of GPU memory: halve the batch and redo this step
             try:
@@ -538,9 +539,14 @@ def main():
             fl = f"  fft {fft.item() / T:.4f}" if a.fft_loss else ""
             sps = (time.time() - t0) / 100
             print(f"step {step}  loss {loss.item():.4f}{tl}{fl}  {sps:.2f}s/step", flush=True)
+            t0, t0_step = time.time(), step
+        # the player's Training tab: fresh numbers every 2 s, not only every 100 steps (a slow GPU takes minutes)
+        if time.time() - status_at >= 2 or step % 100 == 0:
+            if step > t0_step:
+                sps = (time.time() - t0) / (step - t0_step)
             status.update(step=step, loss=loss.item(), s_per_step=sps, eta_s=(a.steps - step) * sps)
             write_status(**status)
-            t0 = time.time()
+            status_at = time.time()
         if step % 1000 == 0:
             check(step)
         if not stop and stop_file.exists():
