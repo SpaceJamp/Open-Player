@@ -116,7 +116,8 @@ if (-not $NoTraining) {
         "/quiet InstallAllUsers=0 InstallLauncherAllUsers=0 Include_launcher=1 PrependPath=1") }
     Step "PyTorch with CUDA, numpy, onnx" { Torch-Ok } {
         # torch alone from NVIDIA's CUDA index: with PyPI as an extra index pip takes PyPI's newer, CPU-only build
-        py -m pip install torch --index-url https://download.pytorch.org/whl/cu130
+        # cu132: its torch 2.15 is the first without an access violation at exit on Python 3.15 (2.14 crashes)
+        py -m pip install torch --index-url https://download.pytorch.org/whl/cu132
         py -m pip install numpy onnx onnxscript
     } ("needs a driver new enough for CUDA 13; a CPU-only torch already installed stays: " +
        "run 'py -m pip uninstall torch' and then this again")
