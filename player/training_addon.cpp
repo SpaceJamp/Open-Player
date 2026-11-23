@@ -80,8 +80,9 @@ std::string training_ffmpeg_dir() { return (fs::u8path(training_addon_dir()) / "
 std::string training_scripts_dir() {
     fs::path exe = fs::u8path(program_dir());
     std::error_code ec;
-    if (!fs::exists(exe / "training" / "train.py", ec) && fs::exists(exe.parent_path() / "train.py", ec))
-        return exe.parent_path().u8string();  // a developer build: build-win\ in the repo
+    // a developer build only: build-win\ in the repo. An installed copy's parent is a folder other programs share.
+    if (!installed_copy() && !fs::exists(exe / "training" / "train.py", ec) && fs::exists(exe.parent_path() / "train.py", ec))
+        return exe.parent_path().u8string();
     return (exe / "training").u8string();
 }
 
@@ -112,7 +113,8 @@ bool unpack_training_file(const TrainingPin& pin, const std::string& file, const
     std::string kind = pin.kind;
     auto tar = [&](const fs::path& dest, const std::vector<std::wstring>& patterns) {
         fs::create_directories(dest, ec);
-        return !ec && tar_extract(zip, dest, patterns) ? true : (error = "couldn't unpack " + file, false);
+        // any error (a refused entry, a full disk) fails the file: a half-unpacked package would only fail later
+        return !ec && tar_extract(zip, dest, patterns) == 0 ? true : (error = "couldn't unpack " + file, false);
     };
     if (kind == "python") {
         if (!tar(in / "python", {})) return false;
@@ -172,10 +174,20 @@ bool install_training_addon(const std::function<void(uint64_t, uint64_t)>& progr
     if (!write_python_pth((stage / "python").u8string(), training_scripts_dir())) return fail("can't set up Python");
     std::ofstream(stage / "version.txt") << TRAINING_ADDON_VERSION << "\n";
     fs::remove_all(dl, ec);
-    fs::remove_all(dir, ec);  // the old add-on: fails while its python.exe runs
-    if (ec) return fail("stop training first: the current Training add-on is in use");
+    // the old add-on aside in one step (refused whole while its python.exe runs, never half deleted), the new one in
+    fs::path old = dir;
+    old += ".old";
+    fs::remove_all(old, ec);
+    const bool had = fs::exists(dir, ec);
+    if (had) fs::rename(dir, old, ec);
+    if (had && ec) return fail("stop training first: the current Training add-on is in use");
     fs::rename(stage, dir, ec);
-    return ec ? fail("can't move the add-on into place") : true;
+    if (ec) {
+        if (had) fs::rename(old, dir, ec);
+        return fail("can't move the add-on into place");
+    }
+    fs::remove_all(old, ec);
+    return true;
 #else
     (void)progress, (void)cancel;
     return error = "the Training add-on is Windows-only", false;
@@ -229,11 +241,14 @@ int training_addon_selftest() {
         ffmpeg{"https://x/f.zip", "", 1, "ffmpeg"};
 
     // a wheel unpacks with its folders into python\Lib\site-packages; ".." entries land nowhere
-    write_zip(base / "w.whl", {{"pkg/__init__.py", "A"}, {"pkg/sub/m.py", "B"}, {"pkg/../../../evil.py", "E"}});
+    write_zip(base / "w.whl", {{"pkg/__init__.py", "A"}, {"pkg/sub/m.py", "B"}});
     check(unpack_training_file(wheel, (base / "w.whl").u8string(), into.u8string(), err));
     fs::path sp = into / "python" / "Lib" / "site-packages";
     check(slurp(sp / "pkg" / "__init__.py") == "A" && slurp(sp / "pkg" / "sub" / "m.py") == "B");
-    check(!fs::exists(base / "evil.py") && !fs::exists(into / "evil.py") && !fs::exists(sp / "evil.py"));
+    // a wheel with a ".." entry: tar.exe refuses that entry and says so, and the whole file is refused
+    write_zip(base / "evil.whl", {{"pkg/ok.py", "A"}, {"pkg/../../../evil.py", "E"}});
+    check(!unpack_training_file(wheel, (base / "evil.whl").u8string(), (base / "e2").u8string(), err));
+    check(!fs::exists(base / "evil.py") && !fs::exists(base / "e2" / "evil.py"));
 
     // the embeddable zip unpacks into python\, and its ._pth is pointed at the packages and the scripts
     write_zip(base / "p.zip", {{"python.exe", "X"}, {"python313._pth", "python313.zip\n.\n#import site\n"}});

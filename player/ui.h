@@ -79,6 +79,8 @@ struct UiState {
     std::string training_log;             // train.log, named when a run failed
     bool training_own = false;            // training.json is the player's own run (it may control it)
     bool has_checkpoint = false, has_best = false, exporting = false, gpu_ok = true;
+    bool training_alive = false;    // the player's run is going (its process, from run.txt)
+    bool training_current = false;  // training.json is that run's, not one before it
 };
 std::string vsr_badge_text(bool available, bool on, bool rtx, int factor);  // "PXF 2x", "RTX 2x", "VSR off"; "" without VSR
 std::string about_text(const std::string& build, const std::string& log, const std::vector<std::string>& versions);  // About

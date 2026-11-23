@@ -624,7 +624,8 @@ int main(int argc, char** argv) {
         std::atomic<bool> tr_running{false}, tr_done{false}, tr_cancel{false}, ex_running{false}, ex_done{false};
         std::atomic<uint64_t> tr_got{0};
         std::atomic<int> video_count{-1};
-        bool tr_ok = false, ex_ok = false, seen_own_training = false;
+        std::atomic<bool> count_cancel{false};
+        bool tr_ok = false, ex_ok = false, tr_alive = false, tr_current = false;
         std::string tr_error, ex_error, training_error;
         StartMode tr_mode = StartMode::New;
         int tr_addon = training_addon_installed();
@@ -634,26 +635,26 @@ int main(int argc, char** argv) {
             return cudaGetDeviceCount(&n) == cudaSuccess && n > 0;
         }();
         auto count_videos = [&](const std::string& dir) {
-            if (count_thread.joinable()) count_thread.join();
-            video_count = -1;
-            count_thread = std::thread([&video_count, dir] {
+            if (count_thread.joinable()) count_cancel = true, count_thread.join();
+            video_count = -1, count_cancel = false;
+            count_thread = std::thread([&video_count, &count_cancel, dir] {
                 static const char* exts[] = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts"};  // train.py's
                 int n = 0;
                 std::error_code ec;
                 for (auto it = std::filesystem::recursive_directory_iterator(
                          std::filesystem::u8path(dir), std::filesystem::directory_options::skip_permission_denied, ec);
-                     !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+                     !ec && !count_cancel && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
                     std::string x = it->path().extension().string();
                     for (auto& c : x) c = (char)tolower((unsigned char)c);
                     for (const char* e : exts) n += x == e;
                 }
-                video_count = n;
+                if (!count_cancel) video_count = n;
             });
         };
         if (!cfg.train_videos.empty()) count_videos(cfg.train_videos);
         auto start_own_training = [&](StartMode m) {
             std::string err;
-            if (start_training(cfg.train_videos, m, err)) training_error.clear(), seen_own_training = true;
+            if (start_training(cfg.train_videos, m, err)) training_error.clear(), training_read_at = -10;
             else training_error = "Couldn't start training: " + err;
         };
         auto show_train_folder_dialog = [&] {  // the videos to train on; arrives as SDL_EVENT_USER with code 2
@@ -669,7 +670,7 @@ int main(int argc, char** argv) {
         auto stop_training_threads = [&] {
             if (tr_thread.joinable()) tr_cancel = true, tr_thread.join();
             if (ex_thread.joinable()) ex_thread.join();  // an export takes seconds; its model would be half written
-            if (count_thread.joinable()) count_thread.join();
+            if (count_thread.joinable()) count_cancel = true, count_thread.join();
         };
         SDL_SetWindowTitle(win, std::filesystem::path(path).filename().string().c_str());
         if (start_at >= 0) seek(start_position(start_at, dur));  // reopened after a settings change
@@ -938,18 +939,20 @@ int main(int argc, char** argv) {
                     tf.read(text.data(), (std::streamsize)text.size());
                     text.resize((size_t)tf.gcount());
                     training_known = parse_training_status(text, training);
+                    // the player's own run, from run.txt (any player that started it, before a restart too)
                     const bool own = training_known && own_run(training);
-                    int code = 0;
-                    if (training_child_exited(code) &&
-                        !(own && (training.state == "finished" || training.state == "stopped" || training.state == "failed")))
-                        training_error = "Training stopped unexpectedly (exit code " + std::to_string(code) +
-                                         "); see " + train_log();
-                    if (own && training.state == "training") seen_own_training = true;
-                    // a run this player saw training has finished: export it, so Pixel Flow just works
-                    if (own && training.state == "finished" && seen_own_training && !ex_running) {
-                        seen_own_training = false;
-                        ex_running = true, ex_done = false;
-                        ex_thread = std::thread([&] { ex_ok = export_and_install(ex_error), ex_done = true; });
+                    RunInfo run;
+                    const bool have_run = read_run(run);
+                    tr_alive = have_run && process_alive(run.pid, training_python());
+                    tr_current = have_run && own && status_current(training, run.started);
+                    if (have_run && !tr_alive) {  // it has ended: how?
+                        if (tr_current && training.state == "finished" && !ex_running) {  // export it: Pixel Flow just works
+                            ex_running = true, ex_done = false;
+                            ex_thread = std::thread([&] { ex_ok = export_and_install(ex_error), ex_done = true; });
+                        } else if (!(tr_current && (training.state == "stopped" || training.state == "failed" ||
+                                                     training.state == "finished")))
+                            training_error = "Training stopped unexpectedly; see " + train_log();
+                        clear_run();
                     }
                     if (settings_open && cfg.settings_tab == 1)
                         ui_redraw = std::max(ui_redraw, 1);  // paused, nothing else redraws: the tab must still update
@@ -959,6 +962,7 @@ int main(int argc, char** argv) {
                 us.training_addon_progress = tr_running ? (float)((double)tr_got / training_addon_size()) : -1;
                 us.training_own = training_known && own_run(training), us.training_log = train_log();
                 us.has_checkpoint = tr_ckpt, us.has_best = tr_best, us.exporting = ex_running, us.gpu_ok = gpu_ok;
+                us.training_alive = tr_alive, us.training_current = tr_current;
                 if (upd_checking) us.update_status = "Checking for updates...";
                 else if (upd_running) {
                     us.update_status = "Downloading build " + std::to_string(upd->info.build) + "...";
@@ -1043,11 +1047,8 @@ int main(int argc, char** argv) {
                         break;
                     case UiAction::ChooseTrainVideos: show_train_folder_dialog(); break;
                     case UiAction::StartTraining: {
-                        if (tr_running || cfg.train_videos.empty()) break;
-                        const bool own = training_known && own_run(training);
-                        tr_mode = own && training.state == "finished" ? StartMode::More
-                                  : has_checkpoint()                  ? StartMode::Resume
-                                                                      : StartMode::New;
+                        if (tr_running || tr_alive || cfg.train_videos.empty()) break;
+                        tr_mode = has_checkpoint() ? StartMode::Resume : StartMode::New;
                         if (training_addon_installed() == 1) {
                             start_own_training(tr_mode);
                             break;
@@ -1081,8 +1082,7 @@ int main(int argc, char** argv) {
                         break;
                     }
                     case UiAction::RemoveTrainingAddon:
-                        remove_training_addon(training_known && training.state == "training" &&
-                                              !training_stale(training, (long long)time(nullptr)));
+                        remove_training_addon(training_alive() || ex_running);
                         tr_addon = training_addon_installed();
                         break;
                     case UiAction::RemoveTensorRT:

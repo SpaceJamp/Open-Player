@@ -18,22 +18,24 @@ namespace fs = std::filesystem;
 
 #ifdef _WIN32
 // Windows' own tar.exe (never one from PATH or the current folder); it refuses ".." and absolute entry names.
-bool tar_extract(const fs::path& zip, const fs::path& into, const std::vector<std::wstring>& patterns) {
+int tar_extract(const fs::path& zip, const fs::path& into, const std::vector<std::wstring>& patterns) {
     wchar_t sys[MAX_PATH];
-    if (!GetSystemDirectoryW(sys, MAX_PATH)) return false;
+    if (!GetSystemDirectoryW(sys, MAX_PATH)) return -1;
     std::wstring exe = std::wstring(sys) + L"\\tar.exe";
     std::wstring cmd = L"\"" + exe + L"\" -xf \"" + zip.wstring() + L"\" -C \"" + into.wstring() + L"\"";
     for (auto& p : patterns) cmd += L" \"" + p + L"\"";
     STARTUPINFOW si{sizeof si};
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
-        return false;
-    WaitForSingleObject(pi.hProcess, INFINITE);  // its exit code is ignored: refused entries make it non-zero
+        return -1;
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hThread), CloseHandle(pi.hProcess);
-    return true;
+    return (int)code;
 }
 #else
-bool tar_extract(const fs::path&, const fs::path&, const std::vector<std::wstring>&) { return false; }
+int tar_extract(const fs::path&, const fs::path&, const std::vector<std::wstring>&) { return -1; }
 #endif
 
 bool extract_tensorrt(const std::string& wheel, const std::string& dir, std::string& error) {
@@ -48,7 +50,8 @@ bool extract_tensorrt(const std::string& wheel, const std::string& dir, std::str
         return error = why, false;
     };
     if (!fs::create_directories(raw, ec) || ec) return fail("can't create " + stage.u8string());
-    if (!tar_extract(fs::u8path(wheel), raw, {L"tensorrt_libs/*.dll", L"*.dist-info/LICENSE.txt"}))
+    // its exit code is ignored here: entries refused by name make it non-zero, and the DLL check below decides
+    if (tar_extract(fs::u8path(wheel), raw, {L"tensorrt_libs/*.dll", L"*.dist-info/LICENSE.txt"}) < 0)
         return fail("couldn't run Windows' tar.exe");
     // keep only what we asked for, flattened; anything else that appeared is dropped with raw/
     int dlls = 0;

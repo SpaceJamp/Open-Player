@@ -654,20 +654,20 @@ std::vector<TrainButton> training_buttons(const UiState& s) {
     using K = UiAction;
     if (s.training_addon_progress >= 0) return {{"Cancel", K::CancelTrainingAddon}};
     if (!s.gpu_ok) return {};
-    const bool running = training_running(s);
-    if (running && !s.training_own) return {};  // a command-line run: shown, never stopped or exported from here
     std::vector<TrainButton> b;
-    if (running) {
+    if (s.training_alive) {  // the player's own run (run.txt): Stop, also while it's still preparing
         b.push_back({"Stop", K::StopTraining});
         if (s.has_best) b.push_back({"Use this model", K::UseModel, !s.exporting});
         return b;
     }
-    const bool finished = s.training_known && s.training_own && s.training.state == "finished";
+    if (training_running(s) && !s.training_own) return {};  // a command-line run: shown, never controlled here
+    const bool finished = s.training_known && s.training_own && s.training.state == "finished" && s.has_checkpoint;
     b.push_back({"Choose videos folder...", K::ChooseTrainVideos});
     b.push_back({finished ? "Train more" : "Start", K::StartTraining, !s.settings.train_videos.empty()});
     if (s.has_best) b.push_back({"Use this model", K::UseModel, !s.exporting});
-    if (s.has_checkpoint) b.push_back({"Start over", K::StartOver});
-    if (s.training_addon) b.push_back({"Remove add-on", K::RemoveTrainingAddon});
+    // nothing that deletes what an export is reading
+    if (s.has_checkpoint) b.push_back({"Start over", K::StartOver, !s.exporting});
+    if (s.training_addon) b.push_back({"Remove add-on", K::RemoveTrainingAddon, !s.exporting});
     return b;
 }
 
@@ -685,8 +685,11 @@ std::vector<std::string> training_notes(const UiState& s) {
     else if (s.training_addon == 0)
         n.push_back(std::string("Start downloads the Training add-on first: ") + gb + " (Python, PyTorch, FFmpeg).");
     else if (s.training_addon == 2) n.push_back(std::string("The Training add-on needs an update (") + gb + "); Start downloads it.");
-    if (training_running(s) && !s.training_own) n.push_back("This run was started from the command line; stop it there.");
-    if (s.training_known && s.training.state == "failed")
+    if (s.training_alive && !s.training_current)
+        n.push_back("Preparing: reading your videos and setting up (this can take a few minutes)...");
+    if (!s.training_alive && training_running(s) && !s.training_own)
+        n.push_back("This run was started from the command line; stop it there.");
+    if (s.training_known && s.training.state == "failed" && (s.training_current || !s.training_own))
         n.push_back("Failed: " + (s.training.reason.empty() ? std::string("see the log") : s.training.reason) +
                     (s.training_own && !s.training_log.empty() ? "   Log: " + s.training_log : ""));
     if (s.exporting) n.push_back("Exporting your Pixel Flow...");
@@ -1183,22 +1186,30 @@ int ui_selftest() {
             run.has_checkpoint = true, run.now_unix = 1795300100;
             run.training.state = "training", run.training.updated = 1795300000, run.training.step = 4200;
             run.training.steps = 100000, run.training.out = "C:/x/training-work/vsr.pt";
+            run.training_alive = true, run.training_current = true;  // its process runs (run.txt)
             check(labels(run) == (V{"Stop", "Use this model"}));
             check(kind_of(run, "Stop") == UiAction::StopTraining && kind_of(run, "Use this model") == UiAction::UseModel);
             states.push_back(run);
+            UiState prep = run;  // just started: training.json is still the last run's, but Stop is there already
+            prep.training_current = false, prep.training.state = "finished";
+            check(labels(prep) == (V{"Stop", "Use this model"}) && has_note(prep, "Preparing"));
+            states.push_back(prep);
             UiState done = run;  // finished: Train more, Use this model, Start over, Remove add-on
-            done.training.state = "finished";
+            done.training.state = "finished", done.training_alive = false;
             check(labels(done) == (V{"Choose videos folder...", "Train more", "Use this model", "Start over",
                                      "Remove add-on"}));
             check(kind_of(done, "Train more") == UiAction::StartTraining && kind_of(done, "Start over") == UiAction::StartOver);
             states.push_back(done);
+            UiState over = done;  // after Start over the old "finished" stays in training.json: Start, not Train more
+            over.has_checkpoint = false, over.has_best = false;
+            check(labels(over) == (V{"Choose videos folder...", "Start", "Remove add-on"}));
             UiState cli = run;  // a run started from the command line: shown, never controlled
-            cli.training_own = false, cli.training.out = "D:/X/vsr.pt";
+            cli.training_own = false, cli.training_alive = false, cli.training.out = "D:/X/vsr.pt";
             check(labels(cli).empty() && has_note(cli, "started from the command line"));
             states.push_back(cli);
             UiState failed = run;  // failed: the reason and the log, and Start again
             failed.training.state = "failed", failed.training.reason = "not enough GPU memory";
-            failed.training_log = "C:/x/training-work/train.log", failed.has_best = false;
+            failed.training_log = "C:/x/training-work/train.log", failed.has_best = false, failed.training_alive = false;
             check(has_note(failed, "not enough GPU memory") && has_note(failed, "train.log"));
             check(labels(failed) == (V{"Choose videos folder...", "Start", "Start over", "Remove add-on"}));
             states.push_back(failed);
@@ -1213,6 +1224,12 @@ int ui_selftest() {
             exporting.exporting = true;
             const V ex = labels(exporting);
             check(has_note(exporting, "Exporting") && std::find(ex.begin(), ex.end(), "Use this model (off)") != ex.end());
+            // nothing that deletes what the export reads, while it runs
+            check(std::find(ex.begin(), ex.end(), "Start over (off)") != ex.end() &&
+                  std::find(ex.begin(), ex.end(), "Remove add-on (off)") != ex.end());
+            UiState stale = failed;  // a failure from an earlier run isn't shown as this one's
+            stale.training_current = false;
+            check(!has_note(stale, "not enough GPU memory"));
             states.push_back(old), states.push_back(exporting);
             for (UiState cs : states)
                 for (ImVec2 size : {ImVec2{1920, 1080}, ImVec2{3840, 2160}}) {

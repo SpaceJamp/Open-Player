@@ -41,7 +41,8 @@ Everything happens in **Settings > Training**:
    run is 100,000 steps; on an RTX 5080 that's about 9 hours. You can keep watching videos, and closing the player
    doesn't stop it: reopen the tab to see where it is.
 4. When it finishes, the player turns the best model so far into your Pixel Flow and loads it; pick **Pixel Flow**
-   as the upscaler in Settings > General. Want to try it earlier? **Use this model** does the same at any time.
+   as the upscaler in Settings > General. Want to try it earlier? **Use this model** does the same at any time. The
+   Pixel Flow it replaces is kept as `vsr.prev.onnx` / `vsr.prev.ref`, in case you want it back.
 
 Pixel Flow also needs **TensorRT** (NVIDIA's inference library): in Settings > General > Upscaling, click
 **Download** (1.9 GB, from NVIDIA's own server, fingerprint-checked), or **Choose folder...** if you have TensorRT 11

@@ -58,6 +58,10 @@ Source: "..\export.py"; DestDir: "{app}\training"; Flags: ignoreversion
 ; tells the player it is an installed copy: updates on, the model looked for in %LOCALAPPDATA%\Open Player
 Source: "installed.txt"; DestDir: "{app}"
 
+[UninstallDelete]
+; Python's bytecode cache, should a training script ever have written one
+Type: filesandordirs; Name: "{app}\training\__pycache__"
+
 [Icons]
 Name: "{autoprograms}\Open Player"; Filename: "{app}\open-player.exe"
 Name: "{autodesktop}\Open Player"; Filename: "{app}\open-player.exe"; Tasks: desktopicon
