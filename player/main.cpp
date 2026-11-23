@@ -712,6 +712,11 @@ int main(int argc, char** argv) {
                     std::string p = (char*)e.user.data1;
                     SDL_free(e.user.data1);
                     std::error_code ec;
+                    auto f = std::filesystem::u8path(p);
+                    // NVIDIA's zip keeps the DLLs in bin\, so picking the unzipped folder itself works too
+                    if (e.user.code == 1 && !std::filesystem::exists(f / "nvinfer_11.dll", ec) &&
+                        std::filesystem::exists(f / "bin" / "nvinfer_11.dll", ec))
+                        p = (f / "bin").u8string();
                     if (e.user.code != 1) open_video(p);
                     else if (!std::filesystem::exists(std::filesystem::u8path(p) / "nvinfer_11.dll", ec))
                         post(ICON_X, "No TensorRT 11 in that folder (nvinfer_11.dll)", -1, 3);
