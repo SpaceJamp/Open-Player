@@ -5,7 +5,10 @@
 #include "imgui.h"
 
 std::string exe_path();    // this program's own file
-std::string assets_dir();                          // <dir of /proc/self/exe>/../assets
+#include <filesystem>
+std::string assets_dir();                          // assets_dir_from(the program's folder)
+// <dir>/assets (an installed copy), else <dir>/../assets or <dir>/../../assets (a build in the repo)
+std::string assets_dir_from(const std::filesystem::path& dir);
 bool load_theme(const std::string& font_dir);      // after CreateContext, before the first frame
 bool theme_loaded();
 

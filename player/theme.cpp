@@ -23,10 +23,12 @@ std::string exe_path() {
 #endif
 }
 
-std::string assets_dir() {
-    // build/open-player -> assets/; a multi-config Windows build puts the exe one level deeper (build\Release)
-    auto dir = std::filesystem::path(exe_path()).parent_path();
-    for (const char* up : {"..", "../.."}) {
+std::string assets_dir() { return assets_dir_from(std::filesystem::path(exe_path()).parent_path()); }
+
+std::string assets_dir_from(const std::filesystem::path& dir) {
+    // the installer puts assets\ beside the program; build/open-player -> assets/, and a multi-config Windows
+    // build puts the exe one level deeper (build\Release)
+    for (const char* up : {".", "..", "../.."}) {
         std::error_code ec;
         auto a = (dir / up / "assets").lexically_normal();
         if (std::filesystem::is_directory(a, ec)) return a.string();
