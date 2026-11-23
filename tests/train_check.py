@@ -208,10 +208,15 @@ if torch.cuda.is_available() and shutil.which("ffmpeg"):  # train.py trains on c
         stop.write_text("")  # a stale one from an earlier run must not stop the next run at once
         p = subprocess.Popen(quick + ["--out", f"{d}/stop.pt", "--steps", "100000"], stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True)
+        fresh = 0
         for line in p.stdout:  # once it is training, ask it to stop
             if line.startswith("step 100 "):
+                # the status is written every 2 s, not only every 100 steps: within 3 s it is past step 100
+                time.sleep(3)
+                fresh = json.loads(status.read_text())["step"]
                 stop.write_text("")
         p.wait(timeout=120)
+        assert fresh > 100, fresh
         assert p.returncode == 0 and json.loads(status.read_text())["state"] == "stopped" and not stop.exists()
         assert 100 <= torch.load(f"{d}/stop.pt")["step"] < 100000
         # --more: another N steps on a finished model, its schedule over the new N only
