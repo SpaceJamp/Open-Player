@@ -19,3 +19,11 @@ This installation also contains:
 - Microsoft Visual C++ runtime DLLs, redistributed under the Visual Studio license terms.
 
 The optional TensorRT add-on (downloaded from NVIDIA in Settings) comes with NVIDIA's licence in its folder.
+
+The optional Training add-on (downloaded in Settings > Training, never part of this installer) is unpacked into
+%LOCALAPPDATA%\Open Player\training from each project's own server, each file checked against a fixed SHA-256:
+- Python 3.13 (embeddable), Python Software Foundation License, https://www.python.org
+- PyTorch 2.15 with CUDA, BSD-3-Clause (and NVIDIA's CUDA licence for the libraries inside), https://pytorch.org
+- numpy, onnx, onnxscript and their dependencies, under their own licences (each wheel's .dist-info folder)
+- FFmpeg 9.1 (Gyan's essentials build: ffmpeg.exe and ffprobe.exe), GPLv3, https://www.gyan.dev/ffmpeg/builds/;
+  its LICENSE is next to them in the ffmpeg folder

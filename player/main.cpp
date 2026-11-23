@@ -43,6 +43,8 @@
 #include "logfile.h"
 #include "trt_loader.h"
 #include "addon.h"
+#include "training_addon.h"
+#include "training_run.h"
 #include "update.h"
 #ifdef HAVE_RTX_VSR
 #include "rtx_vsr.h"
@@ -225,6 +227,7 @@ int main(int argc, char** argv) {
     // TensorRT, for Pixel Flow: loaded now from known folders only, so the player runs without it
     std::string trt_ver, trt_why;
     finish_pending_addon_removal();  // "Remove" while its DLLs were in use
+    finish_pending_training_removal();
     TrtFrom trt_from = load_tensorrt(saved.trt_folder, trt_ver, trt_why);
     if (selftest)
         return trt_from == TrtFrom::None ? fprintf(stderr, "%s\n", trt_line(trt_from, trt_ver, trt_why).c_str()), 1
@@ -615,6 +618,60 @@ int main(int argc, char** argv) {
         auto stop_addon = [&] {
             if (addon_thread.joinable()) addon_cancel = true, addon_thread.join();
         };
+        // Training from the player: the Training add-on's download (then the start it was for), the export, and a
+        // count of the videos in the chosen folder each run on a thread of their own
+        std::thread tr_thread, ex_thread, count_thread;
+        std::atomic<bool> tr_running{false}, tr_done{false}, tr_cancel{false}, ex_running{false}, ex_done{false};
+        std::atomic<uint64_t> tr_got{0};
+        std::atomic<int> video_count{-1};
+        std::atomic<bool> count_cancel{false};
+        bool tr_ok = false, ex_ok = false, tr_alive = false, tr_current = false;
+        std::string tr_error, ex_error, training_error;
+        StartMode tr_mode = StartMode::New;
+        int tr_addon = training_addon_installed();
+        bool tr_ckpt = has_checkpoint(), tr_best = has_best();
+        const bool gpu_ok = [] {
+            int n = 0;
+            return cudaGetDeviceCount(&n) == cudaSuccess && n > 0;
+        }();
+        auto count_videos = [&](const std::string& dir) {
+            if (count_thread.joinable()) count_cancel = true, count_thread.join();
+            video_count = -1, count_cancel = false;
+            count_thread = std::thread([&video_count, &count_cancel, dir] {
+                static const char* exts[] = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts"};  // train.py's
+                int n = 0;
+                std::error_code ec;
+                for (auto it = std::filesystem::recursive_directory_iterator(
+                         std::filesystem::u8path(dir), std::filesystem::directory_options::skip_permission_denied, ec);
+                     !ec && !count_cancel && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+                    std::string x = it->path().extension().string();
+                    for (auto& c : x) c = (char)tolower((unsigned char)c);
+                    for (const char* e : exts) n += x == e;
+                }
+                if (!count_cancel) video_count = n;
+            });
+        };
+        if (!cfg.train_videos.empty()) count_videos(cfg.train_videos);
+        auto start_own_training = [&](StartMode m) {
+            std::string err;
+            if (start_training(cfg.train_videos, m, err)) training_error.clear(), training_read_at = -10;
+            else training_error = "Couldn't start training: " + err;
+        };
+        auto show_train_folder_dialog = [&] {  // the videos to train on; arrives as SDL_EVENT_USER with code 2
+            SDL_ShowOpenFolderDialog(
+                [](void*, const char* const* dirs, int) {
+                    if (!dirs || !dirs[0]) return;
+                    SDL_Event ev{SDL_EVENT_USER};
+                    ev.user.code = 2, ev.user.data1 = SDL_strdup(dirs[0]);
+                    SDL_PushEvent(&ev);
+                },
+                nullptr, win, nullptr, false);
+        };
+        auto stop_training_threads = [&] {
+            if (tr_thread.joinable()) tr_cancel = true, tr_thread.join();
+            if (ex_thread.joinable()) ex_thread.join();  // an export takes seconds; its model would be half written
+            if (count_thread.joinable()) count_cancel = true, count_thread.join();
+        };
         SDL_SetWindowTitle(win, std::filesystem::path(path).filename().string().c_str());
         if (start_at >= 0) seek(start_position(start_at, dur));  // reopened after a settings change
         else if (cfg.remember_position) {  // where you left off last time
@@ -669,6 +726,7 @@ int main(int argc, char** argv) {
         }
         stop_downloads = [&] {
             stop_addon();
+            stop_training_threads();
             if (upd_dl.joinable()) upd_cancel = true, upd_dl.join();
         };
 
@@ -698,6 +756,19 @@ int main(int argc, char** argv) {
                 else if (!addon_cancel) post(ICON_X, "TensorRT: " + addon_error, -1, 4);
             }
             if (addon_running && settings_open) dirty = true;  // the progress bar moves
+            if (tr_done) {  // the Training add-on arrived (or didn't): start the run it was downloaded for
+                tr_thread.join(), tr_running = false, tr_done = false, tr_addon = training_addon_installed();
+                if (tr_ok) start_own_training(tr_mode);
+                else if (!tr_cancel) training_error = "Training add-on: " + tr_error;
+            }
+            if (tr_running && settings_open) dirty = true;
+            if (ex_done) {  // the export finished: load the new Pixel Flow by reopening
+                ex_thread.join(), ex_running = false, ex_done = false;
+                if (!ex_ok) training_error = ex_error;
+                else if (trt_from == TrtFrom::None)
+                    post(ICON_SPARKLES, "Pixel Flow is ready; it also needs TensorRT: Settings > Upscaling > Download", -1, 6);
+                else reopen("Loading your Pixel Flow...", true);
+            }
             if (!pending_restart.empty() && now() >= restart_at) {
                 restart_with(pending_restart, video_path);  // returns only if it failed
                 pending_restart.clear();
@@ -717,6 +788,10 @@ int main(int argc, char** argv) {
                     if (e.user.code == 1 && !std::filesystem::exists(f / "nvinfer_11.dll", ec) &&
                         std::filesystem::exists(f / "bin" / "nvinfer_11.dll", ec))
                         p = (f / "bin").u8string();
+                    if (e.user.code == 2) {
+                        saved.train_videos = cfg.train_videos = p, save_prefs(), count_videos(p);
+                        continue;
+                    }
                     if (e.user.code != 1) open_video(p);
                     else if (!std::filesystem::exists(std::filesystem::u8path(p) / "nvinfer_11.dll", ec))
                         post(ICON_X, "No TensorRT 11 in that folder (nvinfer_11.dll)", -1, 3);
@@ -856,16 +931,38 @@ int main(int argc, char** argv) {
                 us.build = OPEN_PLAYER_BUILD;
                 us.versions = {trt_line(trt_from, trt_ver, trt_why), rtx_vsr_line(rtx_tried, rtx_ok), driver_line()};
                 us.trt_addon = trt_from == TrtFrom::AddOn;
-                if (settings_open && cfg.settings_tab == 1 && now() - training_read_at >= 1) {  // the Training tab: once a second
+                if (now() - training_read_at >= 1) {  // training.json, once a second
                     training_read_at = now();
+                    tr_ckpt = has_checkpoint(), tr_best = has_best();
                     std::ifstream tf(std::filesystem::u8path(training_file()), std::ios::binary);
                     std::string text(1 << 20, '\0');
                     tf.read(text.data(), (std::streamsize)text.size());
                     text.resize((size_t)tf.gcount());
                     training_known = parse_training_status(text, training);
-                    ui_redraw = std::max(ui_redraw, 1);  // paused, nothing else redraws: the tab must still update
+                    // the player's own run, from run.txt (any player that started it, before a restart too)
+                    const bool own = training_known && own_run(training);
+                    RunInfo run;
+                    const bool have_run = read_run(run);
+                    tr_alive = have_run && process_alive(run.pid, training_python());
+                    tr_current = have_run && own && status_current(training, run.started);
+                    if (have_run && !tr_alive) {  // it has ended: how?
+                        if (tr_current && training.state == "finished" && !ex_running) {  // export it: Pixel Flow just works
+                            ex_running = true, ex_done = false;
+                            ex_thread = std::thread([&] { ex_ok = export_and_install(ex_error), ex_done = true; });
+                        } else if (!(tr_current && (training.state == "stopped" || training.state == "failed" ||
+                                                     training.state == "finished")))
+                            training_error = "Training stopped unexpectedly; see " + train_log();
+                        clear_run();
+                    }
+                    if (settings_open && cfg.settings_tab == 1)
+                        ui_redraw = std::max(ui_redraw, 1);  // paused, nothing else redraws: the tab must still update
                 }
                 us.training = training, us.training_known = training_known, us.now_unix = (long long)time(nullptr);
+                us.train_video_count = video_count, us.training_addon = tr_addon, us.training_error = training_error;
+                us.training_addon_progress = tr_running ? (float)((double)tr_got / training_addon_size()) : -1;
+                us.training_own = training_known && own_run(training), us.training_log = train_log();
+                us.has_checkpoint = tr_ckpt, us.has_best = tr_best, us.exporting = ex_running, us.gpu_ok = gpu_ok;
+                us.training_alive = tr_alive, us.training_current = tr_current;
                 if (upd_checking) us.update_status = "Checking for updates...";
                 else if (upd_running) {
                     us.update_status = "Downloading build " + std::to_string(upd->info.build) + "...";
@@ -948,6 +1045,46 @@ int main(int argc, char** argv) {
                             upd_done = true;
                         });
                         break;
+                    case UiAction::ChooseTrainVideos: show_train_folder_dialog(); break;
+                    case UiAction::StartTraining: {
+                        if (tr_running || tr_alive || cfg.train_videos.empty()) break;
+                        tr_mode = has_checkpoint() ? StartMode::Resume : StartMode::New;
+                        if (training_addon_installed() == 1) {
+                            start_own_training(tr_mode);
+                            break;
+                        }
+                        tr_running = true, tr_done = false, tr_cancel = false, tr_got = 0, training_error.clear();
+                        tr_thread = std::thread([&] {
+                            tr_ok = install_training_addon([&](uint64_t got, uint64_t) { tr_got = got; }, tr_cancel,
+                                                           tr_error);
+                            tr_done = true;
+                        });
+                        break;
+                    }
+                    case UiAction::CancelTrainingAddon: tr_cancel = true; break;
+                    case UiAction::StopTraining: request_stop(); break;
+                    case UiAction::UseModel:
+                        if (ex_running) break;
+                        ex_running = true, ex_done = false, training_error.clear();
+                        ex_thread = std::thread([&] { ex_ok = export_and_install(ex_error), ex_done = true; });
+                        break;
+                    case UiAction::StartOver: {
+                        const SDL_MessageBoxButtonData btns[] = {
+                            {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Start over"},
+                            {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Cancel"}};
+                        const SDL_MessageBoxData box{SDL_MESSAGEBOX_WARNING, win, "Start over?",
+                                                     "This deletes the model trained so far (the Pixel Flow you're "
+                                                     "using stays). The next Start trains a new one from zero.",
+                                                     2, btns, nullptr};
+                        int pick = 0;
+                        std::string err;
+                        if (SDL_ShowMessageBox(&box, &pick) && pick == 1 && !start_over(err)) training_error = err;
+                        break;
+                    }
+                    case UiAction::RemoveTrainingAddon:
+                        remove_training_addon(training_alive() || ex_running);
+                        tr_addon = training_addon_installed();
+                        break;
                     case UiAction::RemoveTensorRT:
                         remove_tensorrt_addon(trt_from == TrtFrom::AddOn);  // in use: removed when the player reopens
                         if (saved.trt_folder.empty()) reopen("Removing TensorRT...", true);
@@ -1016,6 +1153,7 @@ int main(int argc, char** argv) {
         }
         if (cfg.remember_position) save_position();
         stop_addon();  // a download in progress is cancelled (its partial file is deleted)
+        stop_training_threads();  // the training run itself keeps going: it's a process of its own
         if (upd_dl.joinable()) upd_cancel = true, upd_dl.join();
         if (upd_check.joinable()) upd_check.detach();  // owns its shared state; may still be waiting on the network
         if (volume_unsaved) save_settings(settings_file(), saved);

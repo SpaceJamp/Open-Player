@@ -282,9 +282,10 @@ def validate(model, val_lr, val_hr, s):
     return 10 * math.log10(se_bil / se_net)
 
 
-def lr_at(step, steps, peak):
-    """Cosine from peak down to peak/20 over the whole run; from the step alone, so resuming continues exactly."""
-    return peak / 20 + (peak - peak / 20) * (1 + math.cos(math.pi * step / steps)) / 2
+def lr_at(step, steps, peak, base=0):
+    """Cosine from peak down to peak/20 over steps base..steps; from the step alone, so resuming continues exactly.
+    base > 0: a --more run, whose schedule starts over at the step it began."""
+    return peak / 20 + (peak - peak / 20) * (1 + math.cos(math.pi * (step - base) / (steps - base))) / 2
 
 
 def status_file():
@@ -319,6 +320,17 @@ def write_status(**fields):
         pass
 
 
+def auto_batch(total, crop, frames):
+    """Batch size for a card with total bytes of memory: 8 (the size it was tuned at) when it fits, else fewer.
+    Measured on an RTX 5080: 0.36 GiB per 8-frame 256px sample (standard size). A quarter is left free for a
+    video playing beside it, 1 GiB for CUDA itself and the validation set."""
+    per_sample = 0.37 * 2**30 * (crop / 256) ** 2 * frames / 8
+    return min(8, max(1, int((0.75 * total - 2**30) // per_sample)))
+
+
+RUN = {}  # this run's out path, so a "failed" training.json still says which run failed
+
+
 def ignore_sigint(_):
     """DataLoader workers: let only the main process see Ctrl+C. Otherwise PyTorch's workers quit on it and
     the main process crashes ("worker exited unexpectedly") before it can save."""
@@ -331,12 +343,16 @@ def main():
                     help="folder of high-quality videos, searched recursively (default: videos/ next to this script)")
     ap.add_argument("--out", default="vsr.pt")
     ap.add_argument("--resume", help="checkpoint to continue from")
+    ap.add_argument("--more", type=int, metavar="N", help="with --resume: train N more steps after the checkpoint's "
+                    "own, the learning rate starting over for them (a finished model on new videos)")
+    ap.add_argument("--more-if-done", type=int, metavar="N", help="with --resume: --more N if the checkpoint has "
+                    "finished its steps, else just resume")
     ap.add_argument("--scale", type=int, default=2)
     ap.add_argument("--size", choices=SIZES, help="standard (up to 1080p30 -> 4K), fast (1080p60 -> 4K) or lean "
                     "(standard's speed, more capacity, no attention gates); default standard. A resumed model keeps its size.")
     ap.add_argument("--frames", type=int, default=8, help="frames per clip the recurrence is trained over")
     ap.add_argument("--crop", type=int, default=256, help="high-res crop size")
-    ap.add_argument("--batch", type=int, default=8)
+    ap.add_argument("--batch", type=int, help="clips per step (default: from the GPU's memory, at most 8)")
     ap.add_argument("--steps", type=int, help="total steps (default 100000; a resumed run keeps its own unless given)")
     ap.add_argument("--lr", type=float, help="peak learning rate (default 2e-4; a resumed run keeps its own)")
     ap.add_argument("--pairs", help="folder of the player's --collect files: also learn to match NVIDIA RTX VSR")
@@ -351,6 +367,11 @@ def main():
     if a.crop % (a.scale * 8):  # the low-res crop must split into the 8x8 blocks of the compression step
         raise SystemExit(f"--crop must be a multiple of {a.scale * 8}")
 
+    RUN["out"] = str(Path(a.out).resolve())
+    if a.more is not None and (not a.resume or a.more < 1):
+        raise SystemExit("--more needs --resume and a number of steps above 0")
+    if a.more_if_done is not None and (not a.resume or a.more_if_done < 1 or a.more):
+        raise SystemExit("--more-if-done needs --resume, a number of steps above 0, and no --more")
     dev = "cuda"
     ck = torch.load(a.resume, map_location=dev) if a.resume else {}
     # a resumed run keeps its schedule: a different --steps or --lr would make the cosine curve jump
@@ -372,12 +393,20 @@ def main():
         start = ck.get("step", 0)
         a.fft_loss = a.fft_loss or ck.get("fft_loss", 0)
         a.pairs = a.pairs or ck.get("pairs")
-        a.pairs_weight = a.pairs_weight if a.pairs_weight is not None else ck.get("pairs_weight")
+        # without pairs a stored weight means nothing (older checkpoints saved the 0.5 default even then)
+        a.pairs_weight = a.pairs_weight if a.pairs_weight is not None else ck.get("pairs_weight") if a.pairs else None
         if "opt" in ck:  # checkpoints from before this was saved restart the optimizer
             opt.load_state_dict(ck["opt"])
-        if start >= a.steps:
-            raise SystemExit(f"{a.resume} already has {start} steps; raise --steps to train further")
+    base = ck.get("base", 0)
+    if a.more_if_done and start >= a.steps:
+        a.more = a.more_if_done
+    if a.more:
+        base, a.steps = start, start + a.more
+    if a.resume:
         a.teacher, a.distill = a.teacher or ck.get("teacher"), a.distill if a.distill is not None else ck.get("distill")
+    if a.resume and start >= a.steps:
+        raise SystemExit(f"{a.resume} already has {start} steps; raise --steps or use --more N to train further")
+    if a.resume:
         print(f"resuming at step {start}")
     if a.distill == 0:  # turns the teacher off, also on a resumed run
         a.teacher, a.distill = None, None
@@ -391,7 +420,7 @@ def main():
         a.pairs = None
     if a.pairs_weight is not None and (a.pairs_weight < 0 or (a.pairs_weight and not a.pairs)):
         raise SystemExit("--pairs-weight needs --pairs and a weight of 0 or more")
-    if a.pairs_weight is None:
+    if a.pairs_weight is None and a.pairs:
         a.pairs_weight = 0.5
     if a.distill is not None and not (a.teacher and 0 <= a.distill <= 1):
         raise SystemExit("--distill needs --teacher and a weight between 0 and 1")
@@ -412,6 +441,8 @@ def main():
     dg = Diag(out.with_suffix(".diag.jsonl"), fresh=new_set)  # train_diag.py: <out>.diag.jsonl and `suggest:` lines
 
     status = {"state": "training", "steps": a.steps, "out": str(out.resolve())}  # the player's Training tab
+    stop_file = status_file().with_name("training.stop")
+    stop_file.unlink(missing_ok=True)  # one left from an earlier run must not stop this one
 
     def check(step):
         nonlocal best
@@ -428,8 +459,15 @@ def main():
         write_status(**status)
 
     check(start)
-    data = DataLoader(clips, batch_size=a.batch, num_workers=a.workers,
-                      persistent_workers=a.workers > 0, pin_memory=True, worker_init_fn=ignore_sigint)
+    if not a.batch:
+        a.batch = auto_batch(torch.cuda.get_device_properties(0).total_memory, a.crop, a.frames)
+        print(f"batch {a.batch} (from the GPU's memory)")
+    status["batch"] = a.batch
+
+    def loader():
+        return DataLoader(clips, batch_size=a.batch, num_workers=a.workers,
+                          persistent_workers=a.workers > 0, pin_memory=True, worker_init_fn=ignore_sigint)
+    data = loader()
 
     pair_it = None
     if a.pairs:
@@ -442,38 +480,57 @@ def main():
                                   persistent_workers=a.workers > 0, pin_memory=True, worker_init_fn=ignore_sigint))
         print(f"{len(pairs.files)} RTX VSR pair files, weight {a.pairs_weight}")
 
-    stop = []  # Ctrl+C / the panel's Stop: finish this step, save, exit
+    stop = []  # Ctrl+C / the panel's Stop / the player's training.stop file: finish this step, save, exit
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
     t0, it = time.time(), iter(data)
     for step in range(start + 1, a.steps + 1):
-        hr = dg.next(it).to(dev, non_blocking=True).permute(0, 1, 4, 2, 3).float().div_(255)  # (B,T,3,H,W)
-        T = hr.shape[1]
-        lr = make_lr(hr, s)
-        dg.got_batch(hr, lr)
+        while True:  # out of GPU memory: halve the batch and redo this step
+            try:
+                hr = dg.next(it).to(dev, non_blocking=True).permute(0, 1, 4, 2, 3).float().div_(255)  # (B,T,3,H,W)
+                T = hr.shape[1]
+                lr = make_lr(hr, s)
+                dg.got_batch(hr, lr)
 
-        with torch.autocast("cuda", torch.bfloat16):
-            outs, flows = unroll(model, lr)
-            touts = teacher_outputs(teacher, lr) if teacher else None
-            loss = pixel_loss(outs, hr, touts, a.distill)
-            if a.fft_loss:
-                fft = sum(fft_loss(out, hr[:, t]) for t, out in enumerate(outs))
-                loss = loss + a.fft_loss * fft
-            if pair_it:  # real compressed frames -> NVIDIA RTX VSR's upscale of them
-                plr, phr = (x.to(dev, non_blocking=True).float().div_(255) for x in next(pair_it))
-                pouts, _ = unroll(model, plr)
-                pl = sum(F.l1_loss(o.float(), phr[:, t]) for t, o in enumerate(pouts)) / len(pouts)
-                loss = loss + a.pairs_weight * T * pl  # per frame, like the rest after the / T below
-            # teach the flow net real motion: the warped previous frame should match the current one
-            loss = loss + 0.1 * sum(F.l1_loss(warp(lr[:, t - 1], flows[t].float()), lr[:, t]) for t in range(1, T))
-            loss = loss / T
+                with torch.autocast("cuda", torch.bfloat16):
+                    outs, flows = unroll(model, lr)
+                    touts = teacher_outputs(teacher, lr) if teacher else None
+                    loss = pixel_loss(outs, hr, touts, a.distill)
+                    if a.fft_loss:
+                        fft = sum(fft_loss(out, hr[:, t]) for t, out in enumerate(outs))
+                        loss = loss + a.fft_loss * fft
+                    if pair_it:  # real compressed frames -> NVIDIA RTX VSR's upscale of them
+                        plr, phr = (x.to(dev, non_blocking=True).float().div_(255) for x in next(pair_it))
+                        pouts, _ = unroll(model, plr)
+                        pl = sum(F.l1_loss(o.float(), phr[:, t]) for t, o in enumerate(pouts)) / len(pouts)
+                        loss = loss + a.pairs_weight * T * pl  # per frame, like the rest after the / T below
+                    # teach the flow net real motion: the warped previous frame should match the current one
+                    loss = loss + 0.1 * sum(F.l1_loss(warp(lr[:, t - 1], flows[t].float()), lr[:, t]) for t in range(1, T))
+                    loss = loss / T
 
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        for g in opt.param_groups:
-            g["lr"] = lr_at(step, a.steps, a.lr)
-        if torch.isfinite(gnorm):  # a NaN/inf step would poison the weights and Adam's state for good
-            opt.step()
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                for g in opt.param_groups:
+                    g["lr"] = lr_at(step, a.steps, a.lr, base)
+                if torch.isfinite(gnorm):  # a NaN/inf step would poison the weights and Adam's state for good
+                    opt.step()
+                break
+            except torch.OutOfMemoryError:
+                if a.batch == 1:
+                    raise SystemExit("not enough GPU memory, even at batch 1")
+                hr = lr = outs = flows = touts = loss = None
+                opt.zero_grad(set_to_none=True)
+                torch.cuda.empty_cache()
+                a.batch //= 2
+                print(f"out of GPU memory: batch now {a.batch}", flush=True)
+                status["batch"] = a.batch
+                write_status(**status)
+                data = loader()
+                it = iter(data)
+                if pair_it:
+                    pair_it = iter(DataLoader(pairs, batch_size=a.batch, num_workers=min(a.workers, 2),
+                                              persistent_workers=a.workers > 0, pin_memory=True,
+                                              worker_init_fn=ignore_sigint))
         dg.end(step, loss, gnorm, g["lr"])
 
         if step % 100 == 0:
@@ -486,15 +543,25 @@ def main():
             t0 = time.time()
         if step % 1000 == 0:
             check(step)
+        if not stop and stop_file.exists():
+            stop.append(1)
         if step % 2000 == 0 or step == a.steps or stop:
             save(model, a.out, step=step, opt=opt.state_dict(), fft_loss=a.fft_loss, teacher=a.teacher, distill=a.distill,
-                 steps=a.steps, lr=a.lr, pairs=a.pairs, pairs_weight=a.pairs_weight)
+                 steps=a.steps, lr=a.lr, pairs=a.pairs, pairs_weight=a.pairs_weight, base=base)
         if stop:
             break
     status.update(state="stopped" if stop and step < a.steps else "finished", step=step, eta_s=0)
     write_status(**status)
+    stop_file.unlink(missing_ok=True)
     print(f"saved {a.out} at step {step}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        raise
+    except BaseException as e:  # the player's Training tab shows why, instead of "training" until it goes stale
+        if not (isinstance(e, SystemExit) and e.code in (None, 0)):
+            write_status(**RUN, state="failed", reason=str(e.code if isinstance(e, SystemExit) else e)[:300])
+        raise

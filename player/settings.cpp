@@ -38,6 +38,7 @@ Settings settings_parse(const std::string& text) {
         else if (k == "remember_volume") flag(s.remember_volume);
         else if (k == "info_at_start") flag(s.info_at_start);
         else if (k == "trt_folder") s.trt_folder = v;
+        else if (k == "train_videos") s.train_videos = v;
         else if (k == "check_updates") flag(s.check_updates);
         else if (k == "remember_position") flag(s.remember_position);
         else if (k == "settings_tab") {
@@ -67,13 +68,15 @@ std::string settings_format(const Settings& s) {
     std::replace_if(screen.begin(), screen.end(), [](char c) { return c == '\n' || c == '\r'; }, ' ');
     std::string trt = trim(s.trt_folder);  // a folder name with a line break can't add lines either
     std::replace_if(trt.begin(), trt.end(), [](char c) { return c == '\n' || c == '\r'; }, ' ');
+    std::string videos = trim(s.train_videos);
+    std::replace_if(videos.begin(), videos.end(), [](char c) { return c == '\n' || c == '\r'; }, ' ');
     return std::string("upscaler=") + up + "\ndecoder=" + (s.cpu_decode ? "cpu" : "gpu") + "\nscreen=" + screen +
            "\nstart_fullscreen=" + (s.start_fullscreen ? "1" : "0") + "\nremember_volume=" +
            (s.remember_volume ? "1" : "0") + "\nvolume=" + vol + "\nhide_after=" + std::to_string(s.hide_after) +
            "\ninfo_at_start=" + (s.info_at_start ? "1" : "0") + "\ntrt_folder=" + trt + "\ncheck_updates=" + (s.check_updates ? "1" : "0") +
            "\nlast_update_check=" + std::to_string(s.last_update_check) +
            "\nremember_position=" + (s.remember_position ? "1" : "0") + "\nsettings_tab=" +
-           std::to_string(s.settings_tab) + "\n";
+           std::to_string(s.settings_tab) + "\ntrain_videos=" + videos + "\n";
 }
 
 Settings load_settings(const std::string& file) {
@@ -217,6 +220,7 @@ bool parse_training_status(const std::string& j, TrainingStatus& out) {
             if (k == "state") t.state = v;
             else if (k == "suggest") t.suggest = v;
             else if (k == "out") t.out = v;
+            else if (k == "reason") t.reason = v;
         } else if (j[i] == '[' || j[i] == '{') {
             if (!skip()) return false;
         } else if (!j.compare(i, 4, "null")) {
@@ -232,6 +236,7 @@ bool parse_training_status(const std::string& j, TrainingStatus& out) {
             if (k == "step") t.step = (long long)whole;
             else if (k == "steps") t.steps = (long long)whole;
             else if (k == "updated") t.updated = (long long)whole;
+            else if (k == "batch") t.batch = (long long)whole;
             else if (k == "loss") t.loss = v;
             else if (k == "val_db") t.val_db = v, t.has_val = true;
             else if (k == "best_db") t.best_db = v;
@@ -431,6 +436,16 @@ int settings_selftest() {
         n.state = "finished";
         check(!training_stale(n, 1795300000 + 400000));
         check(std::filesystem::path(training_file()).filename() == "training.json");
+        TrainingStatus f;  // a failed run: its reason and the batch it got to
+        check(parse_training_status("{\"state\": \"failed\", \"reason\": \"no usable videos under D:\\\\x\", "
+                                    "\"batch\": 4}", f) &&
+              f.state == "failed" && f.reason == "no usable videos under D:\\x" && f.batch == 4);
+    }
+    {  // the Training tab's videos folder
+        Settings v;
+        v.train_videos = "D:/Zo\xc3\xab vids";
+        check(settings_parse(settings_format(v)).train_videos == v.train_videos);
+        check(settings_parse("train_videos=a\nb\n").train_videos == "a");
     }
     {
         Settings u;

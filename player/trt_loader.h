@@ -15,7 +15,10 @@ TrtFrom load_tensorrt(const std::string& user_folder, std::string& version, std:
 std::string trt_line(TrtFrom from, const std::string& version, const std::string& why_not);  // "TensorRT: ..."
 
 std::string user_data_dir();  // %LOCALAPPDATA%\Open Player (Linux: ~/.local/share/open-player): the user's model
-std::string addon_dir();      // user_data_dir()\tensorrt
+std::string training_addon_dir();  // user_data_dir()\training: the Training add-on (Python, PyTorch, FFmpeg)
+std::string training_work_dir();   // user_data_dir()\training-work: the player's own training run
+std::string program_dir();         // the folder open-player.exe is in
+std::string addon_dir();     // user_data_dir()\tensorrt
 bool installed_copy();        // installed by the installer (installed.txt next to the program)
 
 // "NVIDIA RTX VSR: <nvngx_vsr.dll version> (SDK API 1.5.0)"; ", not in use" when not opened; why not when it failed

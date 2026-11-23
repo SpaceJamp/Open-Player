@@ -23,6 +23,19 @@ from model import VSR  # noqa: E402
 torch.manual_seed(0)
 x = torch.rand(2, 3, 64, 96)
 
+# --more restarts the cosine over the new steps only: base is where that run began
+assert train.lr_at(100_000, 200_000, 2e-4, base=100_000) == 2e-4
+assert abs(train.lr_at(200_000, 200_000, 2e-4, base=100_000) - 2e-4 / 20) < 1e-12
+assert train.lr_at(500, 1000, 2e-4) == train.lr_at(500, 1000, 2e-4, base=0)
+
+# batch size from the card's memory (measured: ~0.37 GiB per 8-frame 256px sample, standard size)
+G = 2**30
+assert train.auto_batch(16 * G, 256, 8) == 8 and train.auto_batch(64 * G, 256, 8) == 8  # never above 8
+assert train.auto_batch(8 * G, 256, 8) == 8
+assert train.auto_batch(4 * G, 256, 8) == 5
+assert train.auto_batch(2 * G, 256, 8) == 1 and train.auto_batch(G, 256, 8) == 1  # at least 1
+assert train.auto_batch(4 * G, 512, 8) == 1 and train.auto_batch(4 * G, 256, 4) == 8  # scales with crop and frames
+
 # the DCT is orthonormal, so compressing and decompressing loses only what quantisation throws away
 assert torch.allclose(train.DCT @ train.DCT.T, torch.eye(8), atol=1e-6)
 near_lossless = (train.blocky(x, 100) - x).abs().max().item()
@@ -185,6 +198,60 @@ if torch.cuda.is_available() and shutil.which("ffmpeg"):  # train.py trains on c
         assert r.returncode == 0 and "distill" in r.stdout, r.stdout + r.stderr
         ck = torch.load(f"{d}/s.pt")
         assert Path(ck["teacher"]) == Path(f"{d}/teacher.pt").resolve() and ck["distill"] == 0.5  # stored absolute
+
+        status = Path(os.environ["XDG_CONFIG_HOME"]) / "open-player" / "training.json"
+        quick = [sys.executable, str(Path(train.__file__)), d, "--size", "fast", "--crop", "32", "--frames", "2",
+                 "--batch", "2", "--workers", "0"]
+        # the player's Stop: a training.stop file next to training.json; train.py saves, deletes it and exits
+        import json, time
+        stop = status.with_name("training.stop")
+        stop.write_text("")  # a stale one from an earlier run must not stop the next run at once
+        p = subprocess.Popen(quick + ["--out", f"{d}/stop.pt", "--steps", "100000"], stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True)
+        for line in p.stdout:  # once it is training, ask it to stop
+            if line.startswith("step 100 "):
+                stop.write_text("")
+        p.wait(timeout=120)
+        assert p.returncode == 0 and json.loads(status.read_text())["state"] == "stopped" and not stop.exists()
+        assert 100 <= torch.load(f"{d}/stop.pt")["step"] < 100000
+        # --more: another N steps on a finished model, its schedule over the new N only
+        r = subprocess.run(quick + ["--out", f"{d}/s.pt", "--resume", f"{d}/s.pt", "--more", "100"],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+        ck = torch.load(f"{d}/s.pt")
+        assert ck["step"] == 200 and ck["base"] == 100, (ck["step"], ck.get("base"))
+        # a resumed run keeps its checkpoint's teacher (s.pt was trained with one)
+        assert ck["teacher"] and ck["distill"] == 0.5, (ck.get("teacher"), ck.get("distill"))
+        # --more-if-done N (the player's Start): an unfinished checkpoint just resumes, a finished one gets N more
+        p = subprocess.Popen(quick + ["--out", f"{d}/u.pt", "--steps", "200"], stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True)
+        for line in p.stdout:
+            if line.startswith("step 100 "):
+                stop.write_text("")
+        p.wait(timeout=120)
+        assert torch.load(f"{d}/u.pt")["step"] < 200
+        again = quick + ["--out", f"{d}/u.pt", "--resume", f"{d}/u.pt", "--more-if-done", "50"]
+        r = subprocess.run(again, capture_output=True, text=True)
+        ck = torch.load(f"{d}/u.pt")
+        assert r.returncode == 0 and ck["step"] == 200 and ck.get("base", 0) == 0, (r.stderr, ck["step"])
+        r = subprocess.run(again, capture_output=True, text=True)
+        ck = torch.load(f"{d}/u.pt")
+        assert r.returncode == 0 and ck["step"] == 250 and ck["base"] == 200, (r.stderr, ck["step"])
+        # out of GPU memory at batch 8 (PyTorch's own cap, set low): the batch halves and training goes on
+        capped = ("import sys, runpy, torch; torch.cuda.set_per_process_memory_fraction(0.15 * 2**30 / "
+                  "torch.cuda.get_device_properties(0).total_memory); sys.argv = sys.argv[1:]; "
+                  "runpy.run_path(sys.argv[0], run_name='__main__')")
+        r = subprocess.run([sys.executable, "-c", capped, str(Path(train.__file__)), d, "--out", f"{d}/oom.pt",
+                            "--size", "fast", "--crop", "96", "--frames", "8", "--batch", "8", "--workers", "0",
+                            "--steps", "100"], capture_output=True, text=True)
+        assert r.returncode == 0 and "out of GPU memory: batch now" in r.stdout, r.stdout + r.stderr
+        assert json.loads(status.read_text())["batch"] < 8
+        # a failed run says so in training.json, with the reason
+        empty = Path(d) / "empty"
+        empty.mkdir()
+        r = subprocess.run(quick[:2] + [str(empty), "--out", f"{d}/e.pt"], capture_output=True, text=True)
+        st = json.loads(status.read_text())
+        assert r.returncode != 0 and st["state"] == "failed" and "no usable videos" in st["reason"], st
     distilled = "distill run ok"
 else:
     distilled = "distill run skipped (no cuda/ffmpeg)"

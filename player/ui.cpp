@@ -16,6 +16,8 @@
 #include "update.h"
 #include "trt_loader.h"
 #include "addon.h"
+#include "training_addon.h"
+#include "training_run.h"
 #include "imgui.h"
 #include "imgui_internal.h"  // the self-test finds the volume panel's window
 #include "theme.h"
@@ -317,7 +319,10 @@ bool toggle(const char* id, ImVec2 p, bool on, float sc) {
 }
 
 // The Training tab: train.py's training.json, read by main once a second while this tab is open.
-void draw_training(const UiState& s, float sc) {
+template <class Line>
+void draw_training_status(const UiState& s, float sc, Line line);
+
+void draw_training(const UiState& s, std::vector<UiAction>& out, float sc) {
     card_heading(ICON_SPARKLES, "TRAINING", sc);
     auto line = [](ImU32 colour, const std::string& text) {
         ImGui::PushStyleColor(ImGuiCol_Text, colour);
@@ -326,15 +331,38 @@ void draw_training(const UiState& s, float sc) {
         ImGui::PopTextWrapPos();
         ImGui::PopStyleColor();
     };
-    if (!s.training_known) {
-        line(COL_DIM, "No training yet. Train your own Pixel Flow with train.py; its progress shows here while it runs.");
-        return;
+    if (!s.training_known) line(COL_DIM, "No training yet. Train your own Pixel Flow on your own videos here.");
+    else draw_training_status(s, sc, line);
+    for (auto& n : training_notes(s)) line(COL_DIM, n);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float aw = ImGui::GetContentRegionAvail().x;
+    std::vector<TrainButton> tb = training_buttons(s);
+    std::vector<Seg> segs;
+    for (auto& b : tb) segs.push_back({b.label.c_str(), b.enabled, nullptr});
+    if (s.training_addon_progress >= 0) {  // the add-on's download: a bar and Cancel, like TensorRT's
+        const float cw = segmented_w(segs, sc), bw = aw - cw - 12 * sc, y = p.y + 14 * sc;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled({p.x, y - 2 * sc}, {p.x + bw, y + 2 * sc}, col(COL_TRACK), 2 * sc);
+        dl->AddRectFilled({p.x, y - 2 * sc}, {p.x + bw * std::clamp(s.training_addon_progress, 0.f, 1.f), y + 2 * sc},
+                          col(COL_PLAYED), 2 * sc);
+        if (segmented("trcancel", {p.x + aw - cw, p.y}, segs, -1, sc) == 0) out.push_back({tb[0].kind});
+        card_row_end(p, 32 * sc);
+    } else if (!segs.empty()) {
+        int i = segmented("train", {p.x + std::fmax(0.f, aw - segmented_w(segs, sc)), p.y}, segs, -1, sc);
+        if (i >= 0 && tb[i].enabled) out.push_back({tb[i].kind});
+        card_row_end(p, 32 * sc);
     }
+}
+
+// train.py's progress lines (training.json)
+template <class Line>
+void draw_training_status(const UiState& s, float sc, Line line) {
     const TrainingStatus& t = s.training;
     const bool stale = training_stale(t, s.now_unix), running = t.state == "training" && !stale;
     line(running ? COL_PLAYED : COL_TEXT, stale                     ? "Not running (no news for 5 minutes)"
                                           : running                 ? "Training"
                                           : t.state == "finished"   ? "Finished"
+                                          : t.state == "failed"     ? "Failed"
                                                                     : "Stopped");
     char b[256];
     snprintf(b, sizeof b, "Step %lld of %lld", t.step, t.steps);
@@ -414,7 +442,7 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
     }
     ImGui::Indent(colw + 12 * sc);
     ImGui::SetCursorScreenPos({tabs_at.x + colw + 12 * sc, tabs_at.y});
-    if (tab == 1) draw_training(s, sc);
+    if (tab == 1) draw_training(s, out, sc);
     else if (tab == 0) {
 
     card_heading(ICON_SPARKLES, "UPSCALING", sc);
@@ -617,6 +645,57 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
         out.push_back({UiAction::ToggleSettings});
 }
 }  // namespace
+
+static bool training_running(const UiState& s) {
+    return s.training_known && s.training.state == "training" && !training_stale(s.training, s.now_unix);
+}
+
+std::vector<TrainButton> training_buttons(const UiState& s) {
+    using K = UiAction;
+    if (s.training_addon_progress >= 0) return {{"Cancel", K::CancelTrainingAddon}};
+    if (!s.gpu_ok) return {};
+    std::vector<TrainButton> b;
+    if (s.training_alive) {  // the player's own run (run.txt): Stop, also while it's still preparing
+        b.push_back({"Stop", K::StopTraining});
+        if (s.has_best) b.push_back({"Use this model", K::UseModel, !s.exporting});
+        return b;
+    }
+    if (training_running(s) && !s.training_own) return {};  // a command-line run: shown, never controlled here
+    const bool finished = s.training_known && s.training_own && s.training.state == "finished" && s.has_checkpoint;
+    b.push_back({"Choose videos folder...", K::ChooseTrainVideos});
+    b.push_back({finished ? "Train more" : "Start", K::StartTraining, !s.settings.train_videos.empty()});
+    if (s.has_best) b.push_back({"Use this model", K::UseModel, !s.exporting});
+    // nothing that deletes what an export is reading
+    if (s.has_checkpoint) b.push_back({"Start over", K::StartOver, !s.exporting});
+    if (s.training_addon) b.push_back({"Remove add-on", K::RemoveTrainingAddon, !s.exporting});
+    return b;
+}
+
+std::vector<std::string> training_notes(const UiState& s) {
+    std::vector<std::string> n;
+    char gb[32];
+    snprintf(gb, sizeof gb, "%.1f GB", training_addon_size() / 1e9);
+    if (!s.gpu_ok) return {"Training needs an NVIDIA graphics card."};
+    const std::string& v = s.settings.train_videos;
+    n.push_back(v.empty() ? "Choose the folder of videos to train on (subfolders count too)."
+                          : "Videos: " + v + (s.train_video_count >= 0 ? "  (" + std::to_string(s.train_video_count) +
+                                                                             " videos)"
+                                                                       : ""));
+    if (s.training_addon_progress >= 0) n.push_back(std::string("Downloading the Training add-on (") + gb + ")...");
+    else if (s.training_addon == 0)
+        n.push_back(std::string("Start downloads the Training add-on first: ") + gb + " (Python, PyTorch, FFmpeg).");
+    else if (s.training_addon == 2) n.push_back(std::string("The Training add-on needs an update (") + gb + "); Start downloads it.");
+    if (s.training_alive && !s.training_current)
+        n.push_back("Preparing: reading your videos and setting up (this can take a few minutes)...");
+    if (!s.training_alive && training_running(s) && !s.training_own)
+        n.push_back("This run was started from the command line; stop it there.");
+    if (s.training_known && s.training.state == "failed" && (s.training_current || !s.training_own))
+        n.push_back("Failed: " + (s.training.reason.empty() ? std::string("see the log") : s.training.reason) +
+                    (s.training_own && !s.training_log.empty() ? "   Log: " + s.training_log : ""));
+    if (s.exporting) n.push_back("Exporting your Pixel Flow...");
+    if (!s.training_error.empty()) n.push_back(s.training_error);
+    return n;
+}
 
 std::string about_text(const std::string& build, const std::string& log, const std::vector<std::string>& versions) {
     std::string t = "Open Player " + (build.empty() ? std::string("build unknown") : build);
@@ -1068,6 +1147,100 @@ int ui_selftest() {
             }
             io.AddMousePosEvent(5, 5);
         }
+        // the Training tab's buttons and notes in each state, and every state draws at both scales
+        {
+            auto labels = [](const UiState& s) {
+                std::vector<std::string> l;
+                for (auto& b : training_buttons(s)) l.push_back(b.label + (b.enabled ? "" : " (off)"));
+                return l;
+            };
+            auto has_note = [](const UiState& s, const char* text) {
+                for (auto& n : training_notes(s))
+                    if (n.find(text) != std::string::npos) return true;
+                return false;
+            };
+            auto kind_of = [](const UiState& s, const std::string& label) {
+                for (auto& b : training_buttons(s))
+                    if (b.label == label) return b.kind;
+                return UiAction::Quit;
+            };
+            using V = std::vector<std::string>;
+            std::vector<UiState> states;
+            UiState idle{12, 600, 90, 90, false, true, true, false, false, 0.8f, "", {}};
+            idle.settings.train_videos = "D:\\Torrent", idle.train_video_count = 159;
+            // no add-on yet, a folder chosen: Start (it downloads the add-on first)
+            check(labels(idle) == (V{"Choose videos folder...", "Start"}));
+            check(has_note(idle, "2.3 GB") && kind_of(idle, "Start") == UiAction::StartTraining);
+            check(kind_of(idle, "Choose videos folder...") == UiAction::ChooseTrainVideos);
+            states.push_back(idle);
+            UiState nofolder = idle;  // no folder yet: Start is off
+            nofolder.settings.train_videos.clear(), nofolder.train_video_count = -1;
+            check(labels(nofolder) == (V{"Choose videos folder...", "Start (off)"}));
+            states.push_back(nofolder);
+            UiState dl = idle;  // the add-on downloading: Cancel only
+            dl.training_addon_progress = .3f;
+            check(labels(dl) == (V{"Cancel"}) && kind_of(dl, "Cancel") == UiAction::CancelTrainingAddon);
+            states.push_back(dl);
+            UiState run = idle;  // the player's own run, training
+            run.training_addon = 1, run.training_known = true, run.training_own = true, run.has_best = true;
+            run.has_checkpoint = true, run.now_unix = 1795300100;
+            run.training.state = "training", run.training.updated = 1795300000, run.training.step = 4200;
+            run.training.steps = 100000, run.training.out = "C:/x/training-work/vsr.pt";
+            run.training_alive = true, run.training_current = true;  // its process runs (run.txt)
+            check(labels(run) == (V{"Stop", "Use this model"}));
+            check(kind_of(run, "Stop") == UiAction::StopTraining && kind_of(run, "Use this model") == UiAction::UseModel);
+            states.push_back(run);
+            UiState prep = run;  // just started: training.json is still the last run's, but Stop is there already
+            prep.training_current = false, prep.training.state = "finished";
+            check(labels(prep) == (V{"Stop", "Use this model"}) && has_note(prep, "Preparing"));
+            states.push_back(prep);
+            UiState done = run;  // finished: Train more, Use this model, Start over, Remove add-on
+            done.training.state = "finished", done.training_alive = false;
+            check(labels(done) == (V{"Choose videos folder...", "Train more", "Use this model", "Start over",
+                                     "Remove add-on"}));
+            check(kind_of(done, "Train more") == UiAction::StartTraining && kind_of(done, "Start over") == UiAction::StartOver);
+            states.push_back(done);
+            UiState over = done;  // after Start over the old "finished" stays in training.json: Start, not Train more
+            over.has_checkpoint = false, over.has_best = false;
+            check(labels(over) == (V{"Choose videos folder...", "Start", "Remove add-on"}));
+            UiState cli = run;  // a run started from the command line: shown, never controlled
+            cli.training_own = false, cli.training_alive = false, cli.training.out = "D:/X/vsr.pt";
+            check(labels(cli).empty() && has_note(cli, "started from the command line"));
+            states.push_back(cli);
+            UiState failed = run;  // failed: the reason and the log, and Start again
+            failed.training.state = "failed", failed.training.reason = "not enough GPU memory";
+            failed.training_log = "C:/x/training-work/train.log", failed.has_best = false, failed.training_alive = false;
+            check(has_note(failed, "not enough GPU memory") && has_note(failed, "train.log"));
+            check(labels(failed) == (V{"Choose videos folder...", "Start", "Start over", "Remove add-on"}));
+            states.push_back(failed);
+            UiState nogpu = idle;  // no NVIDIA card: no Start
+            nogpu.gpu_ok = false;
+            check(labels(nogpu).empty() && has_note(nogpu, "NVIDIA graphics card"));
+            states.push_back(nogpu);
+            UiState old = done;  // an outdated add-on: said so, and Start updates it
+            old.training_addon = 2;
+            check(has_note(old, "needs an update"));
+            UiState exporting = done;  // exporting: Use this model is off meanwhile
+            exporting.exporting = true;
+            const V ex = labels(exporting);
+            check(has_note(exporting, "Exporting") && std::find(ex.begin(), ex.end(), "Use this model (off)") != ex.end());
+            // nothing that deletes what the export reads, while it runs
+            check(std::find(ex.begin(), ex.end(), "Start over (off)") != ex.end() &&
+                  std::find(ex.begin(), ex.end(), "Remove add-on (off)") != ex.end());
+            UiState stale = failed;  // a failure from an earlier run isn't shown as this one's
+            stale.training_current = false;
+            check(!has_note(stale, "not enough GPU memory"));
+            states.push_back(old), states.push_back(exporting);
+            for (UiState cs : states)
+                for (ImVec2 size : {ImVec2{1920, 1080}, ImVec2{3840, 2160}}) {
+                    io.DisplaySize = size;
+                    cs.scale = size.y > 1080 ? 2.5f : 1, cs.settings_open = true, cs.settings.settings_tab = 1;
+                    frames(cs, 2, .1);
+                    ImGuiWindow* w = ImGui::FindWindowByName("settings");
+                    check(w && w->Active && w->DrawList->VtxBuffer.Size > 0);
+                }
+            io.DisplaySize = {1920, 1080};
+        }
         // shortcut keys stay with the menu while it's open (Esc closes it instead of quitting); the menu draws
         ImGui::NewFrame();
         check(!ui_has_keyboard());
@@ -1112,6 +1285,8 @@ int ui_selftest() {
     fails += update_selftest();
     fails += trt_loader_selftest();
     fails += addon_selftest();
+    fails += training_addon_selftest();
+    fails += training_run_selftest();
     if (!fails) printf("ui checks passed\n");
     return fails ? 1 : 0;
 }
