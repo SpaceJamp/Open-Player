@@ -320,6 +320,14 @@ def write_status(**fields):
         pass
 
 
+def auto_batch(total, crop, frames):
+    """Batch size for a card with total bytes of memory: 8 (the size it was tuned at) when it fits, else fewer.
+    Measured on an RTX 5080: 0.36 GiB per 8-frame 256px sample (standard size). A quarter is left free for a
+    video playing beside it, 1 GiB for CUDA itself and the validation set."""
+    per_sample = 0.37 * 2**30 * (crop / 256) ** 2 * frames / 8
+    return min(8, max(1, int((0.75 * total - 2**30) // per_sample)))
+
+
 RUN = {}  # this run's out path, so a "failed" training.json still says which run failed
 
 
@@ -342,7 +350,7 @@ def main():
                     "(standard's speed, more capacity, no attention gates); default standard. A resumed model keeps its size.")
     ap.add_argument("--frames", type=int, default=8, help="frames per clip the recurrence is trained over")
     ap.add_argument("--crop", type=int, default=256, help="high-res crop size")
-    ap.add_argument("--batch", type=int, default=8)
+    ap.add_argument("--batch", type=int, help="clips per step (default: from the GPU's memory, at most 8)")
     ap.add_argument("--steps", type=int, help="total steps (default 100000; a resumed run keeps its own unless given)")
     ap.add_argument("--lr", type=float, help="peak learning rate (default 2e-4; a resumed run keeps its own)")
     ap.add_argument("--pairs", help="folder of the player's --collect files: also learn to match NVIDIA RTX VSR")
@@ -443,8 +451,15 @@ def main():
         write_status(**status)
 
     check(start)
-    data = DataLoader(clips, batch_size=a.batch, num_workers=a.workers,
-                      persistent_workers=a.workers > 0, pin_memory=True, worker_init_fn=ignore_sigint)
+    if not a.batch:
+        a.batch = auto_batch(torch.cuda.get_device_properties(0).total_memory, a.crop, a.frames)
+        print(f"batch {a.batch} (from the GPU's memory)")
+    status["batch"] = a.batch
+
+    def loader():
+        return DataLoader(clips, batch_size=a.batch, num_workers=a.workers,
+                          persistent_workers=a.workers > 0, pin_memory=True, worker_init_fn=ignore_sigint)
+    data = loader()
 
     pair_it = None
     if a.pairs:
@@ -461,34 +476,49 @@ def main():
     signal.signal(signal.SIGINT, lambda *_: stop.append(1))
     t0, it = time.time(), iter(data)
     for step in range(start + 1, a.steps + 1):
-        hr = dg.next(it).to(dev, non_blocking=True).permute(0, 1, 4, 2, 3).float().div_(255)  # (B,T,3,H,W)
-        T = hr.shape[1]
-        lr = make_lr(hr, s)
-        dg.got_batch(hr, lr)
+        while True:  # out of GPU memory: halve the batch and redo this step
+            try:
+                hr = dg.next(it).to(dev, non_blocking=True).permute(0, 1, 4, 2, 3).float().div_(255)  # (B,T,3,H,W)
+                T = hr.shape[1]
+                lr = make_lr(hr, s)
+                dg.got_batch(hr, lr)
 
-        with torch.autocast("cuda", torch.bfloat16):
-            outs, flows = unroll(model, lr)
-            touts = teacher_outputs(teacher, lr) if teacher else None
-            loss = pixel_loss(outs, hr, touts, a.distill)
-            if a.fft_loss:
-                fft = sum(fft_loss(out, hr[:, t]) for t, out in enumerate(outs))
-                loss = loss + a.fft_loss * fft
-            if pair_it:  # real compressed frames -> NVIDIA RTX VSR's upscale of them
-                plr, phr = (x.to(dev, non_blocking=True).float().div_(255) for x in next(pair_it))
-                pouts, _ = unroll(model, plr)
-                pl = sum(F.l1_loss(o.float(), phr[:, t]) for t, o in enumerate(pouts)) / len(pouts)
-                loss = loss + a.pairs_weight * T * pl  # per frame, like the rest after the / T below
-            # teach the flow net real motion: the warped previous frame should match the current one
-            loss = loss + 0.1 * sum(F.l1_loss(warp(lr[:, t - 1], flows[t].float()), lr[:, t]) for t in range(1, T))
-            loss = loss / T
+                with torch.autocast("cuda", torch.bfloat16):
+                    outs, flows = unroll(model, lr)
+                    touts = teacher_outputs(teacher, lr) if teacher else None
+                    loss = pixel_loss(outs, hr, touts, a.distill)
+                    if a.fft_loss:
+                        fft = sum(fft_loss(out, hr[:, t]) for t, out in enumerate(outs))
+                        loss = loss + a.fft_loss * fft
+                    if pair_it:  # real compressed frames -> NVIDIA RTX VSR's upscale of them
+                        plr, phr = (x.to(dev, non_blocking=True).float().div_(255) for x in next(pair_it))
+                        pouts, _ = unroll(model, plr)
+                        pl = sum(F.l1_loss(o.float(), phr[:, t]) for t, o in enumerate(pouts)) / len(pouts)
+                        loss = loss + a.pairs_weight * T * pl  # per frame, like the rest after the / T below
+                    # teach the flow net real motion: the warped previous frame should match the current one
+                    loss = loss + 0.1 * sum(F.l1_loss(warp(lr[:, t - 1], flows[t].float()), lr[:, t]) for t in range(1, T))
+                    loss = loss / T
 
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        for g in opt.param_groups:
-            g["lr"] = lr_at(step, a.steps, a.lr, base)
-        if torch.isfinite(gnorm):  # a NaN/inf step would poison the weights and Adam's state for good
-            opt.step()
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                for g in opt.param_groups:
+                    g["lr"] = lr_at(step, a.steps, a.lr, base)
+                if torch.isfinite(gnorm):  # a NaN/inf step would poison the weights and Adam's state for good
+                    opt.step()
+                break
+            except torch.OutOfMemoryError:
+                if a.batch == 1:
+                    raise SystemExit("not enough GPU memory, even at batch 1")
+                hr = lr = outs = flows = touts = loss = None
+                opt.zero_grad(set_to_none=True)
+                torch.cuda.empty_cache()
+                a.batch //= 2
+                print(f"out of GPU memory: batch now {a.batch}", flush=True)
+                status["batch"] = a.batch
+                write_status(**status)
+                data = loader()
+                it = iter(data)
         dg.end(step, loss, gnorm, g["lr"])
 
         if step % 100 == 0:

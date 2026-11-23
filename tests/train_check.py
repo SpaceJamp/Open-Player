@@ -28,6 +28,14 @@ assert train.lr_at(100_000, 200_000, 2e-4, base=100_000) == 2e-4
 assert abs(train.lr_at(200_000, 200_000, 2e-4, base=100_000) - 2e-4 / 20) < 1e-12
 assert train.lr_at(500, 1000, 2e-4) == train.lr_at(500, 1000, 2e-4, base=0)
 
+# batch size from the card's memory (measured: ~0.37 GiB per 8-frame 256px sample, standard size)
+G = 2**30
+assert train.auto_batch(16 * G, 256, 8) == 8 and train.auto_batch(64 * G, 256, 8) == 8  # never above 8
+assert train.auto_batch(8 * G, 256, 8) == 8
+assert train.auto_batch(4 * G, 256, 8) == 5
+assert train.auto_batch(2 * G, 256, 8) == 1 and train.auto_batch(G, 256, 8) == 1  # at least 1
+assert train.auto_batch(4 * G, 512, 8) == 1 and train.auto_batch(4 * G, 256, 4) == 8  # scales with crop and frames
+
 # the DCT is orthonormal, so compressing and decompressing loses only what quantisation throws away
 assert torch.allclose(train.DCT @ train.DCT.T, torch.eye(8), atol=1e-6)
 near_lossless = (train.blocky(x, 100) - x).abs().max().item()
@@ -212,6 +220,15 @@ if torch.cuda.is_available() and shutil.which("ffmpeg"):  # train.py trains on c
         assert r.returncode == 0, r.stdout + r.stderr
         ck = torch.load(f"{d}/s.pt")
         assert ck["step"] == 200 and ck["base"] == 100, (ck["step"], ck.get("base"))
+        # out of GPU memory at batch 8 (PyTorch's own cap, set low): the batch halves and training goes on
+        capped = ("import sys, runpy, torch; torch.cuda.set_per_process_memory_fraction(0.15 * 2**30 / "
+                  "torch.cuda.get_device_properties(0).total_memory); sys.argv = sys.argv[1:]; "
+                  "runpy.run_path(sys.argv[0], run_name='__main__')")
+        r = subprocess.run([sys.executable, "-c", capped, str(Path(train.__file__)), d, "--out", f"{d}/oom.pt",
+                            "--size", "fast", "--crop", "96", "--frames", "8", "--batch", "8", "--workers", "0",
+                            "--steps", "100"], capture_output=True, text=True)
+        assert r.returncode == 0 and "out of GPU memory: batch now" in r.stdout, r.stdout + r.stderr
+        assert json.loads(status.read_text())["batch"] < 8
         # a failed run says so in training.json, with the reason
         empty = Path(d) / "empty"
         empty.mkdir()
