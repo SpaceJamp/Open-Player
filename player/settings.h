@@ -21,6 +21,7 @@ struct Settings {
     bool remember_position = true;    // resume each video where you left off
     int settings_tab = 0;             // the settings card's tab: 0 General, 1 Training, 2 About
     std::string train_videos;         // the Training tab's videos folder
+    bool captions = false;            // English captions on (C, the CC button, the menu all save it)
 };
 
 // One "key=value" per line; unknown keys, bad values, blank lines and \r are ignored (defaults kept).

@@ -149,7 +149,7 @@ void Media::run() {
                     apply_captions();  // opens decoders, maybe reads a .srt: not under the lock
                     l.lock();
                 }
-                cues_.clear();  // embedded cues come back as the demuxer reaches them again
+                cues_.clear(), cue_ver_++;  // embedded cues come back as the demuxer reaches them again
                 double t = seek_to_;
                 int64_t ts = (int64_t)((t + start_) * AV_TIME_BASE);
                 avformat_seek_file(fmt_, -1, INT64_MIN, ts, ts, 0);  // lands on the keyframe at or before t
@@ -199,6 +199,7 @@ void Media::run() {
                         if (cues_.size() >= MAX_CUES) cues_.erase(cues_.begin(), cues_.begin() + MAX_CUES / 2);
                         cues_.push_back(std::move(c));
                     }
+                    cue_ver_++;
                 }
         av_packet_unref(pkt);
     }
@@ -322,6 +323,7 @@ void Media::apply_captions() {
     }
     std::lock_guard l(m_);
     sidecar_cues_ = std::move(side);
+    cue_ver_++;
 }
 
 std::vector<Cue> Media::cues() {

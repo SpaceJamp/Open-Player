@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "captions.h"
 #include "settings.h"
 
 // Recent files: newest first, no duplicates, at most 10.
@@ -81,6 +82,14 @@ struct UiState {
     bool has_checkpoint = false, has_best = false, exporting = false, gpu_ok = true;
     bool training_alive = false;    // the player's run is going (its process, from run.txt)
     bool training_current = false;  // training.json is that run's, not one before it
+    // captions: all known cues (owned by the caller), the playback time to show them at, the source picture's size
+    // (to place picture subtitles), and the English tracks for the CC button and the menu
+    const std::vector<Cue>* cues = nullptr;
+    double cue_pos = 0;
+    int video_w = 0, video_h = 0;
+    std::vector<std::string> caption_names;
+    int caption_track = -1;  // the chosen one; -1: off
+    bool caption_forced = false;  // captions off, but a forced English track is shown
 };
 std::string vsr_badge_text(bool available, bool on, bool rtx, int factor);  // "PXF 2x", "RTX 2x", "VSR off"; "" without VSR
 std::string about_text(const std::string& build, const std::string& log, const std::vector<std::string>& versions);  // About
@@ -91,6 +100,7 @@ struct UiAction {
         ToggleSettings, SetUpscaler, SetDecoder, SetScreen, SetStartFullscreen, SetRememberVolume, SetHideAfter,
         SetInfoAtStart, DownloadTensorRT, CancelTensorRT, RemoveTensorRT, ChooseTensorRTFolder, SetCheckUpdates,
         SetSettingsTab, SetRememberPosition,
+        ToggleCaptions, SetCaptionTrack,  // SetCaptionTrack value: a track index, -1 off
         // the Training tab
         ChooseTrainVideos, StartTraining, StopTraining, UseModel, StartOver, CancelTrainingAddon, RemoveTrainingAddon,
         InstallUpdate
@@ -114,4 +124,5 @@ std::vector<UiAction> draw_ui(const UiState& s);
 bool ui_animating(double now);  // the capsule is fading or a notice is showing: keep redrawing
 bool ui_controls_hidden();      // the capsule was fully faded out at the last draw_ui
 
+Rect last_caption_rect();  // where the latest frame drew captions (w 0: none); for tests
 int ui_selftest();  // --uitest: checks the UI logic without a window or GPU; 0 on pass

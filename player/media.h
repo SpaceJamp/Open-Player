@@ -56,6 +56,7 @@ public:
     const std::vector<CaptionTrack>& caption_tracks() const { return tracks_; }
     void set_captions(int track, int forced, double at);
     std::vector<Cue> cues();
+    int cues_version() const { return cue_ver_; }  // changes whenever cues() would
     // Points the CUDA kernels at a decoded frame, uploading it first if it was decoded in software.
     YuvFrame to_gpu(AVFrame* f, cudaStream_t s);
 
@@ -97,6 +98,7 @@ private:
     int cap_stream_[2] = {-1, -1};   // decode thread: their stream indexes (-1: none or a .srt)
     std::unique_ptr<CueDecoder> cap_dec_[2];  // decode thread
     std::vector<Cue> cues_, sidecar_cues_;  // under m_
+    std::atomic<int> cue_ver_{0};
 
     AVFrame* frame_ = nullptr;
     std::vector<float> pcm_;

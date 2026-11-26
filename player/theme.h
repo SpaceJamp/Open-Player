@@ -46,6 +46,8 @@ inline constexpr const char* ICON_DESKTOP = "\xee\xaa\x89";
 inline constexpr ImWchar CP_CPU = 0xef8e;
 inline constexpr const char* ICON_CPU = "\xee\xbe\x8e";
 inline constexpr ImWchar CP_ADJUSTMENTS = 0xea03;
+inline constexpr ImWchar CP_BADGE_CC = 0xf55a;
+inline constexpr const char* ICON_BADGE_CC = "\xef\x95\x9a";
 inline constexpr const char* ICON_ADJUSTMENTS = "\xee\xa8\x83";
 
 inline constexpr ImU32 COL_CAPSULE = IM_COL32(20, 22, 30, 184);   // rgba(20,22,30,0.72)

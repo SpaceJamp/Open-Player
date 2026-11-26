@@ -39,6 +39,7 @@ Settings settings_parse(const std::string& text) {
         else if (k == "info_at_start") flag(s.info_at_start);
         else if (k == "trt_folder") s.trt_folder = v;
         else if (k == "train_videos") s.train_videos = v;
+        else if (k == "captions") flag(s.captions);
         else if (k == "check_updates") flag(s.check_updates);
         else if (k == "remember_position") flag(s.remember_position);
         else if (k == "settings_tab") {
@@ -76,7 +77,8 @@ std::string settings_format(const Settings& s) {
            "\ninfo_at_start=" + (s.info_at_start ? "1" : "0") + "\ntrt_folder=" + trt + "\ncheck_updates=" + (s.check_updates ? "1" : "0") +
            "\nlast_update_check=" + std::to_string(s.last_update_check) +
            "\nremember_position=" + (s.remember_position ? "1" : "0") + "\nsettings_tab=" +
-           std::to_string(s.settings_tab) + "\ntrain_videos=" + videos + "\n";
+           std::to_string(s.settings_tab) + "\ntrain_videos=" + videos +
+           "\ncaptions=" + (s.captions ? "1" : "0") + "\n";
 }
 
 Settings load_settings(const std::string& file) {
