@@ -89,3 +89,5 @@ drops under 30 fps at 1080p -> 4K; fast (9-13 ms on full TensorRT) or 8-bit woul
   When the add-on is present the player uses it, else TensorRT for RTX.
 - My call (builder detail): drive TensorRT for RTX through its own C++ API (its interfaces follow TensorRT's, so
   vsr.cpp's engine code ports closely), not through ONNX Runtime (one runtime fewer to ship).
+
+- **TensorRT for RTX downloads on first use** (the user, 2026-11-26), about 106 MB; engine project design: 2026-11-26-trt-rtx-engine-design.md.
