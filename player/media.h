@@ -52,9 +52,10 @@ public:
     void set_volume(float v);
     // Captions: the file's English tracks; which to show (indexes into them, -1: none; forced: shown alongside, for
     // a forced track with captions off). An embedded track's cues are read as the file plays, so a change re-reads
-    // from `at` (the playback position). cues(): a copy of what's known now, in playback seconds.
+    // from the playback position (never undoing a seek still under way). cues(): what's known now, in playback
+    // seconds; cheap to copy (pictures are shared).
     const std::vector<CaptionTrack>& caption_tracks() const { return tracks_; }
-    void set_captions(int track, int forced, double at);
+    void set_captions(int track, int forced);
     std::vector<Cue> cues();
     int cues_version() const { return cue_ver_; }  // changes whenever cues() would
     // Points the CUDA kernels at a decoded frame, uploading it first if it was decoded in software.
@@ -99,6 +100,10 @@ private:
     std::unique_ptr<CueDecoder> cap_dec_[2];  // decode thread
     std::vector<Cue> cues_, sidecar_cues_;  // under m_
     std::atomic<int> cue_ver_{0};
+    // where a caption change re-reads from: the last frame handed out, or a seek not shown yet
+    std::atomic<double> shown_pts_{0};
+    double last_seek_ = 0;      // under m_
+    int seek_serial_ = 0;       // under m_: the serial the latest seek() will have once done
 
     AVFrame* frame_ = nullptr;
     std::vector<float> pcm_;

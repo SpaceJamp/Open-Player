@@ -2,6 +2,7 @@
 // Captions: the English subtitle tracks of a video (embedded, or a .srt beside it), the default choice, and the
 // cues to show at a given time. No GPU here: the UI draws the cues, Media feeds the chosen stream's packets.
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -15,11 +16,14 @@ struct CaptionTrack {
 struct Cue {
     double start = 0, end = -1;  // seconds; end < 0: until the next cue, at most 5 s
     std::string text;            // plain text, '\n' between lines; empty for a picture
-    std::vector<uint8_t> rgba;   // a picture subtitle (w x h RGBA) at x, y on a canvas_w x canvas_h canvas
+    // a picture subtitle (w x h RGBA) at x, y on a canvas_w x canvas_h canvas; shared, so copies of cues are cheap
+    std::shared_ptr<const std::vector<uint8_t>> rgba;
     int x = 0, y = 0, w = 0, h = 0, canvas_w = 0, canvas_h = 0;
 };
 
-bool english(const char* lang);  // "eng", "en", untagged
+bool english(const char* lang);  // "eng", "en", untagged ("und" too)
+// Where a caption change re-reads from: the seek not shown yet, else the frame shown last.
+double reseek_target(bool seek_unshown, double last_seek, double shown);
 std::string track_name(const char* title, bool sdh, bool forced);  // "English (SDH)", "British (forced)"
 int default_track(const std::vector<CaptionTrack>& t);  // SDH, else not forced-only, else the first; -1: none
 int forced_track(const std::vector<CaptionTrack>& t);   // the forced one, shown with captions off; -1: none
@@ -57,6 +61,7 @@ public:
     bool open(const AVStream* st);  // false: no decoder for this codec
     // Appends this packet's cues (a picture track's "clear" is an empty cue that ends the one before).
     void feed(const AVPacket* pkt, std::vector<Cue>& out);
+    void flush();  // after a seek: no half-assembled subtitle carried over
 
 private:
     AVCodecContext* ctx_ = nullptr;

@@ -718,16 +718,16 @@ int main(int argc, char** argv) {
             if (!cfg.captions) {
                 const int f = forced_track(cap_tracks);
                 cap_track = -1, cap_forced = f >= 0;
-                media.set_captions(-1, f, pos);
+                media.set_captions(-1, f);
                 return;
             }
             cap_track = pick >= 0 && pick < (int)cap_tracks.size() ? pick : default_track(cap_tracks), cap_forced = false;
-            media.set_captions(cap_track, -1, pos);
+            media.set_captions(cap_track, -1);
             if (cap_track >= 0) fprintf(stderr, "captions: %s\n", cap_tracks[cap_track].name.c_str());
         };
         auto set_captions_on = [&](bool on, int pick) {
-            if (cap_tracks.empty()) return post(ICON_BADGE_CC, "No English captions", -1, 2);
-            saved.captions = cfg.captions = on, save_prefs();
+            saved.captions = cfg.captions = on, save_prefs();  // remembered even for a file without captions
+            if (cap_tracks.empty()) return post(ICON_BADGE_CC, on ? "Captions on (this video has no English ones)" : "Captions off", -1, 2);
             apply_captions(pick);
             post(ICON_BADGE_CC, cap_track >= 0 ? "Captions: " + cap_tracks[cap_track].name : std::string("Captions off"), -1, 2);
         };
@@ -987,7 +987,8 @@ int main(int argc, char** argv) {
                         ui_redraw = std::max(ui_redraw, 1);  // paused, nothing else redraws: the tab must still update
                 }
                 us.training = training, us.training_known = training_known, us.now_unix = (long long)time(nullptr);
-                if (media.cues_version() != cue_seen) cue_seen = media.cues_version(), cue_copy = media.cues();
+                if (media.cues_version() != cue_seen)  // new cues while paused must still show
+                    cue_seen = media.cues_version(), cue_copy = media.cues(), ui_redraw = std::max(ui_redraw, 1);
                 us.cues = &cue_copy, us.cue_pos = pos, us.video_w = w, us.video_h = h;
                 us.caption_names = cap_names, us.caption_track = cap_track, us.caption_forced = cap_forced;
                 us.train_video_count = video_count, us.training_addon = tr_addon, us.training_error = training_error;

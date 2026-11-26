@@ -23,7 +23,7 @@ static bool has(const std::string& s, const char* word) { return lower(s).find(w
 bool english(const char* lang) {
     if (!lang || !*lang) return true;  // untagged: most likely the film's own language
     const std::string l = lower(lang);
-    return l == "eng" || l == "en";
+    return l == "eng" || l == "en" || l == "und";  // "und": mkvmerge's "undetermined", i.e. untagged
 }
 
 std::string track_name(const char* title, bool sdh, bool forced) {
@@ -37,6 +37,10 @@ std::string track_name(const char* title, bool sdh, bool forced) {
     if (sdh && !has(name, "sdh")) name += " (SDH)";
     if (forced && !has(name, "forced")) name += " (forced)";
     return name;
+}
+
+double reseek_target(bool seek_unshown, double last_seek, double shown) {
+    return seek_unshown ? last_seek : std::fmax(shown, 0);
 }
 
 int default_track(const std::vector<CaptionTrack>& t) {
@@ -53,7 +57,8 @@ int forced_track(const std::vector<CaptionTrack>& t) {
     return -1;
 }
 
-std::string clean_text(const std::string& raw) {
+std::string clean_text(const std::string& in) {
+    const std::string raw = in.substr(0, 8192);  // more than a screen can show; keeps the tag scan linear
     std::string out;
     for (size_t i = 0; i < raw.size() && out.size() < 4000; i++) {
         char c = raw[i];
@@ -104,10 +109,10 @@ std::vector<const Cue*> active_cues(const std::vector<Cue>& cues, double pos) {
     for (size_t i = 0; i < by_start.size(); i++) {
         const Cue* c = by_start[i];
         double end = c->end;
-        if (end < 0) {  // no end given: until the next cue, at most 5 s
-            end = c->start + 5;
+        if (end < 0) {  // no end given: until the next cue (a picture's "clear"); none known yet: text 5 s,
+            end = c->rgba ? 1e300 : c->start + 5;  // a picture until its clear arrives
             for (size_t j = i + 1; j < by_start.size(); j++)
-                if (by_start[j]->start > c->start) { end = std::min(end, by_start[j]->start); break; }
+                if (by_start[j]->start > c->start) { end = by_start[j]->start; break; }
         }
         if (c->start <= pos && pos < end) on.push_back(c);
     }
@@ -127,27 +132,33 @@ std::vector<std::string> find_sidecars(const std::string& video_path) {
     return out;
 }
 
-static bool valid_utf8(const std::string& s) {
-    for (size_t i = 0; i < s.size();) {
-        unsigned char c = s[i];
-        int n = c < 0x80 ? 0 : (c >> 5) == 6 ? 1 : (c >> 4) == 14 ? 2 : (c >> 3) == 30 ? 3 : -1;
-        if (n < 0 || i + n >= s.size() + (n ? 0 : 1)) return false;
-        for (int k = 1; k <= n; k++)
-            if (i + k >= s.size() || ((unsigned char)s[i + k] >> 6) != 2) return false;
-        i += n + 1;
-    }
-    return true;
+// The length of the valid UTF-8 character at s[i] (no overlong forms, surrogates or values past U+10FFFF); 0: none
+static size_t utf8_len(const std::string& s, size_t i) {
+    const unsigned char c = s[i];
+    if (c < 0x80) return 1;
+    const size_t n = c >= 0xC2 && c <= 0xDF ? 2 : c >= 0xE0 && c <= 0xEF ? 3 : c >= 0xF0 && c <= 0xF4 ? 4 : 0;
+    if (!n || i + n > s.size()) return 0;
+    for (size_t k = 1; k < n; k++)
+        if (((unsigned char)s[i + k] >> 6) != 2) return 0;
+    const unsigned char d = s[i + 1];
+    if ((c == 0xE0 && d < 0xA0) || (c == 0xED && d > 0x9F) || (c == 0xF0 && d < 0x90) || (c == 0xF4 && d > 0x8F))
+        return 0;
+    return n;
 }
 
 std::string to_utf8(const std::string& bytes) {
-    if (valid_utf8(bytes)) return bytes;
     // Windows-1252: 0x80-0x9F are typographic characters, the rest is Latin-1
     static const unsigned short hi[32] = {0x20AC, 0xFFFD, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
                                           0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0xFFFD, 0x017D, 0xFFFD,
                                           0xFFFD, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
                                           0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0xFFFD, 0x017E, 0x0178};
     std::string out;
-    for (unsigned char c : bytes) {
+    for (size_t i = 0; i < bytes.size();) {
+        if (size_t n = utf8_len(bytes, i)) {  // valid UTF-8 stays; only the bytes that aren't are read as 1252
+            out.append(bytes, i, n), i += n;
+            continue;
+        }
+        const unsigned char c = bytes[i++];
         unsigned cp = c >= 0x80 && c < 0xA0 ? hi[c - 0x80] : c;
         if (cp < 0x80) out += (char)cp;
         else if (cp < 0x800) out += (char)(0xC0 | cp >> 6), out += (char)(0x80 | (cp & 0x3F));
@@ -181,8 +192,10 @@ std::vector<CaptionTrack> list_tracks(const AVFormatContext* fmt, const std::str
         CaptionTrack t;
         t.stream = (int)i;
         t.sdh = (st->disposition & AV_DISPOSITION_HEARING_IMPAIRED) || (title && has(title->value, "sdh"));
-        t.forced = st->disposition & AV_DISPOSITION_FORCED;
-        t.name = track_name(title ? title->value : nullptr, t.sdh, t.forced);
+        t.forced = (st->disposition & AV_DISPOSITION_FORCED) || (title && has(title->value, "forced"));
+        std::string name = title ? to_utf8(std::string(title->value).substr(0, 80)) : "";
+        name.erase(std::remove(name.begin(), name.end(), '#'), name.end());  // '#' is ImGui's id marker
+        t.name = track_name(title ? name.c_str() : nullptr, t.sdh, t.forced);
         out.push_back(t);
     }
     for (auto& f : find_sidecars(video_path)) {
@@ -196,19 +209,38 @@ std::vector<CaptionTrack> list_tracks(const AVFormatContext* fmt, const std::str
 
 // "00:01:02,345" -> seconds; -1 if it isn't a time
 static double srt_time(const char* s) {
-    int h, m, sec, ms;
-    if (sscanf(s, "%d:%d:%d%*[,.]%d", &h, &m, &sec, &ms) != 4) return -1;
-    return h * 3600.0 + m * 60 + sec + ms / 1000.0;
+    int h, m, sec;
+    char frac[8] = "";
+    if (sscanf(s, "%d:%d:%d%*[,.]%7[0-9]", &h, &m, &sec, frac) != 4) return -1;
+    return h * 3600.0 + m * 60 + sec + atof((std::string("0.") + frac).c_str());  // ",5" is half a second
 }
 
 std::vector<Cue> read_sidecar(const std::string& srt_path) {
-    std::ifstream f(fs::u8path(srt_path), std::ios::binary);
-    std::string raw((std::istreambuf_iterator<char>(f)), {}), text = to_utf8(raw.substr(0, 64u << 20)), line;
+    std::error_code ec;
+    const fs::path path = fs::u8path(srt_path);
+    // a real file of sane size only: never a folder, a device, or gigabytes read before a cap
+    if (!fs::is_regular_file(path, ec) || fs::file_size(path, ec) > (64u << 20) || ec) return {};
+    std::ifstream f(path, std::ios::binary);
+    std::string raw((std::istreambuf_iterator<char>(f)), {}), text, line;
+    if (raw.size() >= 2 && (unsigned char)raw[0] == 0xFF && (unsigned char)raw[1] == 0xFE) {  // UTF-16 LE
+        for (size_t i = 2; i + 1 < raw.size(); i += 2) {
+            unsigned cp = (unsigned char)raw[i] | (unsigned char)raw[i + 1] << 8;
+            if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD;  // shortcut: no surrogate pairs (no emoji); rare in .srt
+            if (cp < 0x80) text += (char)cp;
+            else if (cp < 0x800) text += (char)(0xC0 | cp >> 6), text += (char)(0x80 | (cp & 0x3F));
+            else text += (char)(0xE0 | cp >> 12), text += (char)(0x80 | (cp >> 6 & 0x3F)), text += (char)(0x80 | (cp & 0x3F));
+        }
+    } else text = to_utf8(raw);
     if (!text.compare(0, 3, "\xef\xbb\xbf")) text.erase(0, 3);  // a UTF-8 byte order mark
     std::vector<Cue> out;
     Cue cur;
     bool in_cue = false;
     auto done = [&] {
+        // no blank line before the next cue: its index number ended up as this cue's last line
+        size_t nl = cur.text.rfind('\n');
+        const std::string last = cur.text.substr(nl == std::string::npos ? 0 : nl + 1);
+        if (!last.empty() && last.find_first_not_of("0123456789 ") == std::string::npos)
+            cur.text.erase(nl == std::string::npos ? 0 : nl);
         if (in_cue && out.size() < MAX_CUES) cur.text = clean_text(cur.text), out.push_back(cur);
         cur = Cue(), in_cue = false;
     };
@@ -231,6 +263,9 @@ std::vector<Cue> read_sidecar(const std::string& srt_path) {
 }
 
 CueDecoder::~CueDecoder() { avcodec_free_context(&ctx_); }
+void CueDecoder::flush() {
+    if (ctx_) avcodec_flush_buffers(ctx_);
+}
 
 bool CueDecoder::open(const AVStream* st) {
     const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
@@ -243,12 +278,15 @@ bool CueDecoder::open(const AVStream* st) {
 }
 
 void CueDecoder::feed(const AVPacket* pkt, std::vector<Cue>& out) {
-    if (!ctx_ || pkt->pts == AV_NOPTS_VALUE) return;
+    if (!ctx_) return;
     AVSubtitle sub{};
     int got = 0;
     if (avcodec_decode_subtitle2(ctx_, &sub, &got, const_cast<AVPacket*>(pkt)) < 0 || !got) return;
     if (out.size() >= MAX_CUES) out.erase(out.begin(), out.begin() + MAX_CUES / 2);  // the oldest half
-    const double at = pkt->pts * tb_;
+    // the decoder's own time first (AV_TIME_BASE units), else the packet's (some muxes only give a dts)
+    const int64_t ts = pkt->pts != AV_NOPTS_VALUE ? pkt->pts : pkt->dts;
+    if (sub.pts == AV_NOPTS_VALUE && ts == AV_NOPTS_VALUE) return avsubtitle_free(&sub);
+    const double at = sub.pts != AV_NOPTS_VALUE ? sub.pts / (double)AV_TIME_BASE : ts * tb_;
     Cue base;
     base.start = at + sub.start_display_time / 1000.0;
     // no end (PGS shows until the next display set), else the packet's duration or the subtitle's own end
@@ -268,15 +306,16 @@ void CueDecoder::feed(const AVPacket* pkt, std::vector<Cue>& out) {
         else if (r->type == SUBTITLE_BITMAP && picture_ok(r->w, r->h) && r->data[0] && r->data[1]) {
             const uint32_t* pal = (const uint32_t*)r->data[1];  // ARGB, one per palette index
             c.x = r->x, c.y = r->y, c.w = r->w, c.h = r->h;
-            c.rgba.resize((size_t)r->w * r->h * 4);
+            auto px_buf = std::make_shared<std::vector<uint8_t>>((size_t)r->w * r->h * 4);
             for (int y = 0; y < r->h; y++)
                 for (int x = 0; x < r->w; x++) {
                     uint32_t argb = pal[r->data[0][y * r->linesize[0] + x] % (r->nb_colors > 0 ? r->nb_colors : 256)];
-                    uint8_t* px = &c.rgba[((size_t)y * r->w + x) * 4];
+                    uint8_t* px = &(*px_buf)[((size_t)y * r->w + x) * 4];
                     px[0] = argb >> 16, px[1] = argb >> 8, px[2] = (uint8_t)argb, px[3] = argb >> 24;
                 }
+            c.rgba = std::move(px_buf);
         } else continue;
-        if (!c.text.empty() || !c.rgba.empty()) out.push_back(std::move(c));
+        if (!c.text.empty() || c.rgba) out.push_back(std::move(c));
     }
     avsubtitle_free(&sub);
 }
@@ -312,8 +351,21 @@ int captions_selftest() {
         for (const Cue* c : active_cues(cues, pos)) s += c->text;
         return s;
     };
-    check(texts(1.5) == "ab" && texts(2.5) == "b" && texts(9.9) == "c" && texts(10.1).empty() && texts(21) == "d");
-    check(texts(4) == "");
+    // no end: until the next cue (a picture track's "clear" is one); with no later cue known yet, text 5 s and a
+    // picture until its clear arrives
+    check(texts(1.5) == "ab" && texts(2.5) == "b" && texts(9.9) == "c" && texts(19.9) == "c" && texts(21) == "d");
+    check(texts(4) == "" && texts(25.1) == "");
+    Cue sign;
+    sign.start = 30, sign.w = sign.h = 1, sign.rgba = std::make_shared<const std::vector<uint8_t>>(4, 255);
+    cues.push_back(sign);
+    check(active_cues(cues, 100).size() == 1);  // the picture: 70 s on, still waiting for its clear
+    cues.pop_back();
+
+    // the position a caption change re-reads from: a seek not shown yet wins over the last frame shown
+    check(reseek_target(true, 3600, 0) == 3600 && reseek_target(false, 3600, 12) == 12);
+    check(english("und") && english("UND"));  // mkvmerge's "undetermined": untagged
+    check(clean_text(std::string(2 << 20, '{')).empty() || true);  // returns at once (was quadratic)
+    check(to_utf8("caf\xc3\xa9 \x93x\x94") == "caf\xc3\xa9 \xe2\x80\x9cx\xe2\x80\x9d");  // one bad byte: just that byte
 
     fs::path d = fs::temp_directory_path() / "op-captions-test";
     std::error_code ec;
@@ -381,8 +433,28 @@ int captions_selftest() {
         av_packet_free(&pkt);
         check(got.size() == 1 && got.size() && got[0].text == "Hello" && std::abs(got[0].start - 1) < 1e-6 &&
               std::abs(got[0].end - 2.5) < 1e-6);
+        // a track titled "Forced" with no flag is forced; "und" counts as untagged English
+        av_dict_set(&fmt->streams[0]->metadata, "title", "Forced", 0);
+        av_dict_set(&fmt->streams[0]->metadata, "language", "und", 0);
+        auto t2 = list_tracks(fmt, (d / "none.mkv").u8string());
+        check(t2.size() == 1 && t2.size() && t2[0].forced && t2[0].name == "English (forced)");
         avformat_close_input(&fmt);
     }
+    // .srt variations: no blank line before the next index, short milliseconds, UTF-16 with a byte order mark,
+    // a folder named like a .srt
+    std::ofstream(d / "v.srt", std::ios::binary) << "1\n00:00:01,5 --> 00:00:02,25\nA\n2\n00:00:03,000 --> 00:00:04,000\nB\n";
+    auto v = read_sidecar((d / "v.srt").u8string());
+    check(v.size() == 2 && v.size() && std::abs(v[0].start - 1.5) < 1e-6 && std::abs(v[0].end - 2.25) < 1e-6 &&
+          v[0].text == "A" && v[1].text == "B");
+    {
+        std::ofstream u(d / "u16.srt", std::ios::binary);
+        u << std::string("\xff\xfe", 2);
+        for (char c : std::string("1\r\n00:00:01,000 --> 00:00:02,000\r\nHi\r\n")) u << c << '\0';
+    }
+    auto u16 = read_sidecar((d / "u16.srt").u8string());
+    check(u16.size() == 1 && u16.size() && u16[0].text == "Hi");
+    fs::create_directories(d / "folder.srt");
+    check(read_sidecar((d / "folder.srt").u8string()).empty());
     fs::remove_all(d, ec);
 #undef check
     return fails ? 1 : 0;

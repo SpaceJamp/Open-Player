@@ -1,5 +1,7 @@
 #include "media.h"
 
+#include <algorithm>
+
 extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_cuda.h>
@@ -150,6 +152,8 @@ void Media::run() {
                     l.lock();
                 }
                 cues_.clear(), cue_ver_++;  // embedded cues come back as the demuxer reaches them again
+                for (auto& d : cap_dec_)
+                    if (d) d->flush();
                 double t = seek_to_;
                 int64_t ts = (int64_t)((t + start_) * AV_TIME_BASE);
                 avformat_seek_file(fmt_, -1, INT64_MIN, ts, ts, 0);  // lands on the keyframe at or before t
@@ -192,7 +196,12 @@ void Media::run() {
                 if (pkt->stream_index == cap_stream_[k]) {
                     std::vector<Cue> got;
                     cap_dec_[k]->feed(pkt, got);
+                    if (got.empty()) continue;
                     std::lock_guard l(m_);
+                    // a film's worth of pictures would pile up: forget cues that began over a minute before now
+                    const double old = shown_pts_ - 60;
+                    cues_.erase(std::remove_if(cues_.begin(), cues_.end(), [&](const Cue& c) { return c.start < old; }),
+                                cues_.end());
                     for (auto& c : got) {  // playback seconds start at the file's start time
                         c.start -= start_;
                         if (c.end >= 0) c.end -= start_;
@@ -278,6 +287,7 @@ bool Media::take_due(double clock, double lead, bool force, AVFrame*& frame, dou
     }
     cv_.notify_all();
     frame = q.f, pts = q.pts;
+    shown_pts_ = pts;
     return true;
 }
 
@@ -295,11 +305,14 @@ bool Media::finished() {
     return eof_ && queue_.empty() && !seek_req_;
 }
 
-void Media::set_captions(int track, int forced, double at) {
+void Media::set_captions(int track, int forced) {
+    double at;
     {
         std::lock_guard l(m_);
         if (cap_want_[0] == track && cap_want_[1] == forced) return;
         cap_want_[0] = track, cap_want_[1] = forced, cap_change_ = true;
+        if (seek_req_) return;  // a seek is on its way: it applies the change, and lands where it was asked to
+        at = reseek_target(serial_ < seek_serial_, last_seek_, shown_pts_);
     }
     seek(at);  // re-read from here, so the new track's cues around now arrive
 }
@@ -337,7 +350,7 @@ void Media::seek(double seconds) {
     {
         std::lock_guard l(m_);
         seek_to_ = std::fmax(0, duration_ > 0 ? std::fmin(seconds, duration_ - 0.5) : seconds);
-        seek_req_ = true;
+        seek_req_ = true, last_seek_ = seek_to_, seek_serial_ = serial_ + 1;
     }
     cv_.notify_all();
 }

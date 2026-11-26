@@ -670,12 +670,14 @@ struct CaptionTex {
 static std::vector<CaptionTex> g_caption_tex;
 
 static ImTextureData* caption_texture(const Cue& c) {
-    for (auto& t : g_caption_tex)
-        if (t.start == c.start && t.x == c.x && t.y == c.y && t.w == c.w && t.h == c.h) return t.used = true, t.tex;
-    if (g_caption_tex.size() >= 16 || c.rgba.size() != (size_t)c.w * c.h * 4) return nullptr;
+    for (auto& t : g_caption_tex)  // never one already given up: the backend may destroy it any frame now
+        if (t.start == c.start && t.x == c.x && t.y == c.y && t.w == c.w && t.h == c.h && !t.tex->WantDestroyNextFrame &&
+            t.tex->Status != ImTextureStatus_WantDestroy && t.tex->Status != ImTextureStatus_Destroyed)
+            return t.used = true, t.tex;
+    if (g_caption_tex.size() >= 16 || !c.rgba || c.rgba->size() != (size_t)c.w * c.h * 4) return nullptr;
     auto* tex = IM_NEW(ImTextureData)();
     tex->Create(ImTextureFormat_RGBA32, c.w, c.h);
-    memcpy(tex->GetPixels(), c.rgba.data(), c.rgba.size());
+    memcpy(tex->GetPixels(), c.rgba->data(), c.rgba->size());
     ImGui::RegisterUserTexture(tex);
     g_caption_tex.push_back({c.start, c.x, c.y, c.w, c.h, tex, true});
     return tex;
@@ -719,7 +721,7 @@ static void draw_captions(const UiState& s, float bottom) {
         pic = {(io.DisplaySize.x - s.video_w * f) / 2, (io.DisplaySize.y - s.video_h * f) / 2, s.video_w * f, s.video_h * f};
     }
     for (const Cue* c : act)
-        if (!c->rgba.empty())
+        if (c->rgba)
             if (ImTextureData* tex = caption_texture(*c)) {
                 Rect r = place_picture(*c, pic, {0, 0, io.DisplaySize.x, io.DisplaySize.y}, bottom);
                 dl->AddImage(tex->GetTexRef(), {r.x, r.y}, {r.x + r.w, r.y + r.h});
@@ -738,7 +740,10 @@ static void draw_captions(const UiState& s, float bottom) {
             const char *p = para.c_str(), *e = p + para.size();
             while (p < e) {
                 const char* cut = font->CalcWordWrapPosition(px, p, e, wrap);
-                if (cut <= p) cut = p + 1;
+                if (cut <= p) {  // one word wider than the screen: a whole character at a time, never half
+                    cut = p + 1;
+                    while (cut < e && ((unsigned char)*cut & 0xC0) == 0x80) cut++;
+                }
                 std::string l(p, cut);
                 while (!l.empty() && l.back() == ' ') l.pop_back();
                 lines.push_back(l);
@@ -1304,7 +1309,8 @@ int ui_selftest() {
             check(last_caption_rect().w == 0);
             Cue pic;  // a picture subtitle: placed in the window, drawn
             pic.start = 10, pic.end = 14, pic.x = 660, pic.y = 980, pic.w = 600, pic.h = 60;
-            pic.canvas_w = 1920, pic.canvas_h = 1080, pic.rgba.assign(600 * 60 * 4, 255);
+            pic.canvas_w = 1920, pic.canvas_h = 1080;
+            pic.rgba = std::make_shared<const std::vector<uint8_t>>(600 * 60 * 4, 255);
             cues = {pic};
             cs.settings.captions = true, cs.caption_track = 0;
             frames(cs, 2, .1);
