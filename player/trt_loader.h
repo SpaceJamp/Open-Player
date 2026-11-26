@@ -14,6 +14,19 @@ std::vector<std::string> tensorrt_candidates(const std::string& user_folder, con
 TrtFrom load_tensorrt(const std::string& user_folder, std::string& version, std::string& why_not);
 std::string trt_line(TrtFrom from, const std::string& version, const std::string& why_not);  // "TensorRT: ..."
 
+// Pixel Flow's engine: the full TensorRT (faster) when it loaded, else TensorRT for RTX, else none.
+enum class Engine { None, Full, Rtx };
+Engine choose_engine(bool full_ok, bool rtx_ok);
+std::string rtx_dll_name(int minor);     // "tensorrt_rtx_1_<minor>.dll"
+std::string rtx_parser_name(int minor);  // "tensorrt_onnxparser_rtx_1_<minor>.dll"
+// TensorRT for RTX: the newest version this build supports (rtx_minors()) found in user_folder, the add-on or next to
+// the program, loaded. minor: its minor version (-1: none).
+bool load_trt_rtx(const std::string& user_folder, std::string& version, int& minor, std::string& why_not);
+const std::vector<int>& rtx_minors();  // the TensorRT for RTX versions compiled in, newest first (1.8 -> 8)
+void* rtx_module();         // the loaded TensorRT for RTX DLL (HMODULE), for its entry points; nullptr: none
+void* rtx_parser_module();  // its ONNX parser DLL
+// "Pixel Flow engine: TensorRT 11.5.0 (add-on)" / "... TensorRT for RTX 1.7.1" / "... none (...)"
+std::string engine_line(Engine e, const std::string& full_line, const std::string& rtx_version, const std::string& rtx_why);
 std::string user_data_dir();  // %LOCALAPPDATA%\Open Player (Linux: ~/.local/share/open-player): the user's model
 std::string training_addon_dir();  // user_data_dir()\training: the Training add-on (Python, PyTorch, FFmpeg)
 std::string training_work_dir();   // user_data_dir()\training-work: the player's own training run

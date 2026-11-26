@@ -154,6 +154,80 @@ std::string driver_line() {
     return "NVIDIA driver: CUDA " + std::to_string(v / 1000) + "." + std::to_string(v % 1000 / 10);
 }
 
+Engine choose_engine(bool full_ok, bool rtx_ok) { return full_ok ? Engine::Full : rtx_ok ? Engine::Rtx : Engine::None; }
+std::string rtx_dll_name(int minor) { return "tensorrt_rtx_1_" + std::to_string(minor) + ".dll"; }
+std::string rtx_parser_name(int minor) { return "tensorrt_onnxparser_rtx_1_" + std::to_string(minor) + ".dll"; }
+
+const std::vector<int>& rtx_minors() {
+    static const std::vector<int> v = {
+#ifdef HAVE_TRT_RTX_1_8
+        8,
+#endif
+#ifdef HAVE_TRT_RTX_1_7
+        7,
+#endif
+    };
+    return v;
+}
+
+#ifdef _WIN32
+static HMODULE g_rtx = nullptr, g_rtx_parser = nullptr;  // kept loaded: the engine code takes its entry points
+#endif
+void* rtx_module() {
+#ifdef _WIN32
+    return g_rtx;
+#else
+    return nullptr;
+#endif
+}
+void* rtx_parser_module() {
+#ifdef _WIN32
+    return g_rtx_parser;
+#else
+    return nullptr;
+#endif
+}
+
+bool load_trt_rtx(const std::string& user_folder, std::string& version, int& minor, std::string& why_not) {
+    minor = -1;
+    why_not = rtx_minors().empty() ? "this build has no TensorRT for RTX" : "not installed";
+#ifdef _WIN32
+    for (int m : rtx_minors())  // newest first: a 1.8 you chose wins over the 1.7 add-on
+        for (const std::string& dir : {user_folder, rtx_addon_dir(), exe_dir().u8string()}) {
+            if (dir.empty()) continue;
+            const fs::path d = fs::u8path(dir);
+            std::error_code ec;
+            if (!fs::exists(d / rtx_dll_name(m), ec)) continue;
+            SetDllDirectoryW(d.wstring().c_str());
+            HMODULE lib = LoadLibraryExW((d / rtx_dll_name(m)).wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+            HMODULE parser = lib ? LoadLibraryExW((d / rtx_parser_name(m)).wstring().c_str(), nullptr,
+                                                  LOAD_WITH_ALTERED_SEARCH_PATH)
+                                 : nullptr;
+            SetDllDirectoryW(L"");  // back to: never the current folder
+            auto ver = lib ? (int32_t(*)())GetProcAddress(lib, "getInferLibVersion") : nullptr;
+            const int v = ver ? ver() : 0;
+            if (!lib || !parser || !ver || v / 10000 != 1 || v / 100 % 100 != m) {  // the DLL must be what its name says
+                why_not = "can't load TensorRT for RTX from " + dir;
+                if (parser) FreeLibrary(parser);
+                if (lib) FreeLibrary(lib);
+                continue;
+            }
+            g_rtx = lib, g_rtx_parser = parser, version = dotted(v), minor = m;
+            return true;
+        }
+#else
+    (void)user_folder, (void)version;
+#endif
+    return false;
+}
+
+std::string engine_line(Engine e, const std::string& full_line, const std::string& rtx_version, const std::string& rtx_why) {
+    (void)rtx_why;
+    if (e == Engine::Full) return "Pixel Flow engine: TensorRT " + full_line.substr(full_line.find(':') + 2);
+    if (e == Engine::Rtx) return "Pixel Flow engine: TensorRT for RTX " + rtx_version;
+    return "Pixel Flow engine: none (download TensorRT for RTX in Settings > Upscaling)";
+}
+
 int trt_loader_selftest() {
     int fails = 0;
 #define check(cond) \
@@ -172,6 +246,23 @@ int trt_loader_selftest() {
     check(settings_parse(settings_format(s)).trt_folder == s.trt_folder);
     check(settings_parse("trt_folder=a\nb\n").trt_folder == "a");
     check(!user_data_dir().empty() && addon_dir().find(user_data_dir()) == 0);
+
+    // the engine: the full TensorRT when it's there (faster), else TensorRT for RTX
+    check(choose_engine(true, true) == Engine::Full && choose_engine(false, true) == Engine::Rtx);
+    check(choose_engine(true, false) == Engine::Full && choose_engine(false, false) == Engine::None);
+    check(engine_line(Engine::Full, "TensorRT: 11.5.0 (add-on)", "", "") == "Pixel Flow engine: TensorRT 11.5.0 (add-on)");
+    check(engine_line(Engine::Rtx, "TensorRT: not installed", "1.7.1", "") ==
+          "Pixel Flow engine: TensorRT for RTX 1.7.1");
+    check(engine_line(Engine::None, "TensorRT: not installed", "", "not installed") ==
+          "Pixel Flow engine: none (download TensorRT for RTX in Settings > Upscaling)");
+    check(rtx_dll_name(8) == "tensorrt_rtx_1_8.dll" && rtx_parser_name(7) == "tensorrt_onnxparser_rtx_1_7.dll");
+    {  // nothing installed (a temp data folder): not loaded, and says why
+        _putenv_s("XDG_DATA_HOME", (fs::temp_directory_path() / "op-rtx-none").string().c_str());
+        std::string ver, why;
+        int minor = -1;
+        check(!load_trt_rtx("", ver, minor, why) && !why.empty() && minor == -1);
+        _putenv_s("XDG_DATA_HOME", "");
+    }
 #undef check
     return fails ? 1 : 0;
 }
