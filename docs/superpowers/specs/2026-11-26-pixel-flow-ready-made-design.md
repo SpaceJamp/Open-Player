@@ -29,8 +29,12 @@ download the player, not only the maintainer. Also drop the 1.9 GB TensorRT add-
 
 Not decided yet. Options under study:
 1. TensorRT's small "lean" runtime shipped in the installer, with engines built once as version- and
-   hardware-compatible. Smallest change; may exclude some older GPUs and lose some speed. Facts being checked:
-   runtime size, supported GPUs, dynamic shapes, INT8/FP8.
+   hardware-compatible. Smallest change. What NVIDIA's Engine Compatibility page (TensorRT 11.5, updated
+   2026-11-18) says: a version-compatible engine carries its own copy of the lean runtime; both modes "can be
+   slower"; hardware compatibility (AMPERE_PLUS, compute capability 8.0+) is stated only for Linux ARM SBSA, not
+   x86_64 Linux or Windows; FP8 is named only for the same-GPU-generation mode. Inference: RTX 20 (Turing, 7.5)
+   would be left out. Unknown: runtime size (PyPI page unreadable), dynamic shapes and INT8 in these modes. Risky
+   until tested on x86_64.
 2. Pixel Flow's layers written as the player's own CUDA kernels (Tensor Cores, fp16/int8): no library to ship,
    full control, but a lot of work and must match TensorRT's speed.
 3. Vulkan compute (for example ncnn): small and could later run on AMD/Intel, but likely slower on NVIDIA and
