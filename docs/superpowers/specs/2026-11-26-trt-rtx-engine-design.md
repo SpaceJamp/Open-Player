@@ -1,6 +1,6 @@
 # Pixel Flow on TensorRT for RTX (project 1 of the ready-made Pixel Flow plan)
 
-Date: 2026-11-26. Status: draft, reviewed by a builder check, waiting for the user's approval. Windows only for now; Linux later (must not be
+Date: 2026-11-26. Status: approved by the user (2026-11-26); reviewed by a builder check. Windows only for now; Linux later (must not be
 ruled out). Parent draft: `2026-11-26-pixel-flow-ready-made-design.md` (engine spike results there).
 
 ## Intent
