@@ -45,6 +45,7 @@
 #include "addon.h"
 #include "training_addon.h"
 #include "training_run.h"
+#include "captions.h"
 #include "update.h"
 #ifdef HAVE_RTX_VSR
 #include "rtx_vsr.h"
@@ -652,6 +653,7 @@ int main(int argc, char** argv) {
             });
         };
         if (!cfg.train_videos.empty()) count_videos(cfg.train_videos);
+
         auto start_own_training = [&](StartMode m) {
             std::string err;
             if (start_training(cfg.train_videos, m, err)) training_error.clear(), training_read_at = -10;
@@ -705,6 +707,32 @@ int main(int argc, char** argv) {
                 pending_restart.push_back(f);
             restart_at = now() + 0.25;
         };
+        // Captions: the file's English tracks; on: the chosen one (the default: SDH first), off: a forced one only
+        const std::vector<CaptionTrack>& cap_tracks = media.caption_tracks();
+        std::vector<std::string> cap_names;
+        for (auto& t : cap_tracks) cap_names.push_back(t.name);
+        int cap_track = -1, cue_seen = -1;
+        bool cap_forced = false;
+        std::vector<Cue> cue_copy;  // the UI's copy, refreshed when Media's cues change
+        auto apply_captions = [&](int pick) {  // pick < 0: the default track
+            if (!cfg.captions) {
+                const int f = forced_track(cap_tracks);
+                cap_track = -1, cap_forced = f >= 0;
+                media.set_captions(-1, f);
+                return;
+            }
+            cap_track = pick >= 0 && pick < (int)cap_tracks.size() ? pick : default_track(cap_tracks), cap_forced = false;
+            media.set_captions(cap_track, -1);
+            if (cap_track >= 0) fprintf(stderr, "captions: %s\n", cap_tracks[cap_track].name.c_str());
+        };
+        auto set_captions_on = [&](bool on, int pick) {
+            saved.captions = cfg.captions = on, save_prefs();  // remembered even for a file without captions
+            if (cap_tracks.empty()) return post(ICON_BADGE_CC, on ? "Captions on (this video has no English ones)" : "Captions off", -1, 2);
+            apply_captions(pick);
+            post(ICON_BADGE_CC, cap_track >= 0 ? "Captions: " + cap_tracks[cap_track].name : std::string("Captions off"), -1, 2);
+        };
+        apply_captions(-1);
+
         auto toggle_settings = [&] {
             settings_open = !settings_open, dirty = true;
             if (settings_open) monitors = list_screens(&screen_ids);
@@ -819,6 +847,7 @@ int main(int argc, char** argv) {
                     case SDLK_V: toggle_vsr(); break;
                     case SDLK_F: toggle_fullscreen(); break;
                     case SDLK_I: show_info = !show_info, dirty = true; break;
+                    case SDLK_C: set_captions_on(!cfg.captions, -1), dirty = true; break;
                     case SDLK_S: toggle_settings(); break;
                     case SDLK_ESCAPE:
                         if (settings_open) { toggle_settings(); break; }  // the card first, then fullscreen, then quit
@@ -958,6 +987,10 @@ int main(int argc, char** argv) {
                         ui_redraw = std::max(ui_redraw, 1);  // paused, nothing else redraws: the tab must still update
                 }
                 us.training = training, us.training_known = training_known, us.now_unix = (long long)time(nullptr);
+                if (media.cues_version() != cue_seen)  // new cues while paused must still show
+                    cue_seen = media.cues_version(), cue_copy = media.cues(), ui_redraw = std::max(ui_redraw, 1);
+                us.cues = &cue_copy, us.cue_pos = pos, us.video_w = w, us.video_h = h;
+                us.caption_names = cap_names, us.caption_track = cap_track, us.caption_forced = cap_forced;
                 us.train_video_count = video_count, us.training_addon = tr_addon, us.training_error = training_error;
                 us.training_addon_progress = tr_running ? (float)((double)tr_got / training_addon_size()) : -1;
                 us.training_own = training_known && own_run(training), us.training_log = train_log();
@@ -1033,6 +1066,8 @@ int main(int argc, char** argv) {
                     case UiAction::ChooseTensorRTFolder: show_folder_dialog(); break;
                     case UiAction::SetCheckUpdates: saved.check_updates = cfg.check_updates = a.value != 0, save_prefs(); break;
                     case UiAction::SetSettingsTab: saved.settings_tab = cfg.settings_tab = (int)a.value, save_prefs(); break;
+                    case UiAction::ToggleCaptions: set_captions_on(!cfg.captions, -1); break;
+                    case UiAction::SetCaptionTrack: set_captions_on(a.value >= 0, (int)a.value); break;
                     case UiAction::SetRememberPosition:
                         saved.remember_position = cfg.remember_position = a.value != 0, save_prefs();
                         break;

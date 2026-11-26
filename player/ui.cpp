@@ -18,6 +18,7 @@
 #include "addon.h"
 #include "training_addon.h"
 #include "training_run.h"
+#include "captions.h"
 #include "imgui.h"
 #include "imgui_internal.h"  // the self-test finds the volume panel's window
 #include "theme.h"
@@ -590,6 +591,12 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
             out.push_back({UiAction::SetRememberPosition, s.settings.remember_position ? 0.0 : 1.0});
         card_row_end(row, rh + 4 * sc);
     }
+    {
+        float rh = 0;
+        ImVec2 row = ImGui::GetCursorScreenPos(), c = card_row("Captions (English)", 22 * sc, 40 * sc, sc, rh);
+        if (toggle("##captions", c, s.settings.captions, sc)) out.push_back({UiAction::ToggleCaptions, 0.0});
+        card_row_end(row, rh + 4 * sc);
+    }
     } else {  // About
 
     card_heading(ICON_INFO, "ABOUT", sc);
@@ -648,6 +655,118 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
 
 static bool training_running(const UiState& s) {
     return s.training_known && s.training.state == "training" && !training_stale(s.training, s.now_unix);
+}
+
+static Rect g_caption_rect{};
+Rect last_caption_rect() { return g_caption_rect; }
+
+// Picture subtitles become ImGui-managed textures (the Vulkan backend uploads them); kept while their cue shows.
+struct CaptionTex {
+    double start;
+    int x, y, w, h;
+    ImTextureData* tex;
+    bool used;
+};
+static std::vector<CaptionTex> g_caption_tex;
+
+static ImTextureData* caption_texture(const Cue& c) {
+    for (auto& t : g_caption_tex)  // never one already given up: the backend may destroy it any frame now
+        if (t.start == c.start && t.x == c.x && t.y == c.y && t.w == c.w && t.h == c.h && !t.tex->WantDestroyNextFrame &&
+            t.tex->Status != ImTextureStatus_WantDestroy && t.tex->Status != ImTextureStatus_Destroyed)
+            return t.used = true, t.tex;
+    if (g_caption_tex.size() >= 16 || !c.rgba || c.rgba->size() != (size_t)c.w * c.h * 4) return nullptr;
+    auto* tex = IM_NEW(ImTextureData)();
+    tex->Create(ImTextureFormat_RGBA32, c.w, c.h);
+    memcpy(tex->GetPixels(), c.rgba->data(), c.rgba->size());
+    ImGui::RegisterUserTexture(tex);
+    g_caption_tex.push_back({c.start, c.x, c.y, c.w, c.h, tex, true});
+    return tex;
+}
+
+static void sweep_caption_textures() {
+    for (size_t i = 0; i < g_caption_tex.size();) {
+        CaptionTex& t = g_caption_tex[i];
+        if (t.used) {
+            t.used = false, i++;
+            continue;
+        }
+        // not shown any more: let the backend destroy it, then forget it (never uploaded: forget at once)
+        if (t.tex->Status == ImTextureStatus_OK) {
+            t.tex->WantDestroyNextFrame = true;
+            i++;
+            continue;
+        }
+        if (t.tex->Status == ImTextureStatus_WantDestroy) { i++; continue; }
+        ImGui::UnregisterUserTexture(t.tex);
+        IM_DELETE(t.tex);
+        g_caption_tex.erase(g_caption_tex.begin() + i);
+    }
+}
+
+// The active cues: text bottom centre (white, black outline, 4.6% of the height, at most 3 lines), pictures where
+// their canvas puts them on the shown picture; both kept above bottom (the capsule while it shows).
+static void draw_captions(const UiState& s, float bottom) {
+    g_caption_rect = {};
+    const ImGuiIO& io = ImGui::GetIO();
+    const bool on = s.caption_track >= 0 || s.caption_forced;  // off: a forced track still shows
+    if (!s.cues || !on) return sweep_caption_textures();
+    const std::vector<const Cue*> act = active_cues(*s.cues, s.cue_pos);
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    auto grow = [&](float a, float b, float c, float d) { x0 = std::fmin(x0, a), y0 = std::fmin(y0, b), x1 = std::fmax(x1, c), y1 = std::fmax(y1, d); };
+    // the picture as the display shows it: fitted into the window, centred
+    Rect pic{0, 0, io.DisplaySize.x, io.DisplaySize.y};
+    if (s.video_w > 0 && s.video_h > 0) {
+        const float f = std::fmin(io.DisplaySize.x / s.video_w, io.DisplaySize.y / s.video_h);
+        pic = {(io.DisplaySize.x - s.video_w * f) / 2, (io.DisplaySize.y - s.video_h * f) / 2, s.video_w * f, s.video_h * f};
+    }
+    for (const Cue* c : act)
+        if (c->rgba)
+            if (ImTextureData* tex = caption_texture(*c)) {
+                Rect r = place_picture(*c, pic, {0, 0, io.DisplaySize.x, io.DisplaySize.y}, bottom);
+                dl->AddImage(tex->GetTexRef(), {r.x, r.y}, {r.x + r.w, r.y + r.h});
+                grow(r.x, r.y, r.x + r.w, r.y + r.h);
+            }
+    sweep_caption_textures();
+    // text: every active line, wrapped at 80% of the width, the last 3 lines kept
+    ImFont* font = ImGui::GetFont();
+    const float px = std::round(io.DisplaySize.y * .046f), wrap = io.DisplaySize.x * .8f, lh = std::round(px * 1.2f);
+    std::vector<std::string> lines;
+    for (const Cue* c : act) {
+        size_t a = 0;
+        while (a <= c->text.size() && !c->text.empty()) {
+            size_t nl = c->text.find('\n', a);
+            const std::string para = c->text.substr(a, nl == std::string::npos ? std::string::npos : nl - a);
+            const char *p = para.c_str(), *e = p + para.size();
+            while (p < e) {
+                const char* cut = font->CalcWordWrapPosition(px, p, e, wrap);
+                if (cut <= p) {  // one word wider than the screen: a whole character at a time, never half
+                    cut = p + 1;
+                    while (cut < e && ((unsigned char)*cut & 0xC0) == 0x80) cut++;
+                }
+                std::string l(p, cut);
+                while (!l.empty() && l.back() == ' ') l.pop_back();
+                lines.push_back(l);
+                p = cut;
+                while (p < e && *p == ' ') p++;
+            }
+            if (nl == std::string::npos) break;
+            a = nl + 1;
+        }
+    }
+    if (lines.size() > 3) lines.erase(lines.begin(), lines.end() - 3);
+    const float o = std::fmax(1.f, std::round(px * .06f));
+    float y = bottom - lines.size() * lh;
+    for (const std::string& l : lines) {
+        const float w = font->CalcTextSizeA(px, FLT_MAX, 0, l.c_str()).x, x = std::round((io.DisplaySize.x - w) / 2);
+        for (int dx = -1; dx <= 1; dx++)
+            for (int dy = -1; dy <= 1; dy++)
+                if (dx || dy) dl->AddText(font, px, {x + dx * o, y + dy * o}, IM_COL32(0, 0, 0, 230), l.c_str());
+        dl->AddText(font, px, {x, y}, IM_COL32_WHITE, l.c_str());
+        grow(x - o, y - o, x + w + o, y + lh);
+        y += lh;
+    }
+    if (x1 > x0) g_caption_rect = {x0, y0, x1 - x0, y1 - y0};
 }
 
 std::vector<TrainButton> training_buttons(const UiState& s) {
@@ -771,6 +890,7 @@ std::vector<UiAction> draw_ui(const UiState& s) {
         const float seek_x = x + button_w(play_l, bh, sc) + gap + tw + seek_gap;
         const float right = seek_gap + tw + gap + button_w(vol_l, bh, sc) + gap +
                             (s.vsr_available ? badge_w + gap : 0) + button_w("Settings", bh, sc) + gap +
+                            (s.caption_names.empty() ? 0 : button_w("CC", bh, sc) + gap) +
                             button_w("Open", bh, sc) + gap +
                             button_w(fs_l, bh, sc) + pad;
         const float seek_w = std::fmax(c1.x - right - seek_x, 1);
@@ -806,6 +926,14 @@ std::vector<UiAction> draw_ui(const UiState& s) {
         vol_hover = ImGui::IsItemHovered();
         const float vol_cx = x + button_w(vol_l, bh, sc) / 2;
         x += button_w(vol_l, bh, sc) + gap;
+
+        if (!s.caption_names.empty()) {  // captions, highlighted while on
+            if (s.caption_track >= 0)
+                dl->AddRectFilled({x, cy - bh / 2}, {x + button_w("CC", bh, sc), cy + bh / 2}, col(COL_VSR_ON), bh / 2);
+            if (icon_button("##cc", ICON_BADGE_CC, "CC", {x, cy - bh / 2}, bh, sc)) out.push_back({UiAction::ToggleCaptions});
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Captions (C)");
+            x += button_w("CC", bh, sc) + gap;
+        }
 
         if (s.vsr_available) {  // no badge when this video isn't upscaled
             const ImVec2 b0{x, std::round(cy - badge_h / 2)}, b1{x + badge_w, b0.y + badge_h};
@@ -855,6 +983,8 @@ std::vector<UiAction> draw_ui(const UiState& s) {
     }
     g_vol_open = vol_hover;
     if (!vol_hover) g_vol_held = false;
+    // captions sit above the capsule while it shows, so they never collide
+    draw_captions(s, g_alpha > .01f ? c0.y - 8 * sc : io.DisplaySize.y * .95f);
 
     g_notice = s.notice;
     if (float a = notice_alpha(s.now, s.notice); a > 0) draw_notice(s.notice, sc, a);
@@ -900,6 +1030,14 @@ std::vector<UiAction> draw_ui(const UiState& s) {
         if (ImGui::MenuItem(item(s.fullscreen ? ICON_MINIMIZE : ICON_MAXIMIZE, "Fullscreen").c_str(), "F", s.fullscreen))
             out.push_back({UiAction::ToggleFullscreen});
         if (ImGui::MenuItem(item(ICON_INFO, "Info").c_str(), "I", s.show_info)) out.push_back({UiAction::ToggleInfo});
+        if (!s.caption_names.empty() && ImGui::BeginMenu(item(ICON_BADGE_CC, "Captions").c_str())) {
+            if (ImGui::MenuItem("Off", "C", s.caption_track < 0)) out.push_back({UiAction::SetCaptionTrack, -1.0});
+            for (size_t i = 0; i < s.caption_names.size(); i++)
+                if (ImGui::MenuItem((s.caption_names[i] + "##cap" + std::to_string(i)).c_str(), nullptr,
+                                    s.caption_track == (int)i))
+                    out.push_back({UiAction::SetCaptionTrack, (double)i});
+            ImGui::EndMenu();
+        }
         if (ImGui::MenuItem(item(ICON_SETTINGS, "Settings").c_str(), "S", s.settings_open))
             out.push_back({UiAction::ToggleSettings});
         ImGui::Separator();
@@ -1147,6 +1285,41 @@ int ui_selftest() {
             }
             io.AddMousePosEvent(5, 5);
         }
+        // captions: drawn above the control bar while it shows, low when it's hidden; pictures inside the window
+        {
+            io.DisplaySize = {1920, 1080};
+            std::vector<Cue> cues = {{10, 14, "Hello there"}};
+            UiState cs{12, 600, 90, 90, true, true, true, false, false, 0.8f, "", {}};
+            cs.settings.captions = true, cs.cues = &cues, cs.cue_pos = 12, cs.video_w = 1920, cs.video_h = 800;
+            cs.caption_names = {"English (SDH)"}, cs.caption_track = 0;
+            frames(cs, 3, .2);  // paused: the bar shows
+            Rect r = last_caption_rect();
+            const float capsule_top = 1080 - 14 - 48;
+            check(r.w > 0 && r.y + r.h <= capsule_top && r.x > 0 && r.x + r.w < 1920);
+            check(r.h >= .046f * 1080 * .9f);  // big enough to read from the sofa
+            cs.paused = false, cs.last_mouse = cs.now - 10;  // playing, mouse idle: the bar fades away
+            frames(cs, 5, .2);
+            Rect low = last_caption_rect();
+            check(low.w > 0 && low.y > r.y && low.y + low.h <= 1080);
+            cs.cue_pos = 20;  // nothing due
+            frames(cs, 1, 0);
+            check(last_caption_rect().w == 0);
+            cs.cue_pos = 12, cs.settings.captions = false, cs.caption_track = -1;  // off: nothing drawn
+            frames(cs, 1, 0);
+            check(last_caption_rect().w == 0);
+            Cue pic;  // a picture subtitle: placed in the window, drawn
+            pic.start = 10, pic.end = 14, pic.x = 660, pic.y = 980, pic.w = 600, pic.h = 60;
+            pic.canvas_w = 1920, pic.canvas_h = 1080;
+            pic.rgba = std::make_shared<const std::vector<uint8_t>>(600 * 60 * 4, 255);
+            cues = {pic};
+            cs.settings.captions = true, cs.caption_track = 0;
+            frames(cs, 2, .1);
+            Rect pr = last_caption_rect();
+            check(pr.w > 0 && pr.y >= 0 && pr.y + pr.h <= 1080);
+            Settings cap;
+            cap.captions = true;
+            check(settings_parse(settings_format(cap)).captions && !settings_parse("").captions);
+        }
         // the Training tab's buttons and notes in each state, and every state draws at both scales
         {
             auto labels = [](const UiState& s) {
@@ -1299,6 +1472,7 @@ int ui_selftest() {
     fails += addon_selftest();
     fails += training_addon_selftest();
     fails += training_run_selftest();
+    fails += captions_selftest();
     if (!fails) printf("ui checks passed\n");
     return fails ? 1 : 0;
 }

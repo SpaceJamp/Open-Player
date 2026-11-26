@@ -1,5 +1,7 @@
 #include "media.h"
 
+#include <algorithm>
+
 extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_cuda.h>
@@ -89,6 +91,7 @@ bool Media::open(const char* path, int cuda_device, bool nvdec) {
     }
     if (!audio_) aidx_ = -1, avcodec_free_context(&actx_);
 
+    tracks_ = list_tracks(fmt_, path);
     frame_ = av_frame_alloc();
     thread_ = std::thread(&Media::run, this);
     return true;
@@ -143,6 +146,14 @@ void Media::run() {
             if (quit_) break;
             if (seek_req_) {
                 seek_req_ = false;
+                if (cap_change_) {
+                    l.unlock();
+                    apply_captions();  // opens decoders, maybe reads a .srt: not under the lock
+                    l.lock();
+                }
+                cues_.clear(), cue_ver_++;  // embedded cues come back as the demuxer reaches them again
+                for (auto& d : cap_dec_)
+                    if (d) d->flush();
                 double t = seek_to_;
                 int64_t ts = (int64_t)((t + start_) * AV_TIME_BASE);
                 avformat_seek_file(fmt_, -1, INT64_MIN, ts, ts, 0);  // lands on the keyframe at or before t
@@ -180,6 +191,25 @@ void Media::run() {
         if (pkt->stream_index == vidx_ && (room && backlog_.empty())) decode(vctx_, pkt);
         else if (pkt->stream_index == vidx_) backlog_.push_back(av_packet_clone(pkt));
         else if (pkt->stream_index == aidx_) decode(actx_, pkt);
+        else
+            for (int k = 0; k < 2; k++)
+                if (pkt->stream_index == cap_stream_[k]) {
+                    std::vector<Cue> got;
+                    cap_dec_[k]->feed(pkt, got);
+                    if (got.empty()) continue;
+                    std::lock_guard l(m_);
+                    // a film's worth of pictures would pile up: forget cues that began over a minute before now
+                    const double old = shown_pts_ - 60;
+                    cues_.erase(std::remove_if(cues_.begin(), cues_.end(), [&](const Cue& c) { return c.start < old; }),
+                                cues_.end());
+                    for (auto& c : got) {  // playback seconds start at the file's start time
+                        c.start -= start_;
+                        if (c.end >= 0) c.end -= start_;
+                        if (cues_.size() >= MAX_CUES) cues_.erase(cues_.begin(), cues_.begin() + MAX_CUES / 2);
+                        cues_.push_back(std::move(c));
+                    }
+                    cue_ver_++;
+                }
         av_packet_unref(pkt);
     }
     av_packet_free(&pkt);
@@ -257,6 +287,7 @@ bool Media::take_due(double clock, double lead, bool force, AVFrame*& frame, dou
     }
     cv_.notify_all();
     frame = q.f, pts = q.pts;
+    shown_pts_ = pts;
     return true;
 }
 
@@ -274,11 +305,52 @@ bool Media::finished() {
     return eof_ && queue_.empty() && !seek_req_;
 }
 
+void Media::set_captions(int track, int forced) {
+    double at;
+    {
+        std::lock_guard l(m_);
+        if (cap_want_[0] == track && cap_want_[1] == forced) return;
+        cap_want_[0] = track, cap_want_[1] = forced, cap_change_ = true;
+        if (seek_req_) return;  // a seek is on its way: it applies the change, and lands where it was asked to
+        at = reseek_target(serial_ < seek_serial_, last_seek_, shown_pts_);
+    }
+    seek(at);  // re-read from here, so the new track's cues around now arrive
+}
+
+void Media::apply_captions() {
+    int want[2];
+    {
+        std::lock_guard l(m_);
+        want[0] = cap_want_[0], want[1] = cap_want_[1], cap_change_ = false;
+    }
+    std::vector<Cue> side;
+    for (int k = 0; k < 2; k++) {
+        cap_stream_[k] = -1;
+        cap_dec_[k] = std::make_unique<CueDecoder>();
+        if (want[k] < 0 || want[k] >= (int)tracks_.size()) continue;
+        const CaptionTrack& t = tracks_[want[k]];
+        if (t.stream >= 0) {
+            if (cap_dec_[k]->open(fmt_->streams[t.stream])) cap_stream_[k] = t.stream;
+        } else
+            for (auto& c : read_sidecar(t.sidecar)) side.push_back(std::move(c));
+    }
+    std::lock_guard l(m_);
+    sidecar_cues_ = std::move(side);
+    cue_ver_++;
+}
+
+std::vector<Cue> Media::cues() {
+    std::lock_guard l(m_);
+    std::vector<Cue> all = cues_;
+    all.insert(all.end(), sidecar_cues_.begin(), sidecar_cues_.end());
+    return all;
+}
+
 void Media::seek(double seconds) {
     {
         std::lock_guard l(m_);
         seek_to_ = std::fmax(0, duration_ > 0 ? std::fmin(seconds, duration_ - 0.5) : seconds);
-        seek_req_ = true;
+        seek_req_ = true, last_seek_ = seek_to_, seek_serial_ = serial_ + 1;
     }
     cv_.notify_all();
 }
