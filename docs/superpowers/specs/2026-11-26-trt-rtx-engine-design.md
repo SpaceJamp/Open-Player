@@ -68,3 +68,10 @@ resolution. The user wants Pixel Flow to work for people who download the player
 - Tests: add-on unpack/verify/refuse in `--uitest`; engine choice order; `--selftest` against the PyTorch
   reference on both engines; speed check in `--stats`.
 - Four bug-check agents at the end, one a security review.
+
+## Builder check (answered)
+
+- **The wheel is self-contained:** the spike re-run with PATH = Windows folders only (no CUDA toolkit) built the
+  engine in 2.8 s and ran at 30.0 ms/frame with identical output. Kept files: `tensorrt_rtx_1_7.dll` (229 MB
+  unpacked), `tensorrt_onnxparser_rtx_1_7.dll`, `cudart64_13.dll`, `tensorrt_plugins.dll` only if the build needs
+  it (builder checks), NVIDIA's README/licence. The library names cuDNN/NCCL/nvrtc-builtins but didn't need them.
