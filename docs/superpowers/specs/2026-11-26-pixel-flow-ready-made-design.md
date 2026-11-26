@@ -82,3 +82,10 @@ Pixel Flow standard (vsr_best.pt from the in-player run, fp16 ONNX, strongly typ
 TensorRT for RTX output vs ONNX Runtime CPU (fp16, 96x128): mean abs diff 0.004, max 0.058.
 Reading: the lean route needs hardware the maintainer doesn't have; TensorRT for RTX is practical but standard
 drops under 30 fps at 1080p -> 4K; fast (9-13 ms on full TensorRT) or 8-bit would restore it (untested on TRT-RTX).
+
+### Decided (the user, 2026-11-26): engine
+
+- **TensorRT for RTX by default; the full TensorRT add-on stays as an optional speed boost** (25% faster here).
+  When the add-on is present the player uses it, else TensorRT for RTX.
+- My call (builder detail): drive TensorRT for RTX through its own C++ API (its interfaces follow TensorRT's, so
+  vsr.cpp's engine code ports closely), not through ONNX Runtime (one runtime fewer to ship).
