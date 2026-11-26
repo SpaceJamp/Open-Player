@@ -67,3 +67,18 @@ Not decided yet. Options under study:
   after 1 removes the 3.6 GB add-on.
 - **Windows first (the user, 2026-11-26):** optimise for Windows now; Linux (support + download) stays a
   requirement for later, so choices must not rule it out, but the spike and project 1 are Windows-only.
+
+### Engine spike, RTX 5080, Windows (2026-11-26; throwaway, scratch only)
+
+Pixel Flow standard (vsr_best.pt from the in-player run, fp16 ONNX, strongly typed), 1080p -> 4K, median per frame:
+
+| engine | download | ms/frame | first build on the user's PC | catch |
+|---|---|---|---|---|
+| full TensorRT 11.5 (today) | 1.9 GB | 22.9 | 26 s | the add-on |
+| lean runtime, version-compatible engine | 13 MB | 22.8 | none | engine must be prebuilt per GPU generation, on that GPU |
+| lean, + hardware-compatible (ampere+) | 13 MB | 25.9 | none | works on Windows here; unproven on other GPUs; no RTX 20 |
+| TensorRT for RTX 1.7 (ORT EP 0.5.0) | 106 MB | 28.5 (CUDA graphs: same) | 1.7-2.8 s | 25% slower than full TensorRT |
+
+TensorRT for RTX output vs ONNX Runtime CPU (fp16, 96x128): mean abs diff 0.004, max 0.058.
+Reading: the lean route needs hardware the maintainer doesn't have; TensorRT for RTX is practical but standard
+drops under 30 fps at 1080p -> 4K; fast (9-13 ms on full TensorRT) or 8-bit would restore it (untested on TRT-RTX).
