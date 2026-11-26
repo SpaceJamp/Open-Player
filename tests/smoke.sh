@@ -33,6 +33,16 @@ check "plays past where the audio ends (reached ${t:-nothing} of 6 s)" "$(at_lea
 timeout -s "$SIG" 4 "$P" "$T/short_audio.mp4" --no-vsr "${SCREEN[@]}" --stats 2>/dev/null | grep -q '"ui_ms":[0-9.]*,"ui_max_ms":[0-9.]*,"ui_vtx"' && ok=yes || ok=no
 check "stats include UI timings" "$ok"
 
+# captions: a video with an embedded English SubRip track and captions on picks that track and keeps playing
+printf '1\n00:00:00,500 --> 00:00:03,000\nHello there\n\n' > "$T/cc.srt"
+ffmpeg -v error -f lavfi -i testsrc2=size=640x360:rate=30 -i "$T/cc.srt" -t 4 -c:v libx264 -pix_fmt yuv420p \
+  -c:s srt -metadata:s:s:0 language=eng "$T/cc.mkv"
+mkdir -p "$T/open-player" && printf 'captions=1\n' > "$T/open-player/settings.txt"
+timeout -s "$SIG" 4 "$P" "$T/cc.mkv" --no-vsr "${SCREEN[@]}" 2>&1 | grep -q '^captions: English' && ok=yes || ok=no
+t=$(reached "$T/cc.mkv" 10 --no-vsr)
+[ "$ok" = yes ] && ok=$(at_least "$t" 3.5)
+check "captions: picks the English track and plays (reached ${t:-nothing} of 4 s)" "$ok"
+
 # raw H.264 stream: frames carry no timestamps and used to be dropped, leaving a black window
 ffmpeg -v error -f lavfi -i testsrc2=size=640x360:rate=25 -t 4 -c:v libx264 -pix_fmt yuv420p -f h264 "$T/raw.h264"
 t=$(reached "$T/raw.h264" 10 --no-vsr)

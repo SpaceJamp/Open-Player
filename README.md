@@ -79,6 +79,7 @@ mouse stops and stays while paused. Right-click for a menu with the same actions
 | ↑ / ↓ | volume |
 | V | upscaling on/off, to compare |
 | F, double-click | fullscreen |
+| C | captions on/off |
 | I | info overlay: GPU, decoder, upscaler, frame rate, dropped frames |
 | S | settings |
 | Q, Esc | quit (Esc first closes settings, then leaves fullscreen) |
@@ -89,6 +90,13 @@ mouse stops and stays while paused. Right-click for a menu with the same actions
   where I left off**.
 - **Training:** training your own Pixel Flow (above). A `train.py` started from the command line shows here too.
 - **About:** build number, TensorRT, RTX VSR and driver versions, updates, the log file and credits.
+
+**Captions.** Press **C**, click **CC** in the control bar, or pick a track under **Captions** in the right-click
+menu. They show English subtitle tracks from the file (text tracks and Blu-ray picture subtitles) and `.srt` files
+next to the video (`movie.srt`, `movie.en.srt`). With captions on, the player picks the SDH track (closed captions,
+with sound descriptions) when there is one, else plain English. They're drawn after upscaling, so they stay sharp,
+and move up while the control bar shows. On/off is remembered (also in Settings > General). A forced English track
+(foreign-language lines translated) shows even with captions off.
 
 **Remember where I left off** (on by default) saves your spot in each video and picks up there next time ("Resumed at
 12:34"). It skips the first 10 seconds and the last 30, so a finished video starts over.
@@ -120,7 +128,8 @@ training and the add-ons).
 
 - SDR only: HDR video plays with washed-out colours (and trains poorly).
 - Interlaced video (DVDs, TV recordings) isn't deinterlaced, so motion shows comb lines.
-- Audio-only files don't open; there's no switching between audio or subtitle tracks yet.
+- Audio-only files don't open; there's no switching between audio tracks yet.
+- Captions: English only; styled (ASS) subtitles show as plain text.
 - Opening another video restarts the player process.
 - On WSL, CUDA and Vulkan can't share memory, so every frame goes through the CPU, and WSLg tears.
 
