@@ -75,3 +75,8 @@ resolution. The user wants Pixel Flow to work for people who download the player
   engine in 2.8 s and ran at 30.0 ms/frame with identical output. Kept files: `tensorrt_rtx_1_7.dll` (229 MB
   unpacked), `tensorrt_onnxparser_rtx_1_7.dll`, `cudart64_13.dll`, `tensorrt_plugins.dll` only if the build needs
   it (builder checks), NVIDIA's README/licence. The library names cuDNN/NCCL/nvrtc-builtins but didn't need them.
+
+## Decided (the user, 2026-11-26): licence
+
+- "NVIDIA TensorRT for RTX" added to LICENSE-EXCEPTION (the AGPL section 7 linking permission), so Approach A
+  (its own C++ API) stands.
