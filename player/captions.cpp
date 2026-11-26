@@ -1,5 +1,10 @@
 #include "captions.h"
 
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+}
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -162,6 +167,120 @@ Rect place_picture(const Cue& c, Rect picture, Rect window, float bottom_limit) 
     return r;
 }
 
+bool picture_ok(int w, int h) { return w > 0 && h > 0 && w <= 4096 && h <= 4096; }
+
+std::vector<CaptionTrack> list_tracks(const AVFormatContext* fmt, const std::string& video_path) {
+    std::vector<CaptionTrack> out;
+    for (unsigned i = 0; fmt && i < fmt->nb_streams; i++) {
+        const AVStream* st = fmt->streams[i];
+        if (st->codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE || !avcodec_find_decoder(st->codecpar->codec_id))
+            continue;
+        const AVDictionaryEntry *lang = av_dict_get(st->metadata, "language", nullptr, 0),
+                                *title = av_dict_get(st->metadata, "title", nullptr, 0);
+        if (!english(lang ? lang->value : nullptr)) continue;
+        CaptionTrack t;
+        t.stream = (int)i;
+        t.sdh = (st->disposition & AV_DISPOSITION_HEARING_IMPAIRED) || (title && has(title->value, "sdh"));
+        t.forced = st->disposition & AV_DISPOSITION_FORCED;
+        t.name = track_name(title ? title->value : nullptr, t.sdh, t.forced);
+        out.push_back(t);
+    }
+    for (auto& f : find_sidecars(video_path)) {
+        CaptionTrack t;
+        t.sidecar = f;
+        t.name = "English (" + fs::u8path(f).filename().u8string() + ")";
+        out.push_back(t);
+    }
+    return out;
+}
+
+// "00:01:02,345" -> seconds; -1 if it isn't a time
+static double srt_time(const char* s) {
+    int h, m, sec, ms;
+    if (sscanf(s, "%d:%d:%d%*[,.]%d", &h, &m, &sec, &ms) != 4) return -1;
+    return h * 3600.0 + m * 60 + sec + ms / 1000.0;
+}
+
+std::vector<Cue> read_sidecar(const std::string& srt_path) {
+    std::ifstream f(fs::u8path(srt_path), std::ios::binary);
+    std::string raw((std::istreambuf_iterator<char>(f)), {}), text = to_utf8(raw.substr(0, 64u << 20)), line;
+    if (!text.compare(0, 3, "\xef\xbb\xbf")) text.erase(0, 3);  // a UTF-8 byte order mark
+    std::vector<Cue> out;
+    Cue cur;
+    bool in_cue = false;
+    auto done = [&] {
+        if (in_cue && out.size() < MAX_CUES) cur.text = clean_text(cur.text), out.push_back(cur);
+        cur = Cue(), in_cue = false;
+    };
+    size_t at = 0;
+    while (at <= text.size() && out.size() < MAX_CUES) {
+        size_t nl = text.find('\n', at);
+        line = text.substr(at, nl == std::string::npos ? std::string::npos : nl - at);
+        at = nl == std::string::npos ? text.size() + 1 : nl + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        size_t arrow = line.find("-->");
+        if (arrow != std::string::npos) {  // "00:00:01,000 --> 00:00:02,500": a new cue
+            done();
+            cur.start = srt_time(line.c_str()), cur.end = srt_time(line.c_str() + arrow + 3 + strspn(line.c_str() + arrow + 3, " "));
+            in_cue = cur.start >= 0;
+        } else if (line.empty()) done();
+        else if (in_cue) cur.text += (cur.text.empty() ? "" : "\n") + line;
+    }
+    done();
+    return out;
+}
+
+CueDecoder::~CueDecoder() { avcodec_free_context(&ctx_); }
+
+bool CueDecoder::open(const AVStream* st) {
+    const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
+    if (!codec || !(ctx_ = avcodec_alloc_context3(codec))) return false;
+    avcodec_parameters_to_context(ctx_, st->codecpar);
+    ctx_->pkt_timebase = st->time_base;
+    tb_ = av_q2d(st->time_base);
+    if (avcodec_open2(ctx_, codec, nullptr) < 0) return avcodec_free_context(&ctx_), false;
+    return true;
+}
+
+void CueDecoder::feed(const AVPacket* pkt, std::vector<Cue>& out) {
+    if (!ctx_ || pkt->pts == AV_NOPTS_VALUE) return;
+    AVSubtitle sub{};
+    int got = 0;
+    if (avcodec_decode_subtitle2(ctx_, &sub, &got, const_cast<AVPacket*>(pkt)) < 0 || !got) return;
+    if (out.size() >= MAX_CUES) out.erase(out.begin(), out.begin() + MAX_CUES / 2);  // the oldest half
+    const double at = pkt->pts * tb_;
+    Cue base;
+    base.start = at + sub.start_display_time / 1000.0;
+    // no end (PGS shows until the next display set), else the packet's duration or the subtitle's own end
+    base.end = sub.end_display_time && sub.end_display_time != UINT32_MAX ? at + sub.end_display_time / 1000.0
+               : pkt->duration > 0 && ctx_->codec_id != AV_CODEC_ID_HDMV_PGS_SUBTITLE ? at + pkt->duration * tb_
+                                                                                     : -1;
+    base.canvas_w = ctx_->width > 0 ? ctx_->width : 1920, base.canvas_h = ctx_->height > 0 ? ctx_->height : 1080;
+    if (!sub.num_rects) out.push_back(base);  // a picture track's "clear": ends the picture before it
+    for (unsigned i = 0; i < sub.num_rects; i++) {
+        const AVSubtitleRect* r = sub.rects[i];
+        Cue c = base;
+        if (r->type == SUBTITLE_ASS && r->ass) {  // "ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text"
+            const char* t = r->ass;
+            for (int commas = 0; *t && commas < 8; t++) commas += *t == ',';
+            c.text = clean_text(t);
+        } else if (r->type == SUBTITLE_TEXT && r->text) c.text = clean_text(r->text);
+        else if (r->type == SUBTITLE_BITMAP && picture_ok(r->w, r->h) && r->data[0] && r->data[1]) {
+            const uint32_t* pal = (const uint32_t*)r->data[1];  // ARGB, one per palette index
+            c.x = r->x, c.y = r->y, c.w = r->w, c.h = r->h;
+            c.rgba.resize((size_t)r->w * r->h * 4);
+            for (int y = 0; y < r->h; y++)
+                for (int x = 0; x < r->w; x++) {
+                    uint32_t argb = pal[r->data[0][y * r->linesize[0] + x] % (r->nb_colors > 0 ? r->nb_colors : 256)];
+                    uint8_t* px = &c.rgba[((size_t)y * r->w + x) * 4];
+                    px[0] = argb >> 16, px[1] = argb >> 8, px[2] = (uint8_t)argb, px[3] = argb >> 24;
+                }
+        } else continue;
+        if (!c.text.empty() || !c.rgba.empty()) out.push_back(std::move(c));
+    }
+    avsubtitle_free(&sub);
+}
+
 int captions_selftest() {
     int fails = 0;
 #define check(cond) \
@@ -223,6 +342,48 @@ int captions_selftest() {
     pic.y = 1070;
     Rect r = place_picture(pic, {0, 140, 1920, 800}, {0, 0, 1920, 1080}, 1050);
     check(std::abs(r.y + r.h - 1050) < .5f);
+
+    // a .srt file: cues with their times, markup cleaned, a Windows-1252 one read right, and FFmpeg's own .srt
+    // reader + SubRip decoder (the path embedded tracks take) giving the same cues
+    fs::create_directories(d);
+    const fs::path srt = d / "movie.en.srt";
+    std::ofstream(srt, std::ios::binary) << "1\r\n00:00:01,000 --> 00:00:02,500\r\n<i>Hello</i> there\r\n\r\n"
+                                            "2\r\n00:00:03,000 --> 00:00:04,000\r\nTwo\r\nlines\r\n\r\n"
+                                            "3\r\n01:02:03,040 --> 01:02:04,000\r\ncaf\xe9\r\n";
+    auto sc = read_sidecar(srt.u8string());
+    check(sc.size() == 3);
+    if (sc.size() == 3) {
+        check(sc[0].start == 1 && sc[0].end == 2.5 && sc[0].text == "Hello there");
+        check(sc[1].text == "Two\nlines" && std::abs(sc[2].start - 3723.04) < 1e-6 && sc[2].text == "caf\xc3\xa9");
+    }
+    {
+        std::ofstream big_srt(d / "big.srt", std::ios::binary);
+        for (int i = 0; i < 30000; i++) big_srt << i + 1 << "\n00:00:01,000 --> 00:00:02,000\nx\n\n";
+    }
+    check(read_sidecar((d / "big.srt").u8string()).size() == MAX_CUES);
+    check(read_sidecar((d / "missing.srt").u8string()).empty());
+    check(picture_ok(1920, 200) && !picture_ok(0, 10) && !picture_ok(5000, 10) && !picture_ok(10, 16000));
+
+    std::ofstream(d / "utf8.srt", std::ios::binary) << "1\n00:00:01,000 --> 00:00:02,500\n<i>Hello</i>\n\n";
+    AVFormatContext* fmt = nullptr;
+    check(avformat_open_input(&fmt, (d / "utf8.srt").string().c_str(), nullptr, nullptr) == 0);
+    if (fmt) {
+        avformat_find_stream_info(fmt, nullptr);
+        auto tracks = list_tracks(fmt, (d / "movie.mkv").u8string());
+        // the stream itself (untagged), then the movie.en.srt beside "movie.mkv"
+        check(tracks.size() == 2 && tracks[0].stream == 0 && tracks[0].name == "English");
+        check(tracks.size() == 2 && tracks[1].stream == -1 && fs::u8path(tracks[1].sidecar) == srt);
+        CueDecoder dec;
+        check(dec.open(fmt->streams[0]));
+        std::vector<Cue> got;
+        AVPacket* pkt = av_packet_alloc();
+        while (av_read_frame(fmt, pkt) >= 0) dec.feed(pkt, got), av_packet_unref(pkt);
+        av_packet_free(&pkt);
+        check(got.size() == 1 && got.size() && got[0].text == "Hello" && std::abs(got[0].start - 1) < 1e-6 &&
+              std::abs(got[0].end - 2.5) < 1e-6);
+        avformat_close_input(&fmt);
+    }
+    fs::remove_all(d, ec);
 #undef check
     return fails ? 1 : 0;
 }

@@ -35,4 +35,32 @@ struct Rect {
 // bottom_limit (the control bar while it shows).
 Rect place_picture(const Cue& c, Rect picture, Rect window, float bottom_limit);
 
+inline constexpr size_t MAX_CUES = 20000;  // a hostile file can't grow the list without end
+bool picture_ok(int w, int h);             // a picture subtitle small enough to keep (4096 x 4096 at most)
+
+struct AVFormatContext;
+struct AVStream;
+struct AVPacket;
+struct AVCodecContext;
+// The English caption tracks: the file's English subtitle streams in order, then the .srt files beside it.
+std::vector<CaptionTrack> list_tracks(const AVFormatContext* fmt, const std::string& video_path);
+// A .srt file, whole: Windows-1252 files read too, markup cleaned, at most MAX_CUES cues.
+std::vector<Cue> read_sidecar(const std::string& srt_path);
+
+// One subtitle stream's decoder, on the decode thread.
+class CueDecoder {
+public:
+    CueDecoder() = default;
+    CueDecoder(const CueDecoder&) = delete;
+    CueDecoder& operator=(const CueDecoder&) = delete;
+    ~CueDecoder();
+    bool open(const AVStream* st);  // false: no decoder for this codec
+    // Appends this packet's cues (a picture track's "clear" is an empty cue that ends the one before).
+    void feed(const AVPacket* pkt, std::vector<Cue>& out);
+
+private:
+    AVCodecContext* ctx_ = nullptr;
+    double tb_ = 0;
+};
+
 int captions_selftest();  // part of --uitest; 0 on pass
