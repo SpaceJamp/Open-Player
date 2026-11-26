@@ -66,6 +66,8 @@ struct UiState {
     std::string trt_status;
     bool trt_addon = false;  // loaded from the add-on (so Remove applies)
     float addon_progress = -1;
+    bool rtx_addon = false;     // the TensorRT for RTX add-on is installed (so Remove applies)
+    float rtx_progress = -1;    // its download's progress (< 0: none)
     // updates (installed copies): the status line, a newer build to install (0: none), the download's progress
     std::string update_status;
     int update_build = 0;
@@ -100,7 +102,8 @@ struct UiAction {
         TogglePause, Seek, SetVolume, ToggleVsr, ToggleFullscreen, ToggleInfo, Open, OpenPath, Quit,
         // the settings card; value: an Upscaler, a screen index, seconds, or 0/1
         ToggleSettings, SetUpscaler, SetDecoder, SetScreen, SetStartFullscreen, SetRememberVolume, SetHideAfter,
-        SetInfoAtStart, DownloadTensorRT, CancelTensorRT, RemoveTensorRT, ChooseTensorRTFolder, SetCheckUpdates,
+        SetInfoAtStart, DownloadTensorRT, CancelTensorRT, RemoveTensorRT, ChooseTensorRTFolder,
+        DownloadTrtRtx, CancelTrtRtx, RemoveTrtRtx, SetCheckUpdates,
         SetSettingsTab, SetRememberPosition,
         ToggleCaptions, SetCaptionTrack,  // SetCaptionTrack value: a track index, -1 off
         // the Training tab
@@ -117,6 +120,7 @@ struct TrainButton {
     bool enabled = true;
 };
 std::vector<TrainButton> training_buttons(const UiState& s);
+std::vector<TrainButton> engine_buttons(const UiState& s);  // Settings > Upscaling: Pixel Flow's engine
 std::vector<std::string> training_notes(const UiState& s);
 // The control bar shows while the mouse moved in the last hide_after s, while paused, or while the mouse is over it.
 bool controls_visible(double now, double last_mouse, bool paused, bool hovered, double hide_after = 2);

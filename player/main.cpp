@@ -236,7 +236,8 @@ int main(int argc, char** argv) {
     int rtx_minor = -1;
     finish_pending_rtx_removal();
     const bool force_rtx = engine_flag && !strcmp(engine_flag, "rtx"), force_full = engine_flag && !strcmp(engine_flag, "full");
-    const bool rtx_ok = (trt_from == TrtFrom::None || force_rtx) && !force_full && load_trt_rtx("", rtx_ver, rtx_minor, rtx_why);
+    const bool rtx_ok = (trt_from == TrtFrom::None || force_rtx) && !force_full &&
+                        load_trt_rtx(saved.rtx_folder, rtx_ver, rtx_minor, rtx_why);
     const Engine engine = force_rtx ? (rtx_ok ? Engine::Rtx : Engine::None)
                                     : choose_engine(trt_from != TrtFrom::None, rtx_ok && !force_full);
     fprintf(stderr, "%s\n", engine_line(engine, trt_line(trt_from, trt_ver, trt_why), rtx_ver, rtx_why).c_str());
@@ -636,6 +637,15 @@ int main(int argc, char** argv) {
         auto stop_addon = [&] {
             if (addon_thread.joinable()) addon_cancel = true, addon_thread.join();
         };
+        // the TensorRT for RTX add-on download, the same way
+        std::thread rtx_thread;
+        std::atomic<bool> rtx_running{false}, rtx_done{false}, rtx_cancel{false};
+        std::atomic<uint64_t> rtx_got{0};
+        bool rtx_dl_ok = false;
+        std::string rtx_dl_error;
+        auto stop_rtx = [&] {
+            if (rtx_thread.joinable()) rtx_cancel = true, rtx_thread.join();
+        };
         // Training from the player: the Training add-on's download (then the start it was for), the export, and a
         // count of the videos in the chosen folder each run on a thread of their own
         std::thread tr_thread, ex_thread, count_thread;
@@ -771,6 +781,7 @@ int main(int argc, char** argv) {
         }
         stop_downloads = [&] {
             stop_addon();
+            stop_rtx();
             stop_training_threads();
             if (upd_dl.joinable()) upd_cancel = true, upd_dl.join();
         };
@@ -801,6 +812,12 @@ int main(int argc, char** argv) {
                 else if (!addon_cancel) post(ICON_X, "TensorRT: " + addon_error, -1, 4);
             }
             if (addon_running && settings_open) dirty = true;  // the progress bar moves
+            if (rtx_done) {
+                rtx_thread.join(), rtx_running = false, rtx_done = false;
+                if (rtx_dl_ok) reopen("TensorRT for RTX installed: reopening...", true);
+                else if (!rtx_cancel) post(ICON_X, "TensorRT for RTX: " + rtx_dl_error, -1, 4);
+            }
+            if (rtx_running && settings_open) dirty = true;
             if (tr_done) {  // the Training add-on arrived (or didn't): start the run it was downloaded for
                 tr_thread.join(), tr_running = false, tr_done = false, tr_addon = training_addon_installed();
                 if (tr_ok) start_own_training(tr_mode);
@@ -837,9 +854,20 @@ int main(int argc, char** argv) {
                         saved.train_videos = cfg.train_videos = p, save_prefs(), count_videos(p);
                         continue;
                     }
+                    if (e.user.code == 1) {  // TensorRT for RTX (1.8 or another version this build has)?
+                        std::string rtx_dir;
+                        for (int m : rtx_minors())
+                            for (auto d : {std::filesystem::u8path(p), std::filesystem::u8path(p) / "bin"})
+                                if (rtx_dir.empty() && std::filesystem::exists(d / rtx_dll_name(m), ec)) rtx_dir = d.u8string();
+                        if (!rtx_dir.empty()) {
+                            saved.rtx_folder = cfg.rtx_folder = rtx_dir, save_prefs();
+                            reopen("Loading your TensorRT for RTX...", true);
+                            continue;
+                        }
+                    }
                     if (e.user.code != 1) open_video(p);
                     else if (!std::filesystem::exists(std::filesystem::u8path(p) / "nvinfer_11.dll", ec))
-                        post(ICON_X, "No TensorRT 11 in that folder (nvinfer_11.dll)", -1, 3);
+                        post(ICON_X, "No TensorRT 11 or TensorRT for RTX in that folder", -1, 3);
                     else saved.trt_folder = cfg.trt_folder = p, save_prefs(), reopen("Loading your TensorRT...", true);
                 }
                 else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) disp.resized(), dirty = true;
@@ -969,15 +997,17 @@ int main(int argc, char** argv) {
                 us.vsr_available = have_vsr || us.rtx_available;
                 us.pxf_available = have_pxf;
                 us.pxf_why = !model_there ? "No Pixel Flow model: train your own (vsr.onnx)"
-                             : trt_from == TrtFrom::None ? "Needs the TensorRT add-on"
+                             : engine == Engine::None ? "Needs TensorRT for RTX: Download in Settings > Upscaling"
                                                          : "The model couldn't be loaded (see the log)";
                 us.nvdec_available = media.nvdec() || cfg.cpu_decode;  // CPU chosen: NVDEC wasn't even tried
                 if (!worth_it) us.vsr_unavailable = "the video already fills the screen";
                 else if (!have_pxf && !us.rtx_available)
                     us.vsr_unavailable = "NVIDIA RTX VSR isn't available here, and " + us.pxf_why;
                 us.build = OPEN_PLAYER_BUILD;
-                us.versions = {trt_line(trt_from, trt_ver, trt_why), rtx_vsr_line(rtx_tried, rtx_ok), driver_line()};
+                us.versions = {engine_line(engine, trt_line(trt_from, trt_ver, trt_why), rtx_ver, rtx_why),
+                               trt_line(trt_from, trt_ver, trt_why), rtx_vsr_line(rtx_tried, rtx_ok), driver_line()};
                 us.trt_addon = trt_from == TrtFrom::AddOn;
+                us.rtx_addon = std::filesystem::exists(std::filesystem::u8path(rtx_addon_dir()) / RTX_DLL);
                 if (now() - training_read_at >= 1) {  // training.json, once a second
                     training_read_at = now();
                     tr_ckpt = has_checkpoint(), tr_best = has_best();
@@ -1023,7 +1053,14 @@ int main(int argc, char** argv) {
                     us.update_build = upd->info.build;
                 else if (!installed_copy()) us.update_status = "Updates: only for installed copies";
                 else if (upd->done && !upd->error.empty()) us.update_status = "Last check: " + upd->error;
-                us.trt_status = trt_line(trt_from, trt_ver, trt_why);
+                us.trt_status = engine_line(engine, trt_line(trt_from, trt_ver, trt_why), rtx_ver, rtx_why);
+                if (rtx_running) {
+                    us.rtx_progress = (float)((double)rtx_got / RTX_WHEEL_SIZE);
+                    us.trt_status = rtx_got >= RTX_WHEEL_SIZE ? std::string("Checking and unpacking TensorRT for RTX...")
+                                                              : "Downloading TensorRT for RTX from NVIDIA: " +
+                                                                    std::to_string(rtx_got / (1 << 20)) + " of " +
+                                                                    std::to_string(RTX_WHEEL_SIZE >> 20) + " MB";
+                }
                 if (addon_running) {
                     us.addon_progress = (float)((double)addon_got / TRT_WHEEL_SIZE);
                     us.trt_status = addon_got >= TRT_WHEEL_SIZE  // then the 2 GB hash and the unpacking
@@ -1081,6 +1118,21 @@ int main(int argc, char** argv) {
                         });
                         break;
                     case UiAction::CancelTensorRT: addon_cancel = true; break;
+                    case UiAction::DownloadTrtRtx:
+                        if (rtx_running) break;
+                        stop_rtx();
+                        rtx_running = true, rtx_done = false, rtx_cancel = false, rtx_got = 0;
+                        rtx_thread = std::thread([&] {
+                            rtx_dl_ok = install_trt_rtx_addon([&](uint64_t got, uint64_t) { rtx_got = got; }, rtx_cancel,
+                                                              rtx_dl_error);
+                            rtx_done = true;
+                        });
+                        break;
+                    case UiAction::CancelTrtRtx: rtx_cancel = true; break;
+                    case UiAction::RemoveTrtRtx:
+                        remove_trt_rtx_addon(engine == Engine::Rtx);  // in use: removed when the player reopens
+                        if (saved.rtx_folder.empty()) reopen("Removing TensorRT for RTX...", true);
+                        break;
                     case UiAction::ChooseTensorRTFolder: show_folder_dialog(); break;
                     case UiAction::SetCheckUpdates: saved.check_updates = cfg.check_updates = a.value != 0, save_prefs(); break;
                     case UiAction::SetSettingsTab: saved.settings_tab = cfg.settings_tab = (int)a.value, save_prefs(); break;
@@ -1206,6 +1258,7 @@ int main(int argc, char** argv) {
         }
         if (cfg.remember_position) save_position();
         stop_addon();  // a download in progress is cancelled (its partial file is deleted)
+        stop_rtx();
         stop_training_threads();  // the training run itself keeps going: it's a process of its own
         if (upd_dl.joinable()) upd_cancel = true, upd_dl.join();
         if (upd_check.joinable()) upd_check.detach();  // owns its shared state; may still be waiting on the network

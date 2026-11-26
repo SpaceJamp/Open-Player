@@ -38,6 +38,7 @@ Settings settings_parse(const std::string& text) {
         else if (k == "remember_volume") flag(s.remember_volume);
         else if (k == "info_at_start") flag(s.info_at_start);
         else if (k == "trt_folder") s.trt_folder = v;
+        else if (k == "rtx_folder") s.rtx_folder = v;
         else if (k == "train_videos") s.train_videos = v;
         else if (k == "captions") flag(s.captions);
         else if (k == "check_updates") flag(s.check_updates);
@@ -69,6 +70,8 @@ std::string settings_format(const Settings& s) {
     std::replace_if(screen.begin(), screen.end(), [](char c) { return c == '\n' || c == '\r'; }, ' ');
     std::string trt = trim(s.trt_folder);  // a folder name with a line break can't add lines either
     std::replace_if(trt.begin(), trt.end(), [](char c) { return c == '\n' || c == '\r'; }, ' ');
+    std::string rtxf = trim(s.rtx_folder);
+    std::replace_if(rtxf.begin(), rtxf.end(), [](char c) { return c == '\n' || c == '\r'; }, ' ');
     std::string videos = trim(s.train_videos);
     std::replace_if(videos.begin(), videos.end(), [](char c) { return c == '\n' || c == '\r'; }, ' ');
     return std::string("upscaler=") + up + "\ndecoder=" + (s.cpu_decode ? "cpu" : "gpu") + "\nscreen=" + screen +
@@ -78,7 +81,8 @@ std::string settings_format(const Settings& s) {
            "\nlast_update_check=" + std::to_string(s.last_update_check) +
            "\nremember_position=" + (s.remember_position ? "1" : "0") + "\nsettings_tab=" +
            std::to_string(s.settings_tab) + "\ntrain_videos=" + videos +
-           "\ncaptions=" + (s.captions ? "1" : "0") + "\n";
+           "\ncaptions=" + (s.captions ? "1" : "0") +
+           "\nrtx_folder=" + rtxf + "\n";
 }
 
 Settings load_settings(const std::string& file) {

@@ -481,25 +481,21 @@ void draw_settings(const UiState& s, std::vector<UiAction>& out, float capsule_t
         ImGui::TextUnformatted(s.trt_status.c_str());
         ImGui::PopTextWrapPos();
         ImGui::PopStyleColor();
-        if (s.addon_progress >= 0) {
-            const ImVec2 p = ImGui::GetCursorScreenPos();
-            const float aw = ImGui::GetContentRegionAvail().x, cw = segmented_w({{"Cancel", true, nullptr}}, sc);
+        const std::vector<TrainButton> eb = engine_buttons(s);
+        std::vector<Seg> segs;
+        for (auto& b : eb) segs.push_back({b.label.c_str(), b.enabled, nullptr});
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float aw = ImGui::GetContentRegionAvail().x, cw = segmented_w(segs, sc);
+        const float progress = s.rtx_progress >= 0 ? s.rtx_progress : s.addon_progress;
+        if (progress >= 0) {  // a download: its bar, and Cancel
             const float bw = aw - cw - 12 * sc, y = p.y + 14 * sc;
             dl->AddRectFilled({p.x, y - 2 * sc}, {p.x + bw, y + 2 * sc}, col(COL_TRACK), 2 * sc);
-            dl->AddRectFilled({p.x, y - 2 * sc}, {p.x + bw * std::clamp(s.addon_progress, 0.f, 1.f), y + 2 * sc},
+            dl->AddRectFilled({p.x, y - 2 * sc}, {p.x + bw * std::clamp(progress, 0.f, 1.f), y + 2 * sc},
                               col(COL_PLAYED), 2 * sc);
-            if (segmented("cancel", {p.x + aw - cw, p.y}, {{"Cancel", true, nullptr}}, -1, sc) == 0)
-                out.push_back({UiAction::CancelTensorRT});
-            card_row_end(p, 32 * sc);
-        } else {
-            std::vector<Seg> b = {{s.trt_addon ? "Remove" : "Download (1.9 GB)", true, nullptr},
-                                  {"Choose folder...", true, nullptr}};
-            const ImVec2 p = ImGui::GetCursorScreenPos();
-            int i = segmented("trt", {p.x + ImGui::GetContentRegionAvail().x - segmented_w(b, sc), p.y}, b, -1, sc);
-            if (i == 0) out.push_back({s.trt_addon ? UiAction::RemoveTensorRT : UiAction::DownloadTensorRT});
-            if (i == 1) out.push_back({UiAction::ChooseTensorRTFolder});
-            card_row_end(p, 32 * sc);
         }
+        int i = segmented("trt", {p.x + std::fmax(0.f, aw - cw), p.y}, segs, -1, sc);
+        if (i >= 0) out.push_back({eb[i].kind});
+        card_row_end(p, 32 * sc);
     }
 #endif
 
@@ -771,6 +767,22 @@ static void draw_captions(const UiState& s, float bottom) {
         y += lh;
     }
     if (x1 > x0) g_caption_rect = {x0, y0, x1 - x0, y1 - y0};
+}
+
+std::vector<TrainButton> engine_buttons(const UiState& s) {
+    using K = UiAction;
+    if (s.rtx_progress >= 0) return {{"Cancel", K::CancelTrtRtx}};
+    if (s.addon_progress >= 0) return {{"Cancel", K::CancelTensorRT}};
+    char rtx[48];
+    snprintf(rtx, sizeof rtx, "Download (%d MB)", (int)((RTX_WHEEL_SIZE + (1 << 19)) >> 20));  // rounded
+    std::vector<TrainButton> b;
+    if (s.trt_addon) b.push_back({"Remove", K::RemoveTensorRT});  // the full TensorRT: already the fastest
+    else {
+        b.push_back(s.rtx_addon ? TrainButton{"Remove", K::RemoveTrtRtx} : TrainButton{rtx, K::DownloadTrtRtx});
+        b.push_back({"Faster: full TensorRT (1.9 GB)", K::DownloadTensorRT});
+    }
+    b.push_back({"Choose folder...", K::ChooseTensorRTFolder});
+    return b;
 }
 
 std::vector<TrainButton> training_buttons(const UiState& s) {
@@ -1295,6 +1307,45 @@ int ui_selftest() {
                 }));
             }
             io.AddMousePosEvent(5, 5);
+        }
+        // Pixel Flow's engine in Settings > Upscaling: TensorRT for RTX first, the full TensorRT as the faster option
+        {
+            auto labels = [](const UiState& s) {
+                std::vector<std::string> l;
+                for (auto& b : engine_buttons(s)) l.push_back(b.label);
+                return l;
+            };
+            auto kind = [](const UiState& s, size_t i) { return engine_buttons(s).at(i).kind; };
+            using V = std::vector<std::string>;
+            UiState none{12, 600, 90, 90, false, true, true, false, false, 0.8f, "", {}};
+            check(labels(none) == (V{"Download (89 MB)", "Faster: full TensorRT (1.9 GB)", "Choose folder..."}));
+            check(kind(none, 0) == UiAction::DownloadTrtRtx && kind(none, 1) == UiAction::DownloadTensorRT &&
+                  kind(none, 2) == UiAction::ChooseTensorRTFolder);
+            UiState rtx = none;  // the TensorRT for RTX add-on: remove it, or get the faster engine
+            rtx.rtx_addon = true;
+            check(labels(rtx) == (V{"Remove", "Faster: full TensorRT (1.9 GB)", "Choose folder..."}) &&
+                  kind(rtx, 0) == UiAction::RemoveTrtRtx);
+            UiState full = none;  // the full TensorRT add-on
+            full.trt_addon = true;
+            check(labels(full) == (V{"Remove", "Choose folder..."}) && kind(full, 0) == UiAction::RemoveTensorRT);
+            UiState rdl = none;  // downloading: Cancel only
+            rdl.rtx_progress = .4f;
+            check(labels(rdl) == (V{"Cancel"}) && kind(rdl, 0) == UiAction::CancelTrtRtx);
+            UiState fdl = rtx;
+            fdl.addon_progress = .1f;
+            check(labels(fdl) == (V{"Cancel"}) && kind(fdl, 0) == UiAction::CancelTensorRT);
+            Settings f;
+            f.rtx_folder = "C:/TensorRT-RTX-1.8.1.40/bin";
+            check(settings_parse(settings_format(f)).rtx_folder == f.rtx_folder);
+            for (UiState cs : {none, rtx, full, rdl})  // each draws
+                for (ImVec2 size : {ImVec2{1920, 1080}, ImVec2{3840, 2160}}) {
+                    io.DisplaySize = size;
+                    cs.scale = size.y > 1080 ? 2.5f : 1, cs.settings_open = true, cs.settings.settings_tab = 0;
+                    frames(cs, 2, .1);
+                    ImGuiWindow* w = ImGui::FindWindowByName("settings");
+                    check(w && w->Active);
+                }
+            io.DisplaySize = {1920, 1080};
         }
         // captions: drawn above the control bar while it shows, low when it's hidden; pictures inside the window
         {
