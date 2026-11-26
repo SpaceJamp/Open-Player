@@ -1,4 +1,5 @@
 #include "trt_loader.h"
+#include "rtx_backend.h"
 
 #include <cuda.h>
 
@@ -256,6 +257,11 @@ int trt_loader_selftest() {
     check(engine_line(Engine::None, "TensorRT: not installed", "", "not installed") ==
           "Pixel Flow engine: none (download TensorRT for RTX in Settings > Upscaling)");
     check(rtx_dll_name(8) == "tensorrt_rtx_1_8.dll" && rtx_parser_name(7) == "tensorrt_onnxparser_rtx_1_7.dll");
+    // each compiled-in TensorRT for RTX copy was built with its own version's headers (1.<minor>.x)
+    for (int m : rtx_minors()) check(trt_rtx_header_version(m) / 10000 == 1 && trt_rtx_header_version(m) / 100 % 100 == m);
+#ifdef _WIN32
+    check(rtx_minors().size() >= 1);  // the build machine has an SDK: the release must carry TensorRT for RTX
+#endif
     {  // nothing installed (a temp data folder): not loaded, and says why
         _putenv_s("XDG_DATA_HOME", (fs::temp_directory_path() / "op-rtx-none").string().c_str());
         std::string ver, why;
