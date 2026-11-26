@@ -56,7 +56,7 @@ F entry(void* module, const char* name) {
 
 class PixelFlowRtx final : public RtxEngine {
 public:
-    bool open(const std::string& onnx, const std::string& plan_path, int w, int h, int s) {
+    bool open(const std::string& onnx, const std::string& plan_path, int w, int h, int s, bool use_plan = true) {
         using MakeObj = void* (*)(void*, int32_t);
         using MakeParser = void* (*)(void*, void*, int);
         auto make_builder = entry<MakeObj>(rtx_module(), "createInferBuilder_INTERNAL");
@@ -66,7 +66,7 @@ public:
         plan_path_ = plan_path, cache_path_ = plan_path + ".jit";
         std::error_code ec;
         const fs::path plan_file = fs::u8path(plan_path), onnx_file = fs::u8path(onnx);
-        const bool cached = fs::exists(plan_file, ec) && fs::last_write_time(plan_file, ec) >= fs::last_write_time(onnx_file, ec);
+        const bool cached = use_plan && fs::exists(plan_file, ec) && fs::last_write_time(plan_file, ec) >= fs::last_write_time(onnx_file, ec);
         std::vector<char> plan;
         if (cached) plan = read_file(plan_file);
         else {
@@ -90,6 +90,7 @@ public:
             if (!m) return false;
             plan.assign((char*)m->data(), (char*)m->data() + m->size());
             std::ofstream(plan_file, std::ios::binary).write(plan.data(), plan.size());
+            fs::remove(fs::u8path(cache_path_), ec);  // its kernels belong to the old plan
         }
         runtime_.reset((IRuntime*)make_runtime(&logger, NV_TENSORRT_VERSION));
         if (!runtime_) return false;
@@ -97,8 +98,7 @@ public:
         if (!engine_) {
             if (!cached) return false;
             fprintf(stderr, "vsr: cached TensorRT for RTX engine is stale, rebuilding\n");
-            fs::remove(plan_file, ec);
-            return open(onnx, plan_path, w, h, s);
+            return open(onnx, plan_path, w, h, s, false);
         }
         // its kernels are compiled for this GPU on first use; the runtime cache keeps them for the next start
         config_.reset(engine_->createRuntimeConfig());
@@ -135,6 +135,7 @@ public:
     }
 
     ~PixelFlowRtx() override {  // in the reverse order of creation, as TensorRT wants
+        save_cache();
         ctx_.reset(), cache_.reset(), config_.reset(), engine_.reset(), runtime_.reset();
     }
 

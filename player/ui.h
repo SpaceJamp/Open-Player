@@ -65,6 +65,7 @@ struct UiState {
     // the TensorRT add-on (Pixel Flow needs TensorRT): its status line, and the download's progress (< 0: none)
     std::string trt_status;
     bool trt_addon = false;  // loaded from the add-on (so Remove applies)
+    bool trt_loaded = false;  // the full TensorRT is loaded (add-on, your folder or next to the player)
     float addon_progress = -1;
     bool rtx_addon = false;     // the TensorRT for RTX add-on is installed (so Remove applies)
     float rtx_progress = -1;    // its download's progress (< 0: none)

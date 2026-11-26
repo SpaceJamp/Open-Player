@@ -135,6 +135,7 @@ bool install_trt_rtx_addon(const std::function<void(uint64_t, uint64_t)>& progre
                            std::string& error) {
     fs::path base = fs::u8path(user_data_dir()), wheel = base / "tensorrt-rtx-download.whl";
     std::error_code ec;
+    fs::remove(base / "remove-tensorrt-rtx.txt", ec);  // else the next start deletes what this installs
     fs::create_directories(base, ec);
     // the download (90 MB) and the unpacked DLLs (about 300 MB) are both on disk for a moment
     if (fs::space(base, ec).available < 500ull << 20 && !ec) return error = "needs 500 MB of free disk space", false;

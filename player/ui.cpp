@@ -777,11 +777,11 @@ std::vector<TrainButton> engine_buttons(const UiState& s) {
     char rtx[48];
     snprintf(rtx, sizeof rtx, "Download (%d MB)", (int)((RTX_WHEEL_SIZE + (1 << 19)) >> 20));  // rounded
     std::vector<TrainButton> b;
-    if (s.trt_addon) b.push_back({"Remove", K::RemoveTensorRT});  // the full TensorRT: already the fastest
-    else {
-        b.push_back(s.rtx_addon ? TrainButton{"Remove", K::RemoveTrtRtx} : TrainButton{rtx, K::DownloadTrtRtx});
-        b.push_back({"Faster: full TensorRT (1.9 GB)", K::DownloadTensorRT});
-    }
+    const bool both = s.trt_addon && s.rtx_addon;
+    if (s.trt_addon) b.push_back({both ? "Remove TensorRT" : "Remove", K::RemoveTensorRT});
+    if (s.rtx_addon) b.push_back({both ? "Remove TensorRT for RTX" : "Remove", K::RemoveTrtRtx});
+    else if (!s.trt_loaded) b.push_back({rtx, K::DownloadTrtRtx});
+    if (!s.trt_loaded) b.push_back({"Faster: full TensorRT (1.9 GB)", K::DownloadTensorRT});  // else: already the fastest
     b.push_back({"Choose folder...", K::ChooseTensorRTFolder});
     return b;
 }
@@ -1344,8 +1344,15 @@ int ui_selftest() {
             check(labels(rtx) == (V{"Remove", "Faster: full TensorRT (1.9 GB)", "Choose folder..."}) &&
                   kind(rtx, 0) == UiAction::RemoveTrtRtx);
             UiState full = none;  // the full TensorRT add-on
-            full.trt_addon = true;
+            full.trt_addon = full.trt_loaded = true;
             check(labels(full) == (V{"Remove", "Choose folder..."}) && kind(full, 0) == UiAction::RemoveTensorRT);
+            UiState own = none;  // the full TensorRT from your own folder: nothing to download or remove
+            own.trt_loaded = true;
+            check(labels(own) == (V{"Choose folder..."}));
+            UiState both = full;  // both add-ons: each can be removed
+            both.rtx_addon = true;
+            check(labels(both) == (V{"Remove TensorRT", "Remove TensorRT for RTX", "Choose folder..."}) &&
+                  kind(both, 0) == UiAction::RemoveTensorRT && kind(both, 1) == UiAction::RemoveTrtRtx);
             UiState rdl = none;  // downloading: Cancel only
             rdl.rtx_progress = .4f;
             check(labels(rdl) == (V{"Cancel"}) && kind(rdl, 0) == UiAction::CancelTrtRtx);

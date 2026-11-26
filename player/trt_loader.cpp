@@ -199,12 +199,14 @@ bool load_trt_rtx(const std::string& user_folder, std::string& version, int& min
             const fs::path d = fs::u8path(dir);
             std::error_code ec;
             if (!fs::exists(d / rtx_dll_name(m), ec)) continue;
+            wchar_t old_dir[MAX_PATH * 2] = L"";  // the full TensorRT's folder, if load_tensorrt set it (--engine rtx)
+            GetDllDirectoryW(MAX_PATH * 2, old_dir);
             SetDllDirectoryW(d.wstring().c_str());
             HMODULE lib = LoadLibraryExW((d / rtx_dll_name(m)).wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
             HMODULE parser = lib ? LoadLibraryExW((d / rtx_parser_name(m)).wstring().c_str(), nullptr,
                                                   LOAD_WITH_ALTERED_SEARCH_PATH)
                                  : nullptr;
-            SetDllDirectoryW(L"");  // back to: never the current folder
+            SetDllDirectoryW(old_dir);  // empty: never the current folder
             auto ver = lib ? (int32_t(*)())GetProcAddress(lib, "getInferLibVersion") : nullptr;
             const int v = ver ? ver() : 0;
             if (!lib || !parser || !ver || v / 10000 != 1 || v / 100 % 100 != m) {  // the DLL must be what its name says
@@ -220,6 +222,17 @@ bool load_trt_rtx(const std::string& user_folder, std::string& version, int& min
     (void)user_folder, (void)version;
 #endif
     return false;
+}
+
+bool rtx_from_addon() {
+#ifdef _WIN32
+    wchar_t p[MAX_PATH * 2];
+    if (!g_rtx || !GetModuleFileNameW(g_rtx, p, MAX_PATH * 2)) return false;
+    std::error_code ec;
+    return fs::equivalent(fs::path(p).parent_path(), fs::u8path(rtx_addon_dir()), ec);
+#else
+    return false;
+#endif
 }
 
 std::string engine_cache_name(const std::string& onnx, int w, int h, Engine e, int rtx_minor) {

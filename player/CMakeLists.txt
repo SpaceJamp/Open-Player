@@ -87,7 +87,7 @@ if(WIN32)
   # version found, each against its own headers. Its DLLs are loaded at run time (trt_loader), never linked.
   foreach(minor 8 7)
     file(GLOB _rtx_sdks "C:/TensorRT-RTX-1.${minor}.*")
-    list(SORT _rtx_sdks ORDER DESCENDING)
+    list(SORT _rtx_sdks COMPARE NATURAL ORDER DESCENDING)
     set(_rtx_guess "")
     if(_rtx_sdks)
       list(GET _rtx_sdks 0 _rtx_guess)
