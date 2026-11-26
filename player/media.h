@@ -10,11 +10,13 @@ extern "C" {
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "captions.h"
 #include "kernels.h"
 
 // Demuxes and decodes on a background thread. Video frames queue for the main thread (in GPU memory when
@@ -48,6 +50,12 @@ public:
     int serial() const { return serial_; }
     void set_paused(bool p);
     void set_volume(float v);
+    // Captions: the file's English tracks; which to show (indexes into them, -1: none; forced: shown alongside, for
+    // a forced track with captions off). An embedded track's cues are read as the file plays, so a change re-reads
+    // from `at` (the playback position). cues(): a copy of what's known now, in playback seconds.
+    const std::vector<CaptionTrack>& caption_tracks() const { return tracks_; }
+    void set_captions(int track, int forced, double at);
+    std::vector<Cue> cues();
     // Points the CUDA kernels at a decoded frame, uploading it first if it was decoded in software.
     YuvFrame to_gpu(AVFrame* f, cudaStream_t s);
 
@@ -58,6 +66,7 @@ private:
     void clear_queue();
     void clear_backlog();
     bool software_fallback();  // swap a GPU-only video decoder for FFmpeg's default; decode thread only
+    void apply_captions();     // decode thread: open the chosen tracks' decoders, read a chosen .srt
 
     AVFormatContext* fmt_ = nullptr;
     AVCodecContext *vctx_ = nullptr, *actx_ = nullptr;
@@ -81,6 +90,13 @@ private:
     double seek_to_ = 0, skip_until_ = -1, last_vpts_ = -0.04;  // last_vpts_: for frames without timestamps
     std::atomic<int> serial_{0};
     std::atomic<double> audio_end_{0};  // timestamp just past the last audio sample handed to SDL
+
+    std::vector<CaptionTrack> tracks_;
+    int cap_want_[2] = {-1, -1};     // under m_: the chosen and the forced track
+    bool cap_change_ = false;        // under m_
+    int cap_stream_[2] = {-1, -1};   // decode thread: their stream indexes (-1: none or a .srt)
+    std::unique_ptr<CueDecoder> cap_dec_[2];  // decode thread
+    std::vector<Cue> cues_, sidecar_cues_;  // under m_
 
     AVFrame* frame_ = nullptr;
     std::vector<float> pcm_;

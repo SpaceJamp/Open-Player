@@ -89,6 +89,7 @@ bool Media::open(const char* path, int cuda_device, bool nvdec) {
     }
     if (!audio_) aidx_ = -1, avcodec_free_context(&actx_);
 
+    tracks_ = list_tracks(fmt_, path);
     frame_ = av_frame_alloc();
     thread_ = std::thread(&Media::run, this);
     return true;
@@ -143,6 +144,12 @@ void Media::run() {
             if (quit_) break;
             if (seek_req_) {
                 seek_req_ = false;
+                if (cap_change_) {
+                    l.unlock();
+                    apply_captions();  // opens decoders, maybe reads a .srt: not under the lock
+                    l.lock();
+                }
+                cues_.clear();  // embedded cues come back as the demuxer reaches them again
                 double t = seek_to_;
                 int64_t ts = (int64_t)((t + start_) * AV_TIME_BASE);
                 avformat_seek_file(fmt_, -1, INT64_MIN, ts, ts, 0);  // lands on the keyframe at or before t
@@ -180,6 +187,19 @@ void Media::run() {
         if (pkt->stream_index == vidx_ && (room && backlog_.empty())) decode(vctx_, pkt);
         else if (pkt->stream_index == vidx_) backlog_.push_back(av_packet_clone(pkt));
         else if (pkt->stream_index == aidx_) decode(actx_, pkt);
+        else
+            for (int k = 0; k < 2; k++)
+                if (pkt->stream_index == cap_stream_[k]) {
+                    std::vector<Cue> got;
+                    cap_dec_[k]->feed(pkt, got);
+                    std::lock_guard l(m_);
+                    for (auto& c : got) {  // playback seconds start at the file's start time
+                        c.start -= start_;
+                        if (c.end >= 0) c.end -= start_;
+                        if (cues_.size() >= MAX_CUES) cues_.erase(cues_.begin(), cues_.begin() + MAX_CUES / 2);
+                        cues_.push_back(std::move(c));
+                    }
+                }
         av_packet_unref(pkt);
     }
     av_packet_free(&pkt);
@@ -272,6 +292,43 @@ double Media::audio_buffered() const {
 bool Media::finished() {
     std::lock_guard l(m_);
     return eof_ && queue_.empty() && !seek_req_;
+}
+
+void Media::set_captions(int track, int forced, double at) {
+    {
+        std::lock_guard l(m_);
+        if (cap_want_[0] == track && cap_want_[1] == forced) return;
+        cap_want_[0] = track, cap_want_[1] = forced, cap_change_ = true;
+    }
+    seek(at);  // re-read from here, so the new track's cues around now arrive
+}
+
+void Media::apply_captions() {
+    int want[2];
+    {
+        std::lock_guard l(m_);
+        want[0] = cap_want_[0], want[1] = cap_want_[1], cap_change_ = false;
+    }
+    std::vector<Cue> side;
+    for (int k = 0; k < 2; k++) {
+        cap_stream_[k] = -1;
+        cap_dec_[k] = std::make_unique<CueDecoder>();
+        if (want[k] < 0 || want[k] >= (int)tracks_.size()) continue;
+        const CaptionTrack& t = tracks_[want[k]];
+        if (t.stream >= 0) {
+            if (cap_dec_[k]->open(fmt_->streams[t.stream])) cap_stream_[k] = t.stream;
+        } else
+            for (auto& c : read_sidecar(t.sidecar)) side.push_back(std::move(c));
+    }
+    std::lock_guard l(m_);
+    sidecar_cues_ = std::move(side);
+}
+
+std::vector<Cue> Media::cues() {
+    std::lock_guard l(m_);
+    std::vector<Cue> all = cues_;
+    all.insert(all.end(), sidecar_cues_.begin(), sidecar_cues_.end());
+    return all;
 }
 
 void Media::seek(double seconds) {
