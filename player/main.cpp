@@ -1,4 +1,4 @@
-// Open Player: video player that upscales with our VSR network on the GPU.
+﻿// Open Player: video player that upscales with our VSR network on the GPU.
 // decode (NVDEC) -> YUV->RGB (CUDA) -> VSR (TensorRT) -> RGBA (CUDA) -> Vulkan blit to the window
 #include <SDL3/SDL.h>
 #include <atomic>
@@ -179,7 +179,7 @@ int main(int argc, char** argv) {
         if (no_handle(STD_ERROR_HANDLE)) freopen("CONOUT$", "w", stderr);
     }
 #endif
-    const char *path = nullptr, *model = "vsr.onnx", *collect_dir = nullptr;
+    const char *path = nullptr, *model = "vsr.onnx", *collect_dir = nullptr, *engine_flag = nullptr;
     bool vsr_on = true, selftest = false, checking = false, stats = false, fullscreen = false, want_rtx = true,
          cpu_decode = false, start_paused = false, model_given = false;
     int screen = 0;  // --screen N, counted from 1; 0 = the primary display
@@ -196,6 +196,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = true;
         else if (!strcmp(argv[i], "--stats")) stats = true;
         else if (!strcmp(argv[i], "--selftest")) selftest = true;
+        else if (!strcmp(argv[i], "--engine") && i + 1 < argc) engine_flag = argv[++i];  // developers: full|rtx
         else if (!strcmp(argv[i], "--check")) checking = true;
         else if (!strcmp(argv[i], "--uitest")) return ui_selftest();
         else if (!strcmp(argv[i], "--version")) return printf("Open Player %s\n", OPEN_PLAYER_BUILD), 0;
@@ -230,9 +231,19 @@ int main(int argc, char** argv) {
     finish_pending_addon_removal();  // "Remove" while its DLLs were in use
     finish_pending_training_removal();
     TrtFrom trt_from = load_tensorrt(saved.trt_folder, trt_ver, trt_why);
+    // TensorRT for RTX: Pixel Flow's engine when the full TensorRT isn't there (its DLL is big: loaded only then)
+    std::string rtx_ver, rtx_why = "not needed: the full TensorRT is there";
+    int rtx_minor = -1;
+    finish_pending_rtx_removal();
+    const bool force_rtx = engine_flag && !strcmp(engine_flag, "rtx"), force_full = engine_flag && !strcmp(engine_flag, "full");
+    const bool rtx_ok = (trt_from == TrtFrom::None || force_rtx) && !force_full && load_trt_rtx("", rtx_ver, rtx_minor, rtx_why);
+    const Engine engine = force_rtx ? (rtx_ok ? Engine::Rtx : Engine::None)
+                                    : choose_engine(trt_from != TrtFrom::None, rtx_ok && !force_full);
+    fprintf(stderr, "%s\n", engine_line(engine, trt_line(trt_from, trt_ver, trt_why), rtx_ver, rtx_why).c_str());
     if (selftest)
-        return trt_from == TrtFrom::None ? fprintf(stderr, "%s\n", trt_line(trt_from, trt_ver, trt_why).c_str()), 1
-                                         : Vsr::selftest(model);
+        return engine == Engine::None ? fprintf(stderr, "no Pixel Flow engine: %s; TensorRT for RTX: %s\n",
+                                                trt_line(trt_from, trt_ver, trt_why).c_str(), rtx_why.c_str()), 1
+                                      : Vsr::selftest(model, engine, rtx_minor);
     if (checking) return check(model, trt_from, trt_ver, trt_why);
     // open-player.log, for playback only (a --check must not push the last crash's log out to .old.log): everything
     // below that goes to stderr is also saved, with the libraries' own messages
@@ -349,7 +360,7 @@ int main(int argc, char** argv) {
         // Pixel Flow: needs your own trained model and TensorRT. Nobody gets a model with the player.
         Vsr vsr;
         bool model_there = std::filesystem::exists(std::filesystem::u8path(model));
-        bool have_pxf = worth_it && model_there && trt_from != TrtFrom::None && vsr.open(model, nw, nh, st);
+        bool have_pxf = worth_it && model_there && engine != Engine::None && vsr.open(model, nw, nh, st, engine, rtx_minor);
         bool shrink = have_pxf && (nw != w || nh != h);
         __half* full = nullptr;  // full-size RGB frame, when it gets shrunk before the network
         if (shrink) cudaMalloc(&full, 3ull * w * h * 2);

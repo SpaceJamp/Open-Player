@@ -222,6 +222,16 @@ bool load_trt_rtx(const std::string& user_folder, std::string& version, int& min
     return false;
 }
 
+std::string engine_cache_name(const std::string& onnx, int w, int h, Engine e, int rtx_minor) {
+    const std::string base = onnx + "." + std::to_string(w) + "x" + std::to_string(h);
+    if (e == Engine::Rtx) return base + ".rtx" + std::to_string(rtx_minor) + ".engine";
+#ifdef _WIN32  // plans only load on the platform that built them; WSL and Windows share the model's folder
+    return base + ".win.engine";
+#else
+    return base + ".engine";
+#endif
+}
+
 std::string engine_line(Engine e, const std::string& full_line, const std::string& rtx_version, const std::string& rtx_why) {
     (void)rtx_why;
     if (e == Engine::Full) return "Pixel Flow engine: TensorRT " + full_line.substr(full_line.find(':') + 2);
@@ -257,6 +267,14 @@ int trt_loader_selftest() {
     check(engine_line(Engine::None, "TensorRT: not installed", "", "not installed") ==
           "Pixel Flow engine: none (download TensorRT for RTX in Settings > Upscaling)");
     check(rtx_dll_name(8) == "tensorrt_rtx_1_8.dll" && rtx_parser_name(7) == "tensorrt_onnxparser_rtx_1_7.dll");
+    // an engine plan is only ever read by the engine (and version) that built it
+    const std::string full = engine_cache_name("D:/m/vsr.onnx", 1920, 1080, Engine::Full, -1),
+                      r7 = engine_cache_name("D:/m/vsr.onnx", 1920, 1080, Engine::Rtx, 7),
+                      r8 = engine_cache_name("D:/m/vsr.onnx", 1920, 1080, Engine::Rtx, 8);
+#ifdef _WIN32
+    check(full == "D:/m/vsr.onnx.1920x1080.win.engine");  // today's name: existing caches stay valid
+#endif
+    check(r7 == "D:/m/vsr.onnx.1920x1080.rtx7.engine" && r8 != r7 && r7 != full);
     // each compiled-in TensorRT for RTX copy was built with its own version's headers (1.<minor>.x)
     for (int m : rtx_minors()) check(trt_rtx_header_version(m) / 10000 == 1 && trt_rtx_header_version(m) / 100 % 100 == m);
 #ifdef _WIN32

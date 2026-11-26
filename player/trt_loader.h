@@ -25,6 +25,9 @@ bool load_trt_rtx(const std::string& user_folder, std::string& version, int& min
 const std::vector<int>& rtx_minors();  // the TensorRT for RTX versions compiled in, newest first (1.8 -> 8)
 void* rtx_module();         // the loaded TensorRT for RTX DLL (HMODULE), for its entry points; nullptr: none
 void* rtx_parser_module();  // its ONNX parser DLL
+// Where a built engine for this model and input size is cached: <onnx>.<w>x<h>[.win].engine (full TensorRT, as
+// before) or <onnx>.<w>x<h>.rtx<minor>.engine (TensorRT for RTX 1.<minor>).
+std::string engine_cache_name(const std::string& onnx, int w, int h, Engine e, int rtx_minor);
 // "Pixel Flow engine: TensorRT 11.5.0 (add-on)" / "... TensorRT for RTX 1.7.1" / "... none (...)"
 std::string engine_line(Engine e, const std::string& full_line, const std::string& rtx_version, const std::string& rtx_why);
 std::string user_data_dir();  // %LOCALAPPDATA%\Open Player (Linux: ~/.local/share/open-player): the user's model

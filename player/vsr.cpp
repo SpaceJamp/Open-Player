@@ -38,14 +38,18 @@ int Vsr::model_scale(const std::string& onnx) {
     return hdr[0];
 }
 
-bool Vsr::open(const std::string& onnx, int w, int h, cudaStream_t s) {
-    w_ = w, h_ = h, s_ = s, scale_ = model_scale(onnx);
+bool Vsr::open(const std::string& onnx, int w, int h, cudaStream_t s, Engine engine, int rtx_minor) {
+    w_ = w, h_ = h, s_ = s, scale_ = model_scale(onnx), engine_kind_ = engine, rtx_minor_ = rtx_minor;
     if (scale_ <= 0) {
         fprintf(stderr, "vsr: missing %s (export.py writes it next to the .onnx)\n",
                 fs::path(onnx).replace_extension(".ref").string().c_str());
         return false;
     }
-    if (!load_or_build(onnx, true)) return false;
+    if (engine == Engine::Rtx) {
+        rtx_ = make_rtx_engine(rtx_minor, onnx, engine_cache_name(onnx, w, h, Engine::Rtx, rtx_minor), w, h, scale_);
+        if (!rtx_) return false;
+    } else if (engine != Engine::Full || !load_or_build(onnx, true))
+        return false;
 
     size_t n = 3ull * w * h, N = n * scale_ * scale_;
     for (int i = 0; i < 2; i++)
@@ -55,12 +59,7 @@ bool Vsr::open(const std::string& onnx, int w, int h, cudaStream_t s) {
 
 bool Vsr::load_or_build(const std::string& onnx, bool allow_cache) {
     int s = scale_;
-#ifdef _WIN32  // plans only load on the platform that built them; WSL and Windows share the model's folder
-    const char* platform = ".win";
-#else
-    const char* platform = "";
-#endif
-    fs::path cache = onnx + "." + std::to_string(w_) + "x" + std::to_string(h_) + platform + ".engine";
+    fs::path cache = engine_cache_name(onnx, w_, h_, Engine::Full, -1);
     std::error_code ec;
     bool cached = allow_cache && fs::exists(cache) && fs::last_write_time(cache, ec) >= fs::last_write_time(onnx, ec);
     std::vector<char> plan;
@@ -106,7 +105,15 @@ bool Vsr::load_or_build(const std::string& onnx, bool allow_cache) {
            ctx_->setInputShape("prev_hr", Dims4{1, 3, h_ * s, w_ * s});
 }
 
+void Vsr::save_cache() {
+    if (rtx_) rtx_->save_cache();
+}
+
 void Vsr::infer(const __half* cur, const __half* prev, const __half* prev_hr, __half* out) {
+    if (rtx_) {
+        rtx_->infer(cur, prev, prev_hr, out, s_);
+        return;
+    }
     ctx_->setTensorAddress("cur", (void*)cur);
     ctx_->setTensorAddress("prev", (void*)prev);
     ctx_->setTensorAddress("prev_hr", (void*)prev_hr);
@@ -126,7 +133,7 @@ const __half* Vsr::run(bool reset) {
     return out;
 }
 
-int Vsr::selftest(const std::string& onnx) {
+int Vsr::selftest(const std::string& onnx, Engine engine, int rtx_minor) {
     auto ref = read_file(fs::path(onnx).replace_extension(".ref"));
     if (ref.size() < 12) return fprintf(stderr, "selftest: no .ref next to %s\n", onnx.c_str()), 1;
     const int* hdr = (const int*)ref.data();
@@ -140,7 +147,7 @@ int Vsr::selftest(const std::string& onnx) {
     cudaStream_t st;
     cudaStreamCreate(&st);
     Vsr v;
-    if (!v.open(onnx, w, h, st)) return fprintf(stderr, "selftest: could not open engine\n"), 1;
+    if (!v.open(onnx, w, h, st, engine, rtx_minor)) return fprintf(stderr, "selftest: could not open engine\n"), 1;
     auto upload = [](__half* dst, const float* src, size_t count) {
         std::vector<__half> t(count);
         for (size_t i = 0; i < count; i++) t[i] = __float2half(src[i]);
