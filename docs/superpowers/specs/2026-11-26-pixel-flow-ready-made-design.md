@@ -45,3 +45,23 @@ Not decided yet. Options under study:
 - The pick above, then whether this is one project or two (shipped model; engine change) and their order.
 - Which open footage, and its licence terms for redistributing a model trained on it.
 - Fine-tune length and defaults in train.py and the in-player training.
+
+## Update 2026-11-26 (continued in a second session)
+
+- **Linux too (the user):** everything must work on Linux as well, and Linux users get a download with updates
+  like Windows (not only build-from-source).
+- **Measured download sizes** (pypi.nvidia.com, 11.5.0.63 / TRT-RTX EP 0.5.0):
+
+  | | Windows | Linux x86_64 |
+  |---|---|---|
+  | full TensorRT (today's add-on) | 1.9 GB | 3.6 GB |
+  | TensorRT lean runtime | 13 MB | 44 MB |
+  | TensorRT for RTX (via onnxruntime-ep-nv-tensorrt-rtx) | 106 MB | 140 MB |
+
+- **New option 4: TensorRT for RTX** — NVIDIA's TensorRT for apps shipped to consumer RTX PCs: builds the engine
+  on the user's GPU in seconds (no prebuilt engines, no compatibility flags), all RTX cards, Windows and Linux.
+  Proposed pick (not yet decided), pending a throwaway spike on the RTX 5080: Pixel Flow standard 1080p -> 4K
+  through TensorRT for RTX and the lean runtime vs today's TensorRT (speed, output difference).
+- **Three projects, in this order (proposed):** 1. the engine (TensorRT for RTX, Windows + Linux); 2. the shipped
+  ready-made Pixel Flow (footage, licence, fine-tune); 3. a Linux download with updates (likely an AppImage),
+  after 1 removes the 3.6 GB add-on.
