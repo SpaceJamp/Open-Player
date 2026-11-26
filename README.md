@@ -264,7 +264,7 @@ the second monitor (`OPEN_PLAYER_SCREEN=N` to change).
 ## License
 
 Open Player is licensed under the [GNU Affero General Public License v3.0](LICENSE), with an
-[additional permission](LICENSE-EXCEPTION) to link NVIDIA's CUDA, TensorRT and RTX Video SDK libraries. Bundled
+[additional permission](LICENSE-EXCEPTION) to link NVIDIA's CUDA, TensorRT, TensorRT for RTX and RTX Video SDK libraries. Bundled
 third-party code and fonts keep their own licenses: Dear ImGui (MIT, `player/third_party/imgui/LICENSE.txt`), Inter
 (SIL OFL) and Tabler Icons (MIT, both in `assets/fonts/`). The downloaded add-ons keep theirs; see
 `installer/THIRD-PARTY-NOTICES.txt`.
