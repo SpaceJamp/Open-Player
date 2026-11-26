@@ -40,7 +40,7 @@ find_library(NVINFER NAMES nvinfer nvinfer_11 HINTS ${TENSORRT_ROOT}/lib REQUIRE
 find_library(NVONNXPARSER NAMES nvonnxparser nvonnxparser_11 HINTS ${TENSORRT_ROOT}/lib REQUIRED)
 
 set(IMGUI third_party/imgui)
-add_executable(open-player main.cpp media.cpp vsr.cpp display.cpp ui.cpp theme.cpp collect.cpp settings.cpp logfile.cpp update.cpp trt_loader.cpp addon.cpp training_addon.cpp training_run.cpp kernels.cu
+add_executable(open-player main.cpp media.cpp vsr.cpp display.cpp ui.cpp theme.cpp collect.cpp settings.cpp logfile.cpp update.cpp trt_loader.cpp addon.cpp training_addon.cpp training_run.cpp captions.cpp kernels.cu
   ${IMGUI}/imgui.cpp ${IMGUI}/imgui_draw.cpp ${IMGUI}/imgui_tables.cpp ${IMGUI}/imgui_widgets.cpp
   ${IMGUI}/backends/imgui_impl_sdl3.cpp ${IMGUI}/backends/imgui_impl_vulkan.cpp)
 target_include_directories(open-player SYSTEM PRIVATE ${IMGUI} ${IMGUI}/backends)  # SYSTEM: no warnings from it
