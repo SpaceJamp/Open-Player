@@ -1,6 +1,6 @@
 # Captions (English subtitles)
 
-Date: 2026-11-25. Status: draft, waiting for the user's approval. Reviewed by a builder check; its questions are
+Date: 2026-11-25. Status: approved by the user (2026-11-25). Reviewed by a builder check; its questions are
 answered below as my calls.
 
 ## Intent
