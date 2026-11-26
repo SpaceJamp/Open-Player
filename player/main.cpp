@@ -250,12 +250,20 @@ int main(int argc, char** argv) {
     if (checking) return check(model, trt_from, trt_ver, trt_why, engine, rtx_minor);
     // open-player.log, for playback only (a --check must not push the last crash's log out to .old.log): everything
     // below that goes to stderr is also saved, with the libraries' own messages
-    bool logging = start_log(log_file());
+    // shortcut: a chain of reopens can grow the log past the 5 MB cap (counted per process); fine while reopens are few
+    const bool reopened = getenv("OPEN_PLAYER_REOPENED") != nullptr;
+#ifdef _WIN32
+    _putenv("OPEN_PLAYER_REOPENED=");
+#else
+    unsetenv("OPEN_PLAYER_REOPENED");
+#endif
+    bool logging = start_log(log_file(), reopened);
     if (logging) {
         atexit(stop_log);
         fprintf(stderr, "Open Player %s\n", OPEN_PLAYER_BUILD);
     } else fprintf(stderr, "log: can't write %s, running without a log file\n", log_file().c_str());
-    fprintf(stderr, "%s\n%s\n", trt_line(trt_from, trt_ver, trt_why).c_str(), driver_line().c_str());
+    fprintf(stderr, "%s%s\n%s\n", engine_line(engine, trt_line(trt_from, trt_ver, trt_why), rtx_ver, rtx_why).c_str(),
+            engine == Engine::None ? (" (TensorRT for RTX: " + rtx_why + ")").c_str() : "", driver_line().c_str());
     // double-clicked with no video: ask for one, like the Open button (cancel quits)
     struct Pick {
         std::string file;
@@ -581,7 +589,12 @@ int main(int argc, char** argv) {
             if (cfg.remember_position) save_position();
             if (volume_unsaved) save_settings(settings_file(), saved);
             fprintf(stderr, "reopening: %s\n", video.c_str());
-            stop_log();  // the new process starts its own log; this one's last lines must reach the file first
+            stop_log();  // this one's last lines must reach the file before the new process appends to it
+#ifdef _WIN32
+            _putenv("OPEN_PLAYER_REOPENED=1");
+#else
+            setenv("OPEN_PLAYER_REOPENED", "1", 1);
+#endif
 #ifdef _WIN32
             for (auto& a : args) a = quote_arg(a);  // _execv joins the arguments with spaces and doesn't quote them
 #endif
