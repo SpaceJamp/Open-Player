@@ -1,0 +1,43 @@
+# Ready-made Pixel Flow, faster engine, no TensorRT add-on
+
+Date: 2026-11-26. Status: DRAFT, not approved. Brainstorming paused mid-way (the user had to leave).
+
+## Intent (from the user)
+
+Training Pixel Flow is a hassle. Keep Pixel Flow, but make it faster to learn and more efficient, for people who
+download the player, not only the maintainer. Also drop the 1.9 GB TensorRT add-on download on Windows.
+
+## Decided so far
+
+- Approach 1 (user's pick): ship a ready-made Pixel Flow, trained once by the maintainer on openly licensed footage
+  (candidates: Blender open films such as Sintel and Tears of Steel, CC-BY; Xiph.org test sequences). The model is
+  under 1 MB and goes in the installer. Training on your own videos becomes an optional short fine-tune from that
+  model instead of a 9-hour run from scratch.
+- Faster playback with 8-bit inference (INT8, RTX 20 and newer; FP8 on RTX 40/50), checked against fp16 quality
+  before it is used. The user asked whether 8-bit wears the card more: no. Same frames per second, less work per
+  frame, so less power and heat (inference; to be measured with --stats).
+- Drop the TensorRT add-on.
+
+## Rejected
+
+- Replacing Pixel Flow with shader upscalers (FSR 1, NIS) or open neural models: the user chose to keep Pixel Flow.
+- Only speeding up training, without a shipped model: every downloader would still have to train.
+- Distilling from an open teacher such as Real-ESRGAN (approach 2): kept as a follow-up if the open-footage
+  model looks soft.
+
+## Open: how to run Pixel Flow without the TensorRT add-on
+
+Not decided yet. Options under study:
+1. TensorRT's small "lean" runtime shipped in the installer, with engines built once as version- and
+   hardware-compatible. Smallest change; may exclude some older GPUs and lose some speed. Facts being checked:
+   runtime size, supported GPUs, dynamic shapes, INT8/FP8.
+2. Pixel Flow's layers written as the player's own CUDA kernels (Tensor Cores, fp16/int8): no library to ship,
+   full control, but a lot of work and must match TensorRT's speed.
+3. Vulkan compute (for example ncnn): small and could later run on AMD/Intel, but likely slower on NVIDIA and
+   needs CUDA/Vulkan interop.
+
+## Still to settle
+
+- The pick above, then whether this is one project or two (shipped model; engine change) and their order.
+- Which open footage, and its licence terms for redistributing a model trained on it.
+- Fine-tune length and defaults in train.py and the in-player training.
