@@ -19,6 +19,7 @@
 #include "training_addon.h"
 #include "training_run.h"
 #include "captions.h"
+#include "keepup.h"
 #include "imgui.h"
 #include "imgui_internal.h"  // the self-test finds the volume panel's window
 #include "theme.h"
@@ -1307,6 +1308,23 @@ int ui_selftest() {
                 }));
             }
             io.AddMousePosEvent(5, 5);
+        }
+        // Pixel Flow keeping up, or the fall-back to RTX VSR
+        {
+            KeepUp k{4, 10, 280, 20, 20, 33.3};
+            check(!should_fall_back(k));  // within 5 s of a start or seek: never
+            k.since_start = 30;
+            check(should_fall_back(k));  // 20 of 300 frames dropped (6.7%)
+            k.dropped = 12, k.frames = 288;
+            check(!should_fall_back(k));  // 4%, and 20 ms per frame against 33 ms: keeps up
+            k.dropped = 0, k.frames = 300, k.pxf_ms = 40;
+            check(should_fall_back(k));  // nothing dropped yet, but 40 ms per frame at 30 fps can't last
+            k.window_s = 5;
+            check(!should_fall_back(k));  // too short a window to judge
+            k = {30, 10, 0, 0, 40, 33.3};
+            check(!should_fall_back(k));  // no frames (paused): nothing to judge
+            k = {30, 10, 300, 0, 40, 0};
+            check(!should_fall_back(k));  // frame rate unknown: only drops count
         }
         // Pixel Flow's engine in Settings > Upscaling: TensorRT for RTX first, the full TensorRT as the faster option
         {

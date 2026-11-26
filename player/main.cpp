@@ -46,6 +46,7 @@
 #include "training_addon.h"
 #include "training_run.h"
 #include "captions.h"
+#include "keepup.h"
 #include "update.h"
 #ifdef HAVE_RTX_VSR
 #include "rtx_vsr.h"
@@ -414,6 +415,11 @@ int main(int argc, char** argv) {
         save_recent(recent_file(), recent);
         recent = existing_only(recent);  // once: on WSL each check of a /mnt/c path is slow
         int serial = media.serial(), sw = 0, sh = 0, frames_shown = 0;
+        // Pixel Flow keeping up (keepup.h): one window at a time, restarted by a seek
+        KeepUp keep;
+        int keep_serial = serial, keep_n = 0;
+        double keep_from = -1, keep_ms = 0;  // keep_from: set at the first report (now() comes later)
+        bool keep_gave_up = false;  // once per video: a fall-back (or its notice) never repeats
         float volume = cfg.remember_volume ? cfg.volume : 1;
         media.set_volume(volume);
         bool volume_unsaved = false;  // saved at most once a second while it changes, and on quit
@@ -1229,6 +1235,25 @@ int main(int argc, char** argv) {
             if (now() - last_report >= 1) {  // info overlay; with --stats also one JSON line
                 last_report = now();
                 int dropped = media.take_dropped();
+                if (serial != keep_serial || keep_from < 0)
+                    keep_serial = serial, keep_from = now(), keep = {}, keep_ms = 0, keep_n = 0;
+                if (vsr_on && !use_rtx && !paused && !keep_gave_up) {
+                    keep.window_s += 1, keep.frames += diag.shown, keep.dropped += dropped;
+                    keep_ms += diag.vsr.sum, keep_n += diag.vsr.n;
+                    keep.since_start = now() - keep_from;
+                    keep.pxf_ms = keep_n ? keep_ms / keep_n : 0;
+                    keep.frame_ms = media.fps() > 0 ? 1000 / media.fps() : 0;
+                    if (should_fall_back(keep)) {
+                        keep_gave_up = true;
+                        fprintf(stderr, "Pixel Flow can't keep up: %d of %d frames dropped, %.1f ms per frame (%.1f ms "
+                                        "available)\n", keep.dropped, keep.frames + keep.dropped, keep.pxf_ms, keep.frame_ms);
+                        // this video only: set_upscaler doesn't save; without RTX VSR it stays on Pixel Flow
+                        const bool to_rtx = set_upscaler(Upscaler::Rtx);
+                        post(ICON_SPARKLES, to_rtx ? "Pixel Flow can't keep up here: using NVIDIA RTX VSR"
+                                                   : "Pixel Flow can't keep up here", -1, 4);
+                    } else if (keep.window_s >= 10)  // judged a full window: the next one starts afresh
+                        keep = {}, keep_ms = 0, keep_n = 0;
+                }
                 char buf[512];
                 snprintf(buf, sizeof buf,
                          "GPU      %s (%s)\nDecode   %s\nVideo    %dx%d @ %.2f fps\nScreen   %dx%d\n"
