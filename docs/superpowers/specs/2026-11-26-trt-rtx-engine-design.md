@@ -1,6 +1,6 @@
 # Pixel Flow on TensorRT for RTX (project 1 of the ready-made Pixel Flow plan)
 
-Date: 2026-11-26. Status: draft, waiting for the user's approval. Windows only for now; Linux later (must not be
+Date: 2026-11-26. Status: draft, reviewed by a builder check, waiting for the user's approval. Windows only for now; Linux later (must not be
 ruled out). Parent draft: `2026-11-26-pixel-flow-ready-made-design.md` (engine spike results there).
 
 ## Intent
@@ -80,3 +80,14 @@ resolution. The user wants Pixel Flow to work for people who download the player
 
 - "NVIDIA TensorRT for RTX" added to LICENSE-EXCEPTION (the AGPL section 7 linking permission), so Approach A
   (its own C++ API) stands.
+
+## Decided (the user, 2026-11-26): when Pixel Flow can't keep up
+
+- **Fall back to NVIDIA RTX VSR automatically.** Details (my calls):
+  - Trigger: over a 10-second window of playback (not paused, not seeking), more than 5% of frames dropped or
+    Pixel Flow's own time per frame above the video's frame interval. Measured with the numbers `--stats` already
+    collects. Not during the first 5 s after start, a seek or an engine build.
+  - Action: switch this video to RTX VSR (the same path as choosing it in Settings), notice "Pixel Flow can't keep
+    up here: using NVIDIA RTX VSR". The saved upscaler setting is not changed; the next video tries Pixel Flow again.
+  - No RTX VSR on this PC: keep Pixel Flow and show the notice "Pixel Flow can't keep up here" once.
+  - Applies to either engine (TensorRT for RTX or the full add-on).
