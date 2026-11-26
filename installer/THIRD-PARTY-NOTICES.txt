@@ -19,6 +19,8 @@ This installation also contains:
 - Microsoft Visual C++ runtime DLLs, redistributed under the Visual Studio license terms.
 
 The optional TensorRT add-on (downloaded from NVIDIA in Settings) comes with NVIDIA's licence in its folder.
+The TensorRT for RTX add-on (downloaded from NVIDIA's package index in Settings > Upscaling, never part of this
+installer) comes with NVIDIA's licence in its folder.
 
 The optional Training add-on (downloaded in Settings > Training, never part of this installer) is unpacked into
 %LOCALAPPDATA%\Open Player\training from each project's own server, each file checked against a fixed SHA-256:
