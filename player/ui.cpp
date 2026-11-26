@@ -77,7 +77,11 @@ std::string clock_text(double t) {
     return buf;
 }
 
-float ui_scale(float display_h) { return std::clamp(display_h / 1080.f, 1.f, 2.5f); }
+float ui_scale(float display_w, float display_h, float screen_h) {
+    const float want = std::clamp((screen_h > 0 ? screen_h : display_h) / 1080.f, 1.f, 2.5f);
+    const float fits = std::fmin(display_w / 640.f, display_h / 360.f);  // the smallest layout the tests check
+    return std::fmax(1.f, std::fmin(want, fits));
+}
 
 std::string seek_notice_text(double delta, double target, double dur) {
     if (dur > 0) target = std::fmin(target, dur);
@@ -1071,7 +1075,14 @@ int ui_selftest() {
     check(can_open(tmp) && !can_open(std::filesystem::temp_directory_path().string()) && !can_open("/definitely/missing.mkv"));  // files only
     std::filesystem::remove(tmp);
 
-    check(ui_scale(1080) == 1 && ui_scale(2160) == 2 && ui_scale(720) == 1 && ui_scale(4320) == 2.5f);  // logical points, clamped 1-2.5
+    // the screen's size sets it (clamped 1-2.5), so a window matches fullscreen; a window too small to hold
+    // the controls at that size (under 640x360 times it) gets smaller ones, never below 1
+    check(ui_scale(1920, 1080, 1080) == 1 && ui_scale(3840, 2160, 2160) == 2 && ui_scale(1280, 720, 720) == 1 &&
+          ui_scale(7680, 4320, 4320) == 2.5f);                                   // fullscreen: as before
+    check(ui_scale(1600, 900, 2160) == 2 && ui_scale(1280, 720, 2160) == 2);      // a window on a 4K screen
+    check(ui_scale(960, 540, 2160) == 1.5f && ui_scale(3000, 400, 2160) == 400 / 360.f &&
+          ui_scale(400, 300, 2160) == 1);                                          // too small for 2x
+    check(ui_scale(1280, 720, 0) == 1 && ui_scale(3840, 2160, 0) == 2);           // screen unknown: the window
     check(seek_notice_text(5, 100, 90) == "+5 s · " + clock_text(90));   // target past the end
     check(seek_notice_text(-5, -2, 90) == "−5 s · 00:00");              // before the start
     check(seek_notice_text(5, 100, 0) == "+5 s · " + clock_text(100));  // unknown duration: unclamped above

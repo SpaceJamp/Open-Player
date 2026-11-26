@@ -538,6 +538,12 @@ int main(int argc, char** argv) {
             seek(t);
             post(dt > 0 ? ICON_FORWARD_5 : ICON_BACKWARD_5, seek_notice_text(dt, t, dur));
         };
+        // the height of the screen the window is on, in window coordinates like ImGui's DisplaySize (a fullscreen
+        // window is exactly this tall); 0 when SDL can't say
+        auto window_screen_h = [&]() -> float {
+            const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(win));
+            return m ? (float)m->h : 0.f;
+        };
         auto toggle_fullscreen = [&] { SDL_SetWindowFullscreen(win, !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN)); };
         // replaces this process with the player run with args (open another video, reopen after a settings change)
         double position_saved_at = now();
@@ -935,7 +941,8 @@ int main(int argc, char** argv) {
                 bool full = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN;
                 if (shown && !named) named = true, post(nullptr, std::filesystem::path(path).filename().string(), -1, 2);
                 UiState us{pos, dur, now(), last_mouse, paused, have_vsr, vsr_on, full, show_info, volume, info, recent,
-                           ui_scale(ImGui::GetIO().DisplaySize.y), notice, s, use_rtx};
+                           ui_scale(ImGui::GetIO().DisplaySize.x, ImGui::GetIO().DisplaySize.y, window_screen_h()),
+                           notice, s, use_rtx};
                 us.settings_open = settings_open;
                 us.settings = cfg;
                 us.settings.upscaler = !vsr_on ? Upscaler::Off : use_rtx ? Upscaler::Rtx : Upscaler::PixelFlow;
