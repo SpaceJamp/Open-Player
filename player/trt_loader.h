@@ -19,6 +19,7 @@ std::string training_addon_dir();  // user_data_dir()\training: the Training add
 std::string training_work_dir();   // user_data_dir()\training-work: the player's own training run
 std::string program_dir();         // the folder open-player.exe is in
 std::string addon_dir();     // user_data_dir()\tensorrt
+std::string rtx_addon_dir();  // user_data_dir()\tensorrt-rtx: the TensorRT for RTX add-on
 bool installed_copy();        // installed by the installer (installed.txt next to the program)
 
 // "NVIDIA RTX VSR: <nvngx_vsr.dll version> (SDK API 1.5.0)"; ", not in use" when not opened; why not when it failed

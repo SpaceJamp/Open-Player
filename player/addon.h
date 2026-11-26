@@ -21,6 +21,19 @@ bool install_tensorrt_addon(const std::function<void(uint64_t, uint64_t)>& progr
 // Removes the add-on folder; in_use (its DLLs are loaded): marks it for removal at the next start instead.
 void remove_tensorrt_addon(bool in_use);
 void finish_pending_addon_removal();  // at start, before TensorRT loads
+
+// The TensorRT for RTX add-on: NVIDIA's public TensorRT for RTX runtime (no login), the engine Pixel Flow uses when
+// the full TensorRT isn't there. Same rules: pinned, hash checked before unpacking, built in a ".new" folder.
+inline constexpr const char* RTX_WHEEL_URL =
+    "https://pypi.nvidia.com/tensorrt-rtx-cu13-libs/tensorrt_rtx_cu13_libs-1.7.1.116-py3-none-win_amd64.whl";
+inline constexpr const char* RTX_WHEEL_SHA256 = "3f0bc38ffe0b755e9de672da7b9ed3c05ddfd2538160c36af2a1e0994508c940";
+inline constexpr uint64_t RTX_WHEEL_SIZE = 93129282;
+inline constexpr const char* RTX_DLL = "tensorrt_rtx_1_7.dll";  // the engine DLL this add-on version carries
+bool extract_trt_rtx(const std::string& wheel, const std::string& dir, std::string& error);
+bool install_trt_rtx_addon(const std::function<void(uint64_t, uint64_t)>& progress, const std::atomic<bool>& cancel,
+                           std::string& error);
+void remove_trt_rtx_addon(bool in_use);
+void finish_pending_rtx_removal();  // at start, before TensorRT for RTX loads
 int addon_selftest();
 #include <filesystem>
 #include <utility>

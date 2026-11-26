@@ -58,6 +58,7 @@ std::string user_data_dir() {
 }
 
 std::string addon_dir() { return (fs::u8path(user_data_dir()) / "tensorrt").u8string(); }
+std::string rtx_addon_dir() { return (fs::u8path(user_data_dir()) / "tensorrt-rtx").u8string(); }
 std::string training_addon_dir() { return (fs::u8path(user_data_dir()) / "training").u8string(); }
 std::string training_work_dir() { return (fs::u8path(user_data_dir()) / "training-work").u8string(); }
 std::string program_dir() { return exe_dir().u8string(); }
