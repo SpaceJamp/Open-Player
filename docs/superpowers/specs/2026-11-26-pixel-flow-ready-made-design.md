@@ -65,3 +65,5 @@ Not decided yet. Options under study:
 - **Three projects, in this order (proposed):** 1. the engine (TensorRT for RTX, Windows + Linux); 2. the shipped
   ready-made Pixel Flow (footage, licence, fine-tune); 3. a Linux download with updates (likely an AppImage),
   after 1 removes the 3.6 GB add-on.
+- **Windows first (the user, 2026-11-26):** optimise for Windows now; Linux (support + download) stays a
+  requirement for later, so choices must not rule it out, but the spike and project 1 are Windows-only.
