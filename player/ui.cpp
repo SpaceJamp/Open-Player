@@ -163,6 +163,21 @@ void text_centred(ImDrawList* dl, float px, ImVec2 c, ImU32 colour, const char* 
     dl->AddText(ImGui::GetFont(), px, {std::round(c.x - sz.x / 2), std::round(c.y - sz.y / 2)}, colour, t);
 }
 
+// Where to draw an icon so its drawn shape (not its advance box: Tabler's glyphs sit off-centre in theirs) is
+// centred on c.
+ImVec2 icon_at(float px, const char* icon, ImVec2 c) {
+    unsigned int cp = 0;
+    ImTextCharFromUtf8(&cp, icon, nullptr);
+    ImFontBaked* b = ImGui::GetFont()->GetFontBaked(px);
+    const ImFontGlyph* g = b->FindGlyph((ImWchar)cp);
+    if (!g || g->X1 <= g->X0) {
+        const ImVec2 sz = text_size(px, icon);
+        return {std::round(c.x - sz.x / 2), std::round(c.y - sz.y / 2)};
+    }
+    const float k = px / b->Size;  // the glyph is in the baked size's units; drawing scales it to px
+    return {std::round(c.x - k * (g->X0 + g->X1) / 2), std::round(c.y - k * (g->Y0 + g->Y1) / 2)};
+}
+
 // Buttons are circles concentric with the capsule's ends; without the icon font, pills with the text label.
 float button_w(const char* label, float h, float sc) {
     return theme_loaded() ? h : text_size(16 * sc, label).x + 24 * sc;
@@ -175,8 +190,9 @@ bool icon_button(const char* id, const char* icon, const char* label, ImVec2 p, 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (ImGui::IsItemHovered())
         dl->AddRectFilled(p, {p.x + w, p.y + h}, col(IM_COL32(255, 255, 255, ImGui::IsItemActive() ? 52 : 30)), h / 2);
-    text_centred(dl, theme_loaded() ? 20 * sc : 16 * sc, {p.x + w / 2, p.y + h / 2}, col(COL_TEXT),
-                 theme_loaded() ? icon : label);
+    const ImVec2 c{p.x + w / 2, p.y + h / 2};
+    if (theme_loaded()) dl->AddText(ImGui::GetFont(), 20 * sc, icon_at(20 * sc, icon, c), col(COL_TEXT), icon);
+    else text_centred(dl, 16 * sc, c, col(COL_TEXT), label);
     return pressed;
 }
 
@@ -229,7 +245,7 @@ void draw_notice(const UiNotice& n, float sc, float a) {
     const float ry = p0.y + pady + row_h / 2;
     const ImU32 tc = ImGui::GetColorU32(COL_TEXT, a);
     if (icon) {
-        dl->AddText(ImGui::GetFont(), ip, {std::round(x), std::round(ry - ip / 2)}, tc, icon);
+        dl->AddText(ImGui::GetFont(), ip, icon_at(ip, icon, {x + iw / 2, ry}), tc, icon);
         x += iw + gap;
     }
     if (!only_icon) {
@@ -1549,6 +1565,19 @@ int ui_selftest() {
         for (ImWchar c : {CP_PLAY, CP_PAUSE, CP_VOLUME, CP_FOLDER, CP_MAXIMIZE, CP_SPARKLES, CP_SETTINGS, CP_DESKTOP,
                           CP_CPU, CP_ADJUSTMENTS, (ImWchar)'A', (ImWchar)0xE9})
             check(io.Fonts->Fonts[0]->IsGlyphInFont(c));
+        ImGui::NewFrame();  // play and pause are centred by their drawn shape (the notice, the bar's button)
+        for (const char* ic : {ICON_PLAY, ICON_PAUSE}) {
+            unsigned int cp = 0;
+            ImTextCharFromUtf8(&cp, ic, nullptr);
+            ImFontBaked* b = ImGui::GetFont()->GetFontBaked(36);
+            const ImFontGlyph* g = b->FindGlyph((ImWchar)cp);
+            const float k = 36 / b->Size;
+            check(g && g->X1 > g->X0 && std::fabs(k * g->AdvanceX - text_size(36, ic).x) <= 0.5f);  // same units
+            const ImVec2 at = icon_at(36, ic, {100, 100});  // the drawn shape's middle lands on the point
+            check(std::fabs(at.x + k * (g->X0 + g->X1) / 2 - 100) <= 0.5f &&
+                  std::fabs(at.y + k * (g->Y0 + g->Y1) / 2 - 100) <= 0.5f);
+        }
+        ImGui::EndFrame();
     } else printf("note: assets not found next to the binary, font checks skipped\n");
     ImGui::DestroyContext();
 
