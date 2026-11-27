@@ -782,6 +782,7 @@ std::vector<TrainButton> engine_buttons(const UiState& s) {
     if (s.rtx_addon) b.push_back({both ? "Remove TensorRT for RTX" : "Remove", K::RemoveTrtRtx});
     else if (!s.trt_loaded) b.push_back({rtx, K::DownloadTrtRtx});
     if (!s.trt_loaded) b.push_back({"Faster: full TensorRT (1.9 GB)", K::DownloadTensorRT});  // else: already the fastest
+    if (s.own_folder) b.push_back({"Forget folder", K::ForgetTensorRTFolder});
     b.push_back({"Choose folder...", K::ChooseTensorRTFolder});
     return b;
 }
@@ -1347,8 +1348,8 @@ int ui_selftest() {
             full.trt_addon = full.trt_loaded = true;
             check(labels(full) == (V{"Remove", "Choose folder..."}) && kind(full, 0) == UiAction::RemoveTensorRT);
             UiState own = none;  // the full TensorRT from your own folder: nothing to download or remove
-            own.trt_loaded = true;
-            check(labels(own) == (V{"Choose folder..."}));
+            own.trt_loaded = own.own_folder = true;
+            check(labels(own) == (V{"Forget folder", "Choose folder..."}) && kind(own, 0) == UiAction::ForgetTensorRTFolder);
             UiState both = full;  // both add-ons: each can be removed
             both.rtx_addon = true;
             check(labels(both) == (V{"Remove TensorRT", "Remove TensorRT for RTX", "Choose folder..."}) &&

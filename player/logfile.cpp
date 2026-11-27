@@ -125,6 +125,8 @@ bool start_log(const std::string& path, bool append) {
     g_writer = new LogWriter(write_file, LOG_CAP, log_stamp);
     int fds[2];
 #ifdef _WIN32
+    // started without an error output (from Explorer: no fd at all), stderr writes nowhere: give it one to capture
+    if (_fileno(stderr) < 0 || _get_osfhandle(_fileno(stderr)) < 0) (void)freopen("NUL", "w", stderr);
     g_efd = _fileno(stderr) >= 0 ? _fileno(stderr) : 2;
     if (_get_osfhandle(g_efd) < 0) {  // started without an error output: give it one, or the console dup fails
         int nul = _open("NUL", _O_WRONLY);
