@@ -66,6 +66,7 @@ struct UiState {
     std::string trt_status;
     bool trt_addon = false;  // loaded from the add-on (so Remove applies)
     bool trt_loaded = false;  // the full TensorRT is loaded (add-on, your folder or next to the player)
+    bool own_folder = false;  // Pixel Flow's engine comes from a folder you chose (so Forget folder applies)
     float addon_progress = -1;
     bool rtx_addon = false;     // the TensorRT for RTX add-on is installed (so Remove applies)
     float rtx_progress = -1;    // its download's progress (< 0: none)
@@ -104,7 +105,7 @@ struct UiAction {
         // the settings card; value: an Upscaler, a screen index, seconds, or 0/1
         ToggleSettings, SetUpscaler, SetDecoder, SetScreen, SetStartFullscreen, SetRememberVolume, SetHideAfter,
         SetInfoAtStart, DownloadTensorRT, CancelTensorRT, RemoveTensorRT, ChooseTensorRTFolder,
-        DownloadTrtRtx, CancelTrtRtx, RemoveTrtRtx, SetCheckUpdates,
+        DownloadTrtRtx, CancelTrtRtx, RemoveTrtRtx, ForgetTensorRTFolder, SetCheckUpdates,
         SetSettingsTab, SetRememberPosition,
         ToggleCaptions, SetCaptionTrack,  // SetCaptionTrack value: a track index, -1 off
         // the Training tab

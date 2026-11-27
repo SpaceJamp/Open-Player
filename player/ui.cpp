@@ -163,6 +163,48 @@ void text_centred(ImDrawList* dl, float px, ImVec2 c, ImU32 colour, const char* 
     dl->AddText(ImGui::GetFont(), px, {std::round(c.x - sz.x / 2), std::round(c.y - sz.y / 2)}, colour, t);
 }
 
+// An icon's ink from its pixels in the font atlas, relative to where it is drawn at px: the box of the visible pixels
+// and their centre of mass (what the eye centres: a play triangle's sits left of its box's middle). The glyph's own
+// box (X0..Y1) isn't the ink for Tabler's icons, nor is the advance box. false: no pixels to look at.
+bool icon_ink(float px, const char* icon, ImVec4& ink, ImVec2& mid) {
+    unsigned int cp = 0;
+    ImTextCharFromUtf8(&cp, icon, nullptr);
+    ImFontBaked* b = ImGui::GetFont()->GetFontBaked(px);
+    const ImFontGlyph* g = b->FindGlyph((ImWchar)cp);
+    ImTextureData* t = ImGui::GetIO().Fonts->TexData;
+    if (!g || g->X1 <= g->X0 || !t || !t->Pixels) return false;
+    const int u0 = (int)std::lround(g->U0 * t->Width), u1 = (int)std::lround(g->U1 * t->Width);
+    const int v0 = (int)std::lround(g->V0 * t->Height), v1 = (int)std::lround(g->V1 * t->Height);
+    int x0 = u1, x1 = u0 - 1, y0 = v1, y1 = v0 - 1;
+    double sum = 0, sum_x = 0, sum_y = 0;
+    for (int y = v0; y < v1; y++)
+        for (int x = u0; x < u1; x++) {
+            const unsigned char* q = (const unsigned char*)t->GetPixelsAt(x, y);
+            const int a = t->BytesPerPixel == 4 ? q[3] : q[0];
+            if (!a) continue;
+            x0 = std::min(x0, x), x1 = std::max(x1, x), y0 = std::min(y0, y), y1 = std::max(y1, y);
+            sum += a, sum_x += a * (x + 0.5), sum_y += a * (y + 0.5);
+        }
+    if (x1 < x0) return false;
+    // atlas pixels -> the glyph's box -> px
+    const float k = px / b->Size, sx = (g->X1 - g->X0) / (u1 - u0), sy = (g->Y1 - g->Y0) / (v1 - v0);
+    ink = {k * (g->X0 + (x0 - u0) * sx), k * (g->Y0 + (y0 - v0) * sy), k * (g->X0 + (x1 + 1 - u0) * sx),
+           k * (g->Y0 + (y1 + 1 - v0) * sy)};
+    mid = {k * (g->X0 + (float)(sum_x / sum - u0) * sx), k * (g->Y0 + (float)(sum_y / sum - v0) * sy)};
+    return true;
+}
+
+// Where to draw an icon so its ink's centre of mass is on c (without the atlas pixels: its advance box's middle).
+ImVec2 icon_at(float px, const char* icon, ImVec2 c) {
+    ImVec4 ink;
+    ImVec2 mid;
+    if (!icon_ink(px, icon, ink, mid)) {
+        const ImVec2 sz = text_size(px, icon);
+        return {std::round(c.x - sz.x / 2), std::round(c.y - sz.y / 2)};
+    }
+    return {std::round(c.x - mid.x), std::round(c.y - mid.y)};
+}
+
 // Buttons are circles concentric with the capsule's ends; without the icon font, pills with the text label.
 float button_w(const char* label, float h, float sc) {
     return theme_loaded() ? h : text_size(16 * sc, label).x + 24 * sc;
@@ -175,8 +217,9 @@ bool icon_button(const char* id, const char* icon, const char* label, ImVec2 p, 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (ImGui::IsItemHovered())
         dl->AddRectFilled(p, {p.x + w, p.y + h}, col(IM_COL32(255, 255, 255, ImGui::IsItemActive() ? 52 : 30)), h / 2);
-    text_centred(dl, theme_loaded() ? 20 * sc : 16 * sc, {p.x + w / 2, p.y + h / 2}, col(COL_TEXT),
-                 theme_loaded() ? icon : label);
+    const ImVec2 c{p.x + w / 2, p.y + h / 2};
+    if (theme_loaded()) dl->AddText(ImGui::GetFont(), 20 * sc, icon_at(20 * sc, icon, c), col(COL_TEXT), icon);
+    else text_centred(dl, 16 * sc, c, col(COL_TEXT), label);
     return pressed;
 }
 
@@ -229,7 +272,7 @@ void draw_notice(const UiNotice& n, float sc, float a) {
     const float ry = p0.y + pady + row_h / 2;
     const ImU32 tc = ImGui::GetColorU32(COL_TEXT, a);
     if (icon) {
-        dl->AddText(ImGui::GetFont(), ip, {std::round(x), std::round(ry - ip / 2)}, tc, icon);
+        dl->AddText(ImGui::GetFont(), ip, icon_at(ip, icon, {x + iw / 2, ry}), tc, icon);
         x += iw + gap;
     }
     if (!only_icon) {
@@ -782,6 +825,7 @@ std::vector<TrainButton> engine_buttons(const UiState& s) {
     if (s.rtx_addon) b.push_back({both ? "Remove TensorRT for RTX" : "Remove", K::RemoveTrtRtx});
     else if (!s.trt_loaded) b.push_back({rtx, K::DownloadTrtRtx});
     if (!s.trt_loaded) b.push_back({"Faster: full TensorRT (1.9 GB)", K::DownloadTensorRT});  // else: already the fastest
+    if (s.own_folder) b.push_back({"Forget folder", K::ForgetTensorRTFolder});
     b.push_back({"Choose folder...", K::ChooseTensorRTFolder});
     return b;
 }
@@ -1347,8 +1391,8 @@ int ui_selftest() {
             full.trt_addon = full.trt_loaded = true;
             check(labels(full) == (V{"Remove", "Choose folder..."}) && kind(full, 0) == UiAction::RemoveTensorRT);
             UiState own = none;  // the full TensorRT from your own folder: nothing to download or remove
-            own.trt_loaded = true;
-            check(labels(own) == (V{"Choose folder..."}));
+            own.trt_loaded = own.own_folder = true;
+            check(labels(own) == (V{"Forget folder", "Choose folder..."}) && kind(own, 0) == UiAction::ForgetTensorRTFolder);
             UiState both = full;  // both add-ons: each can be removed
             both.rtx_addon = true;
             check(labels(both) == (V{"Remove TensorRT", "Remove TensorRT for RTX", "Choose folder..."}) &&
@@ -1548,6 +1592,23 @@ int ui_selftest() {
         for (ImWchar c : {CP_PLAY, CP_PAUSE, CP_VOLUME, CP_FOLDER, CP_MAXIMIZE, CP_SPARKLES, CP_SETTINGS, CP_DESKTOP,
                           CP_CPU, CP_ADJUSTMENTS, (ImWchar)'A', (ImWchar)0xE9})
             check(io.Fonts->Fonts[0]->IsGlyphInFont(c));
+        ImGui::NewFrame();  // play and pause are centred by their drawn shape (the notice, the bar's button)
+        for (const char* ic : {ICON_PLAY, ICON_PAUSE}) {
+            ImVec4 ink;
+            ImVec2 mid;
+            const ImVec2 sz = text_size(36, ic);
+            check(icon_ink(36, ic, ink, mid) && ink.z - ink.x > 10 && ink.w - ink.y > 10 && ink.z - ink.x < sz.x &&
+                  ink.w - ink.y < sz.y);  // an icon-sized shape, inside its box
+            check(mid.x > ink.x && mid.x < ink.z && mid.y > ink.y && mid.y < ink.w);
+            const ImVec2 at = icon_at(36, ic, {100, 100});  // the ink's centre of mass lands on the point
+            check(std::fabs(at.x + mid.x - 100) <= 0.5f && std::fabs(at.y + mid.y - 100) <= 0.5f);
+            if (!strcmp(ic, ICON_PAUSE)) {  // two equal bars: centre of mass and box agree
+                check(std::fabs(mid.x - (ink.x + ink.z) / 2) <= 0.5f && std::fabs(mid.y - (ink.y + ink.w) / 2) <= 0.5f);
+            } else {  // a right-pointing triangle: its centre of mass is towards its back edge
+                check(mid.x < (ink.x + ink.z) / 2 - 2);
+            }
+        }
+        ImGui::EndFrame();
     } else printf("note: assets not found next to the binary, font checks skipped\n");
     ImGui::DestroyContext();
 

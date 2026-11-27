@@ -1034,6 +1034,7 @@ int main(int argc, char** argv) {
                 us.versions = {engine_line(engine, trt_line(trt_from, trt_ver, trt_why), rtx_ver, rtx_why),
                                trt_line(trt_from, trt_ver, trt_why), rtx_vsr_line(rtx_tried, rtx_ok), driver_line()};
                 us.trt_addon = trt_from == TrtFrom::AddOn, us.trt_loaded = trt_from != TrtFrom::None;
+                us.own_folder = trt_from == TrtFrom::UserFolder || (engine == Engine::Rtx && !saved.rtx_folder.empty() && !rtx_from_addon());
                 us.rtx_addon = std::filesystem::exists(std::filesystem::u8path(rtx_addon_dir()) / RTX_DLL);
                 if (now() - training_read_at >= 1) {  // training.json, once a second
                     training_read_at = now();
@@ -1164,6 +1165,10 @@ int main(int argc, char** argv) {
                     }
                         break;
                     case UiAction::ChooseTensorRTFolder: show_folder_dialog(); break;
+                    case UiAction::ForgetTensorRTFolder:  // back to the add-ons (or their downloads)
+                        saved.trt_folder = cfg.trt_folder = "", saved.rtx_folder = cfg.rtx_folder = "", save_prefs();
+                        reopen("Forgetting your TensorRT folder...", true);
+                        break;
                     case UiAction::SetCheckUpdates: saved.check_updates = cfg.check_updates = a.value != 0, save_prefs(); break;
                     case UiAction::SetSettingsTab: saved.settings_tab = cfg.settings_tab = (int)a.value, save_prefs(); break;
                     case UiAction::ToggleCaptions: set_captions_on(!cfg.captions, -1); break;
