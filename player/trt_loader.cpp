@@ -1,4 +1,5 @@
 #include "trt_loader.h"
+#include "rtx_backend.h"
 
 #include <cuda.h>
 
@@ -58,6 +59,7 @@ std::string user_data_dir() {
 }
 
 std::string addon_dir() { return (fs::u8path(user_data_dir()) / "tensorrt").u8string(); }
+std::string rtx_addon_dir() { return (fs::u8path(user_data_dir()) / "tensorrt-rtx").u8string(); }
 std::string training_addon_dir() { return (fs::u8path(user_data_dir()) / "training").u8string(); }
 std::string training_work_dir() { return (fs::u8path(user_data_dir()) / "training-work").u8string(); }
 std::string program_dir() { return exe_dir().u8string(); }
@@ -153,6 +155,103 @@ std::string driver_line() {
     return "NVIDIA driver: CUDA " + std::to_string(v / 1000) + "." + std::to_string(v % 1000 / 10);
 }
 
+Engine choose_engine(bool full_ok, bool rtx_ok) { return full_ok ? Engine::Full : rtx_ok ? Engine::Rtx : Engine::None; }
+std::string rtx_dll_name(int minor) { return "tensorrt_rtx_1_" + std::to_string(minor) + ".dll"; }
+std::string rtx_parser_name(int minor) { return "tensorrt_onnxparser_rtx_1_" + std::to_string(minor) + ".dll"; }
+
+const std::vector<int>& rtx_minors() {
+    static const std::vector<int> v = {
+#ifdef HAVE_TRT_RTX_1_8
+        8,
+#endif
+#ifdef HAVE_TRT_RTX_1_7
+        7,
+#endif
+    };
+    return v;
+}
+
+#ifdef _WIN32
+static HMODULE g_rtx = nullptr, g_rtx_parser = nullptr;  // kept loaded: the engine code takes its entry points
+#endif
+void* rtx_module() {
+#ifdef _WIN32
+    return g_rtx;
+#else
+    return nullptr;
+#endif
+}
+void* rtx_parser_module() {
+#ifdef _WIN32
+    return g_rtx_parser;
+#else
+    return nullptr;
+#endif
+}
+
+bool load_trt_rtx(const std::string& user_folder, std::string& version, int& minor, std::string& why_not) {
+    minor = -1;
+    why_not = rtx_minors().empty() ? "this build has no TensorRT for RTX" : "not installed";
+#ifdef _WIN32
+    for (int m : rtx_minors())  // newest first: a 1.8 you chose wins over the 1.7 add-on
+        for (const std::string& dir : {user_folder, rtx_addon_dir(), exe_dir().u8string()}) {
+            if (dir.empty()) continue;
+            const fs::path d = fs::u8path(dir);
+            std::error_code ec;
+            if (!fs::exists(d / rtx_dll_name(m), ec)) continue;
+            wchar_t old_dir[MAX_PATH * 2] = L"";  // the full TensorRT's folder, if load_tensorrt set it (--engine rtx)
+            GetDllDirectoryW(MAX_PATH * 2, old_dir);
+            SetDllDirectoryW(d.wstring().c_str());
+            HMODULE lib = LoadLibraryExW((d / rtx_dll_name(m)).wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+            HMODULE parser = lib ? LoadLibraryExW((d / rtx_parser_name(m)).wstring().c_str(), nullptr,
+                                                  LOAD_WITH_ALTERED_SEARCH_PATH)
+                                 : nullptr;
+            SetDllDirectoryW(old_dir);  // empty: never the current folder
+            auto ver = lib ? (int32_t(*)())GetProcAddress(lib, "getInferLibVersion") : nullptr;
+            const int v = ver ? ver() : 0;
+            if (!lib || !parser || !ver || v / 10000 != 1 || v / 100 % 100 != m) {  // the DLL must be what its name says
+                why_not = "can't load TensorRT for RTX from " + dir;
+                if (parser) FreeLibrary(parser);
+                if (lib) FreeLibrary(lib);
+                continue;
+            }
+            g_rtx = lib, g_rtx_parser = parser, version = dotted(v), minor = m;
+            return true;
+        }
+#else
+    (void)user_folder, (void)version;
+#endif
+    return false;
+}
+
+bool rtx_from_addon() {
+#ifdef _WIN32
+    wchar_t p[MAX_PATH * 2];
+    if (!g_rtx || !GetModuleFileNameW(g_rtx, p, MAX_PATH * 2)) return false;
+    std::error_code ec;
+    return fs::equivalent(fs::path(p).parent_path(), fs::u8path(rtx_addon_dir()), ec);
+#else
+    return false;
+#endif
+}
+
+std::string engine_cache_name(const std::string& onnx, int w, int h, Engine e, int rtx_minor) {
+    const std::string base = onnx + "." + std::to_string(w) + "x" + std::to_string(h);
+    if (e == Engine::Rtx) return base + ".rtx" + std::to_string(rtx_minor) + ".engine";
+#ifdef _WIN32  // plans only load on the platform that built them; WSL and Windows share the model's folder
+    return base + ".win.engine";
+#else
+    return base + ".engine";
+#endif
+}
+
+std::string engine_line(Engine e, const std::string& full_line, const std::string& rtx_version, const std::string& rtx_why) {
+    (void)rtx_why;
+    if (e == Engine::Full) return "Pixel Flow engine: TensorRT " + full_line.substr(full_line.find(':') + 2);
+    if (e == Engine::Rtx) return "Pixel Flow engine: TensorRT for RTX " + rtx_version;
+    return "Pixel Flow engine: none (download TensorRT for RTX in Settings > Upscaling)";
+}
+
 int trt_loader_selftest() {
     int fails = 0;
 #define check(cond) \
@@ -171,6 +270,36 @@ int trt_loader_selftest() {
     check(settings_parse(settings_format(s)).trt_folder == s.trt_folder);
     check(settings_parse("trt_folder=a\nb\n").trt_folder == "a");
     check(!user_data_dir().empty() && addon_dir().find(user_data_dir()) == 0);
+
+    // the engine: the full TensorRT when it's there (faster), else TensorRT for RTX
+    check(choose_engine(true, true) == Engine::Full && choose_engine(false, true) == Engine::Rtx);
+    check(choose_engine(true, false) == Engine::Full && choose_engine(false, false) == Engine::None);
+    check(engine_line(Engine::Full, "TensorRT: 11.5.0 (add-on)", "", "") == "Pixel Flow engine: TensorRT 11.5.0 (add-on)");
+    check(engine_line(Engine::Rtx, "TensorRT: not installed", "1.7.1", "") ==
+          "Pixel Flow engine: TensorRT for RTX 1.7.1");
+    check(engine_line(Engine::None, "TensorRT: not installed", "", "not installed") ==
+          "Pixel Flow engine: none (download TensorRT for RTX in Settings > Upscaling)");
+    check(rtx_dll_name(8) == "tensorrt_rtx_1_8.dll" && rtx_parser_name(7) == "tensorrt_onnxparser_rtx_1_7.dll");
+    // an engine plan is only ever read by the engine (and version) that built it
+    const std::string full = engine_cache_name("D:/m/vsr.onnx", 1920, 1080, Engine::Full, -1),
+                      r7 = engine_cache_name("D:/m/vsr.onnx", 1920, 1080, Engine::Rtx, 7),
+                      r8 = engine_cache_name("D:/m/vsr.onnx", 1920, 1080, Engine::Rtx, 8);
+#ifdef _WIN32
+    check(full == "D:/m/vsr.onnx.1920x1080.win.engine");  // today's name: existing caches stay valid
+#endif
+    check(r7 == "D:/m/vsr.onnx.1920x1080.rtx7.engine" && r8 != r7 && r7 != full);
+    // each compiled-in TensorRT for RTX copy was built with its own version's headers (1.<minor>.x)
+    for (int m : rtx_minors()) check(trt_rtx_header_version(m) / 10000 == 1 && trt_rtx_header_version(m) / 100 % 100 == m);
+#ifdef _WIN32
+    check(rtx_minors().size() >= 1);  // the build machine has an SDK: the release must carry TensorRT for RTX
+#endif
+    {  // nothing installed (a temp data folder): not loaded, and says why
+        _putenv_s("XDG_DATA_HOME", (fs::temp_directory_path() / "op-rtx-none").string().c_str());
+        std::string ver, why;
+        int minor = -1;
+        check(!load_trt_rtx("", ver, minor, why) && !why.empty() && minor == -1);
+        _putenv_s("XDG_DATA_HOME", "");
+    }
 #undef check
     return fails ? 1 : 0;
 }

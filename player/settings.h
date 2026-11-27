@@ -15,6 +15,7 @@ struct Settings {
     float volume = 1;    // 0..2
     int hide_after = 2;  // seconds the controls stay after the mouse stops: 1, 2, 3 or 5
     bool info_at_start = false;
+    std::string rtx_folder;  // the user's own TensorRT for RTX (1.8) folder; empty: the add-on
     std::string trt_folder;  // the user's own TensorRT 11.x folder; empty: the add-on or next to the program
     bool check_updates = true;      // installed copies ask GitHub for a newer release, at most once a day
     long long last_update_check = 0;  // unix time

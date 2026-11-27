@@ -82,6 +82,7 @@ std::mutex g_mu;
 FILE* g_file = nullptr;
 LogWriter* g_writer = nullptr;
 int g_console = -1, g_pipe_w = -1;
+int g_efd = 2;  // stderr's own fd: started from a terminal, main's freopen puts it on another one
 std::thread g_thread;
 
 void write_file(const std::string& s) {  // under g_mu
@@ -124,15 +125,17 @@ bool start_log(const std::string& path, bool append) {
     g_writer = new LogWriter(write_file, LOG_CAP, log_stamp);
     int fds[2];
 #ifdef _WIN32
-    if (_get_osfhandle(2) < 0) {  // started without an error output: give fd 2 one, or the console dup fails
+    g_efd = _fileno(stderr) >= 0 ? _fileno(stderr) : 2;
+    if (_get_osfhandle(g_efd) < 0) {  // started without an error output: give it one, or the console dup fails
         int nul = _open("NUL", _O_WRONLY);
-        if (nul >= 0) _dup2(nul, 2), _close(nul);
+        if (nul >= 0) _dup2(nul, g_efd), _close(nul);
     }
     if (_pipe(fds, 1 << 16, _O_BINARY | _O_NOINHERIT) != 0) return fclose(g_file), g_file = nullptr, false;
     fflush(stderr);
-    g_console = _dup(2);
-    _dup2(fds[1], 2);
-    SetStdHandle(STD_ERROR_HANDLE, (HANDLE)_get_osfhandle(2));  // libraries writing through the Win32 handle too
+    g_console = _dup(g_efd);
+    _dup2(fds[1], g_efd);
+    if (g_efd != 2) _dup2(fds[1], 2);  // what writes to fd 2 directly
+    SetStdHandle(STD_ERROR_HANDLE, (HANDLE)_get_osfhandle(g_efd));  // libraries writing through the Win32 handle too
     SetUnhandledExceptionFilter(on_crash);
 #else
     if (fcntl(2, F_GETFD) == -1) {  // started with 2>&-: otherwise pipe() would take fd 2 itself
@@ -180,9 +183,10 @@ void stop_log() {
     // put the console back on fd 2 and close every write end of the pipe, so the thread reads to the end
     // (no console copy: just close fd 2, which is the pipe's other write end)
 #ifdef _WIN32
-    if (g_console >= 0) _dup2(g_console, 2);
-    else _close(2);
-    SetStdHandle(STD_ERROR_HANDLE, (HANDLE)_get_osfhandle(2));
+    if (g_console >= 0) _dup2(g_console, g_efd);
+    else _close(g_efd);
+    if (g_efd != 2) _close(2);
+    SetStdHandle(STD_ERROR_HANDLE, (HANDLE)_get_osfhandle(g_efd));
     _close(g_pipe_w);
 #else
     if (g_console >= 0) dup2(g_console, 2);

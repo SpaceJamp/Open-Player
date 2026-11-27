@@ -43,7 +43,7 @@ Name: openwith; Description: "Add Open Player to ""Open with"" for video files"
 [Files]
 Source: "..\build-win\open-player.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; FFmpeg, SDL, dav1d and NVIDIA's RTX VSR runtime; TensorRT is an optional add-on, downloaded from NVIDIA
-Source: "..\build-win\*.dll"; Excludes: "nvinfer*,nvonnxparser*"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\build-win\*.dll"; Excludes: "nvinfer*,nvonnxparser*,tensorrt_rtx*,tensorrt_onnxparser_rtx*"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#VCRedist}\msvcp140*.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#VCRedist}\vcruntime140*.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\assets\*"; Excludes: "*.svg"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs

@@ -1,4 +1,4 @@
-// Open Player: video player that upscales with our VSR network on the GPU.
+﻿// Open Player: video player that upscales with our VSR network on the GPU.
 // decode (NVDEC) -> YUV->RGB (CUDA) -> VSR (TensorRT) -> RGBA (CUDA) -> Vulkan blit to the window
 #include <SDL3/SDL.h>
 #include <atomic>
@@ -46,6 +46,7 @@
 #include "training_addon.h"
 #include "training_run.h"
 #include "captions.h"
+#include "keepup.h"
 #include "update.h"
 #ifdef HAVE_RTX_VSR
 #include "rtx_vsr.h"
@@ -85,7 +86,8 @@ static std::vector<ScreenInfo> list_screens(std::vector<SDL_DisplayID>* ids = nu
     return out;
 }
 
-static int check(const char* model, TrtFrom trt_from, const std::string& trt_ver, const std::string& trt_why) {
+static int check(const char* model, TrtFrom trt_from, const std::string& trt_ver, const std::string& trt_why,
+                 Engine engine, int rtx_minor) {
     printf("Open Player %s\nLog: %s\n", OPEN_PLAYER_BUILD, log_file().c_str());
     int fails = 0;
     auto line = [&](const char* verdict, const char* what, const std::string& detail) {
@@ -153,8 +155,8 @@ static int check(const char* model, TrtFrom trt_from, const std::string& trt_ver
     printf("INFO  %s\nINFO  %s\n", rtx_vsr_line(true, rtx).c_str(), driver_line().c_str());
     // no model is normal: nobody gets one, everyone trains their own Pixel Flow
     if (!std::filesystem::exists(model)) line("INFO", "Model", std::string(model) + " not found: train your own Pixel Flow");
-    else if (trt_from == TrtFrom::None) line("WARN", "Model", std::string(model) + ": needs TensorRT to run");
-    else line(Vsr::selftest(model) == 0 ? "PASS" : "FAIL", "Model", model);
+    else if (engine == Engine::None) line("WARN", "Model", std::string(model) + ": needs TensorRT for RTX to run");
+    else line(Vsr::selftest(model, engine, rtx_minor) == 0 ? "PASS" : "FAIL", "Model", model);
     printf(fails ? "%d problem(s) found\n" : "all good\n", fails);
     return fails ? 1 : 0;
 }
@@ -179,7 +181,7 @@ int main(int argc, char** argv) {
         if (no_handle(STD_ERROR_HANDLE)) freopen("CONOUT$", "w", stderr);
     }
 #endif
-    const char *path = nullptr, *model = "vsr.onnx", *collect_dir = nullptr;
+    const char *path = nullptr, *model = "vsr.onnx", *collect_dir = nullptr, *engine_flag = nullptr;
     bool vsr_on = true, selftest = false, checking = false, stats = false, fullscreen = false, want_rtx = true,
          cpu_decode = false, start_paused = false, model_given = false;
     int screen = 0;  // --screen N, counted from 1; 0 = the primary display
@@ -196,6 +198,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = true;
         else if (!strcmp(argv[i], "--stats")) stats = true;
         else if (!strcmp(argv[i], "--selftest")) selftest = true;
+        else if (!strcmp(argv[i], "--engine") && i + 1 < argc) engine_flag = argv[++i];  // developers: full|rtx
         else if (!strcmp(argv[i], "--check")) checking = true;
         else if (!strcmp(argv[i], "--uitest")) return ui_selftest();
         else if (!strcmp(argv[i], "--version")) return printf("Open Player %s\n", OPEN_PLAYER_BUILD), 0;
@@ -230,18 +233,37 @@ int main(int argc, char** argv) {
     finish_pending_addon_removal();  // "Remove" while its DLLs were in use
     finish_pending_training_removal();
     TrtFrom trt_from = load_tensorrt(saved.trt_folder, trt_ver, trt_why);
+    // TensorRT for RTX: Pixel Flow's engine when the full TensorRT isn't there (its DLL is big: loaded only then)
+    std::string rtx_ver, rtx_why = "not needed: the full TensorRT is there";
+    int rtx_minor = -1;
+    finish_pending_rtx_removal();
+    const bool force_rtx = engine_flag && !strcmp(engine_flag, "rtx"), force_full = engine_flag && !strcmp(engine_flag, "full");
+    const bool rtx_ok = (trt_from == TrtFrom::None || force_rtx) && !force_full &&
+                        load_trt_rtx(saved.rtx_folder, rtx_ver, rtx_minor, rtx_why);
+    const Engine engine = force_rtx ? (rtx_ok ? Engine::Rtx : Engine::None)
+                                    : choose_engine(trt_from != TrtFrom::None, rtx_ok && !force_full);
+    fprintf(stderr, "%s\n", engine_line(engine, trt_line(trt_from, trt_ver, trt_why), rtx_ver, rtx_why).c_str());
     if (selftest)
-        return trt_from == TrtFrom::None ? fprintf(stderr, "%s\n", trt_line(trt_from, trt_ver, trt_why).c_str()), 1
-                                         : Vsr::selftest(model);
-    if (checking) return check(model, trt_from, trt_ver, trt_why);
+        return engine == Engine::None ? fprintf(stderr, "no Pixel Flow engine: %s; TensorRT for RTX: %s\n",
+                                                trt_line(trt_from, trt_ver, trt_why).c_str(), rtx_why.c_str()), 1
+                                      : Vsr::selftest(model, engine, rtx_minor);
+    if (checking) return check(model, trt_from, trt_ver, trt_why, engine, rtx_minor);
     // open-player.log, for playback only (a --check must not push the last crash's log out to .old.log): everything
     // below that goes to stderr is also saved, with the libraries' own messages
-    bool logging = start_log(log_file());
+    // shortcut: a chain of reopens can grow the log past the 5 MB cap (counted per process); fine while reopens are few
+    const bool reopened = getenv("OPEN_PLAYER_REOPENED") != nullptr;
+#ifdef _WIN32
+    _putenv("OPEN_PLAYER_REOPENED=");
+#else
+    unsetenv("OPEN_PLAYER_REOPENED");
+#endif
+    bool logging = start_log(log_file(), reopened);
     if (logging) {
         atexit(stop_log);
         fprintf(stderr, "Open Player %s\n", OPEN_PLAYER_BUILD);
     } else fprintf(stderr, "log: can't write %s, running without a log file\n", log_file().c_str());
-    fprintf(stderr, "%s\n%s\n", trt_line(trt_from, trt_ver, trt_why).c_str(), driver_line().c_str());
+    fprintf(stderr, "%s%s\n%s\n", engine_line(engine, trt_line(trt_from, trt_ver, trt_why), rtx_ver, rtx_why).c_str(),
+            engine == Engine::None ? (" (TensorRT for RTX: " + rtx_why + ")").c_str() : "", driver_line().c_str());
     // double-clicked with no video: ask for one, like the Open button (cancel quits)
     struct Pick {
         std::string file;
@@ -349,7 +371,7 @@ int main(int argc, char** argv) {
         // Pixel Flow: needs your own trained model and TensorRT. Nobody gets a model with the player.
         Vsr vsr;
         bool model_there = std::filesystem::exists(std::filesystem::u8path(model));
-        bool have_pxf = worth_it && model_there && trt_from != TrtFrom::None && vsr.open(model, nw, nh, st);
+        bool have_pxf = worth_it && model_there && engine != Engine::None && vsr.open(model, nw, nh, st, engine, rtx_minor);
         bool shrink = have_pxf && (nw != w || nh != h);
         __half* full = nullptr;  // full-size RGB frame, when it gets shrunk before the network
         if (shrink) cudaMalloc(&full, 3ull * w * h * 2);
@@ -357,7 +379,7 @@ int main(int argc, char** argv) {
             fprintf(stderr, "VSR off: the video (%dx%d) already fills the screen (%dx%d)\n", w, h, screen_w, screen_h);
         else if (!have_pxf)
             fprintf(stderr, "Pixel Flow: %s\n", !model_there ? "no model (vsr.onnx): train your own to use it"
-                                                : trt_from == TrtFrom::None ? "needs the TensorRT add-on"
+                                                : engine == Engine::None ? "needs TensorRT for RTX (Settings > Upscaling)"
                                                                            : "couldn't load the model");
         int s = have_pxf ? vsr.scale() : worth_it ? ms : 1;
         // NVIDIA RTX VSR goes first on Windows, and whenever Pixel Flow can't run; Pixel Flow when chosen, and on Linux.
@@ -402,6 +424,11 @@ int main(int argc, char** argv) {
         save_recent(recent_file(), recent);
         recent = existing_only(recent);  // once: on WSL each check of a /mnt/c path is slow
         int serial = media.serial(), sw = 0, sh = 0, frames_shown = 0;
+        // Pixel Flow keeping up (keepup.h): one window at a time, restarted by a seek
+        KeepUp keep;
+        int keep_serial = serial, keep_n = 0;
+        double keep_from = -1, keep_ms = 0;  // keep_from: set at the first report (now() comes later)
+        bool keep_gave_up = false;  // once per video: a fall-back (or its notice) never repeats
         float volume = cfg.remember_volume ? cfg.volume : 1;
         media.set_volume(volume);
         bool volume_unsaved = false;  // saved at most once a second while it changes, and on quit
@@ -507,7 +534,7 @@ int main(int argc, char** argv) {
                 if (!rtx_ok) why = "NVIDIA RTX isn't available on this GPU or driver";
             } else if (u == Upscaler::PixelFlow && !have_pxf) {
                 why = !model_there                ? "Pixel Flow needs your own trained model (vsr.onnx)"
-                      : trt_from == TrtFrom::None ? "Pixel Flow needs the TensorRT add-on (Settings)"
+                      : engine == Engine::None ? "Pixel Flow needs TensorRT for RTX: Download in Settings > Upscaling"
                                                   : "Pixel Flow: the model couldn't be loaded (see the log)";
 #ifdef HAVE_RTX_VSR
                 if (!rtx_tried) rtx_tried = true, rtx_ok = rtx.open(w, h, nw * s, nh * s, st);  // the fallback
@@ -558,10 +585,16 @@ int main(int argc, char** argv) {
         std::function<void()> stop_downloads;  // set below, once the downloads exist
         auto restart_with = [&](std::vector<std::string> args, const std::string& video) {
             if (stop_downloads) stop_downloads();  // cancelled (partial files deleted), not cut off by the restart
+            vsr.save_cache();  // _execv skips destructors: TensorRT for RTX's compiled kernels, for the next start
             if (cfg.remember_position) save_position();
             if (volume_unsaved) save_settings(settings_file(), saved);
             fprintf(stderr, "reopening: %s\n", video.c_str());
-            stop_log();  // the new process starts its own log; this one's last lines must reach the file first
+            stop_log();  // this one's last lines must reach the file before the new process appends to it
+#ifdef _WIN32
+            _putenv("OPEN_PLAYER_REOPENED=1");
+#else
+            setenv("OPEN_PLAYER_REOPENED", "1", 1);
+#endif
 #ifdef _WIN32
             for (auto& a : args) a = quote_arg(a);  // _execv joins the arguments with spaces and doesn't quote them
 #endif
@@ -624,6 +657,15 @@ int main(int argc, char** argv) {
         std::string addon_error;
         auto stop_addon = [&] {
             if (addon_thread.joinable()) addon_cancel = true, addon_thread.join();
+        };
+        // the TensorRT for RTX add-on download, the same way
+        std::thread rtx_thread;
+        std::atomic<bool> rtx_running{false}, rtx_done{false}, rtx_cancel{false};
+        std::atomic<uint64_t> rtx_got{0};
+        bool rtx_dl_ok = false;
+        std::string rtx_dl_error;
+        auto stop_rtx = [&] {
+            if (rtx_thread.joinable()) rtx_cancel = true, rtx_thread.join();
         };
         // Training from the player: the Training add-on's download (then the start it was for), the export, and a
         // count of the videos in the chosen folder each run on a thread of their own
@@ -760,6 +802,7 @@ int main(int argc, char** argv) {
         }
         stop_downloads = [&] {
             stop_addon();
+            stop_rtx();
             stop_training_threads();
             if (upd_dl.joinable()) upd_cancel = true, upd_dl.join();
         };
@@ -790,6 +833,12 @@ int main(int argc, char** argv) {
                 else if (!addon_cancel) post(ICON_X, "TensorRT: " + addon_error, -1, 4);
             }
             if (addon_running && settings_open) dirty = true;  // the progress bar moves
+            if (rtx_done) {
+                rtx_thread.join(), rtx_running = false, rtx_done = false;
+                if (rtx_dl_ok && !rtx_cancel) reopen("TensorRT for RTX installed: reopening...", true);
+                else if (!rtx_cancel) post(ICON_X, "TensorRT for RTX: " + rtx_dl_error, -1, 4);
+            }
+            if (rtx_running && settings_open) dirty = true;
             if (tr_done) {  // the Training add-on arrived (or didn't): start the run it was downloaded for
                 tr_thread.join(), tr_running = false, tr_done = false, tr_addon = training_addon_installed();
                 if (tr_ok) start_own_training(tr_mode);
@@ -799,8 +848,8 @@ int main(int argc, char** argv) {
             if (ex_done) {  // the export finished: load the new Pixel Flow by reopening
                 ex_thread.join(), ex_running = false, ex_done = false;
                 if (!ex_ok) training_error = ex_error;
-                else if (trt_from == TrtFrom::None)
-                    post(ICON_SPARKLES, "Pixel Flow is ready; it also needs TensorRT: Settings > Upscaling > Download", -1, 6);
+                else if (engine == Engine::None)
+                    post(ICON_SPARKLES, "Pixel Flow is ready; it also needs TensorRT for RTX: Settings > Upscaling > Download", -1, 6);
                 else reopen("Loading your Pixel Flow...", true);
             }
             if (!pending_restart.empty() && now() >= restart_at) {
@@ -826,9 +875,26 @@ int main(int argc, char** argv) {
                         saved.train_videos = cfg.train_videos = p, save_prefs(), count_videos(p);
                         continue;
                     }
+                    if (e.user.code == 1 && !std::filesystem::exists(std::filesystem::u8path(p) / "nvinfer_11.dll", ec)) {
+                        std::string rtx_dir;  // TensorRT for RTX (1.8 or another version this build has)?
+                        for (int m : rtx_minors())
+                            for (auto d : {std::filesystem::u8path(p), std::filesystem::u8path(p) / "bin"})
+                                if (rtx_dir.empty() && std::filesystem::exists(d / rtx_dll_name(m), ec) &&
+                                    std::filesystem::exists(d / rtx_parser_name(m), ec))
+                                    rtx_dir = d.u8string();
+                        if (!rtx_dir.empty() && trt_from != TrtFrom::None) {
+                            post(ICON_X, "The full TensorRT is loaded and goes first: remove it to use TensorRT for RTX", -1, 4);
+                            continue;
+                        }
+                        if (!rtx_dir.empty()) {
+                            saved.rtx_folder = cfg.rtx_folder = rtx_dir, save_prefs();
+                            reopen("Loading your TensorRT for RTX...", true);
+                            continue;
+                        }
+                    }
                     if (e.user.code != 1) open_video(p);
                     else if (!std::filesystem::exists(std::filesystem::u8path(p) / "nvinfer_11.dll", ec))
-                        post(ICON_X, "No TensorRT 11 in that folder (nvinfer_11.dll)", -1, 3);
+                        post(ICON_X, "No TensorRT 11 or TensorRT for RTX in that folder", -1, 3);
                     else saved.trt_folder = cfg.trt_folder = p, save_prefs(), reopen("Loading your TensorRT...", true);
                 }
                 else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) disp.resized(), dirty = true;
@@ -958,15 +1024,17 @@ int main(int argc, char** argv) {
                 us.vsr_available = have_vsr || us.rtx_available;
                 us.pxf_available = have_pxf;
                 us.pxf_why = !model_there ? "No Pixel Flow model: train your own (vsr.onnx)"
-                             : trt_from == TrtFrom::None ? "Needs the TensorRT add-on"
+                             : engine == Engine::None ? "Needs TensorRT for RTX: Download in Settings > Upscaling"
                                                          : "The model couldn't be loaded (see the log)";
                 us.nvdec_available = media.nvdec() || cfg.cpu_decode;  // CPU chosen: NVDEC wasn't even tried
                 if (!worth_it) us.vsr_unavailable = "the video already fills the screen";
                 else if (!have_pxf && !us.rtx_available)
                     us.vsr_unavailable = "NVIDIA RTX VSR isn't available here, and " + us.pxf_why;
                 us.build = OPEN_PLAYER_BUILD;
-                us.versions = {trt_line(trt_from, trt_ver, trt_why), rtx_vsr_line(rtx_tried, rtx_ok), driver_line()};
-                us.trt_addon = trt_from == TrtFrom::AddOn;
+                us.versions = {engine_line(engine, trt_line(trt_from, trt_ver, trt_why), rtx_ver, rtx_why),
+                               trt_line(trt_from, trt_ver, trt_why), rtx_vsr_line(rtx_tried, rtx_ok), driver_line()};
+                us.trt_addon = trt_from == TrtFrom::AddOn, us.trt_loaded = trt_from != TrtFrom::None;
+                us.rtx_addon = std::filesystem::exists(std::filesystem::u8path(rtx_addon_dir()) / RTX_DLL);
                 if (now() - training_read_at >= 1) {  // training.json, once a second
                     training_read_at = now();
                     tr_ckpt = has_checkpoint(), tr_best = has_best();
@@ -1012,7 +1080,14 @@ int main(int argc, char** argv) {
                     us.update_build = upd->info.build;
                 else if (!installed_copy()) us.update_status = "Updates: only for installed copies";
                 else if (upd->done && !upd->error.empty()) us.update_status = "Last check: " + upd->error;
-                us.trt_status = trt_line(trt_from, trt_ver, trt_why);
+                us.trt_status = engine_line(engine, trt_line(trt_from, trt_ver, trt_why), rtx_ver, rtx_why);
+                if (rtx_running) {
+                    us.rtx_progress = (float)((double)rtx_got / RTX_WHEEL_SIZE);
+                    us.trt_status = rtx_got >= RTX_WHEEL_SIZE ? std::string("Checking and unpacking TensorRT for RTX...")
+                                                              : "Downloading TensorRT for RTX from NVIDIA: " +
+                                                                    std::to_string(rtx_got / (1 << 20)) + " of " +
+                                                                    std::to_string(RTX_WHEEL_SIZE >> 20) + " MB";
+                }
                 if (addon_running) {
                     us.addon_progress = (float)((double)addon_got / TRT_WHEEL_SIZE);
                     us.trt_status = addon_got >= TRT_WHEEL_SIZE  // then the 2 GB hash and the unpacking
@@ -1070,6 +1145,24 @@ int main(int argc, char** argv) {
                         });
                         break;
                     case UiAction::CancelTensorRT: addon_cancel = true; break;
+                    case UiAction::DownloadTrtRtx:
+                        if (rtx_running) break;
+                        stop_rtx();
+                        rtx_running = true, rtx_done = false, rtx_cancel = false, rtx_got = 0;
+                        rtx_thread = std::thread([&] {
+                            rtx_dl_ok = install_trt_rtx_addon([&](uint64_t got, uint64_t) { rtx_got = got; }, rtx_cancel,
+                                                              rtx_dl_error);
+                            rtx_done = true;
+                        });
+                        break;
+                    case UiAction::CancelTrtRtx: rtx_cancel = true; break;
+                    case UiAction::RemoveTrtRtx:
+                    {
+                        const bool in_use = engine == Engine::Rtx && rtx_from_addon();
+                        remove_trt_rtx_addon(in_use);  // in use: removed when the player reopens
+                        if (in_use) reopen("Removing TensorRT for RTX...", true);
+                    }
+                        break;
                     case UiAction::ChooseTensorRTFolder: show_folder_dialog(); break;
                     case UiAction::SetCheckUpdates: saved.check_updates = cfg.check_updates = a.value != 0, save_prefs(); break;
                     case UiAction::SetSettingsTab: saved.settings_tab = cfg.settings_tab = (int)a.value, save_prefs(); break;
@@ -1166,6 +1259,26 @@ int main(int argc, char** argv) {
             if (now() - last_report >= 1) {  // info overlay; with --stats also one JSON line
                 last_report = now();
                 int dropped = media.take_dropped();
+                if (serial != keep_serial || keep_from < 0)
+                    keep_serial = serial, keep_from = now(), keep = {}, keep_ms = 0, keep_n = 0;
+                if (now() - keep_from < 5) keep = {}, keep_ms = 0, keep_n = 0;  // catching up after a start or seek
+                else if (vsr_on && !use_rtx && !paused && !keep_gave_up) {
+                    keep.window_s += 1, keep.frames += diag.shown, keep.dropped += dropped;
+                    keep_ms += diag.vsr.sum, keep_n += diag.vsr.n;
+                    keep.since_start = now() - keep_from;
+                    keep.pxf_ms = keep_n ? keep_ms / keep_n : 0;
+                    keep.frame_ms = media.fps() > 0 ? 1000 / media.fps() : 0;
+                    if (should_fall_back(keep)) {
+                        keep_gave_up = true;
+                        fprintf(stderr, "Pixel Flow can't keep up: %d of %d frames dropped, %.1f ms per frame (%.1f ms "
+                                        "available)\n", keep.dropped, keep.frames + keep.dropped, keep.pxf_ms, keep.frame_ms);
+                        // this video only: set_upscaler doesn't save; without RTX VSR it stays on Pixel Flow
+                        const bool to_rtx = set_upscaler(Upscaler::Rtx);
+                        post(ICON_SPARKLES, to_rtx ? "Pixel Flow can't keep up here: using NVIDIA RTX VSR"
+                                                   : "Pixel Flow can't keep up here", -1, 4);
+                    } else if (keep.window_s >= 10)  // judged a full window: the next one starts afresh
+                        keep = {}, keep_ms = 0, keep_n = 0;
+                }
                 char buf[512];
                 snprintf(buf, sizeof buf,
                          "GPU      %s (%s)\nDecode   %s\nVideo    %dx%d @ %.2f fps\nScreen   %dx%d\n"
@@ -1195,6 +1308,7 @@ int main(int argc, char** argv) {
         }
         if (cfg.remember_position) save_position();
         stop_addon();  // a download in progress is cancelled (its partial file is deleted)
+        stop_rtx();
         stop_training_threads();  // the training run itself keeps going: it's a process of its own
         if (upd_dl.joinable()) upd_cancel = true, upd_dl.join();
         if (upd_check.joinable()) upd_check.detach();  // owns its shared state; may still be waiting on the network

@@ -109,6 +109,17 @@ if ($rtx) { Write-Host "  ok       NVIDIA RTX Video SDK in $RtxSdk" }
 else {
     Write-Host "  optional NVIDIA RTX Video SDK - for RTX VSR, unzip it from https://developer.nvidia.com/rtx-video-sdk to $RtxSdk"
 }
+# TensorRT for RTX (Pixel Flow without the full TensorRT): 1.7 is what the add-on downloads, 1.8 is used when present.
+# player/CMakeLists.txt finds each as C:\TensorRT-RTX-1.<minor>.* with include\NvInfer.h.
+foreach ($minor in 7, 8) {
+    $sdk = Get-ChildItem "C:\TensorRT-RTX-1.$minor.*" -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path "$($_.FullName)\include\NvInfer.h" } | Sort-Object Name | Select-Object -Last 1
+    if ($sdk) { Write-Host "  ok       TensorRT for RTX 1.$minor SDK in $($sdk.FullName)" }
+    else {
+        Write-Host ("  optional TensorRT for RTX 1.$minor SDK - for Pixel Flow without the full TensorRT, unzip it from " +
+                    "https://developer.nvidia.com/tensorrt-rtx to C:\ (it makes C:\TensorRT-RTX-1.$minor.<build>)")
+    }
+}
 
 if (-not $NoTraining) {
     # per user, with the py launcher, no admin needed (the default asks for admin for the launcher)
